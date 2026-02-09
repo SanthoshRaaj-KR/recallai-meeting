@@ -1,0 +1,4 @@
+myenv
+.env
+env*.mp3
+*.wav
