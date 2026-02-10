@@ -7,9 +7,13 @@ from gtts import gTTS
 load_dotenv()
 API_KEY = os.getenv("RECALL_API_KEY")
 
-NGROK_URL = "https://e483-136-233-9-107.ngrok-free.app" # 👈 CHECK THIS!
-WEBHOOK_URL = f"{NGROK_URL}/recall-webhook"
-MEETING_URL = "https://meet.google.com/tbj-zoxz-tea" # 👈 CHECK THIS!
+NGROK_DOMAIN = "cc3f-136-233-9-107.ngrok-free.app" 
+
+WEBSOCKET_URL = f"wss://{NGROK_DOMAIN}/recall-audio-stream"
+
+print(f"🔌 Connecting to: {WEBSOCKET_URL}")
+
+MEETING_URL = "https://meet.google.com/bss-wfru-dkd" 
 
 print(f"🚀 Spawning bot...")
 
@@ -18,6 +22,7 @@ payload = {
     "meeting_url": MEETING_URL,
     "bot_name": "GenrealAI",
     "recording_config": {
+        "audio_mixed_raw": {},
         "transcript": {
             "provider": {
                 "recallai_streaming": {
@@ -28,9 +33,12 @@ payload = {
         },
         "realtime_endpoints": [
             {
-                "type": "webhook",
-                "url": WEBHOOK_URL,
-                "events": ["transcript.data"]
+                "type": "websocket",
+                "url": WEBSOCKET_URL,
+                "events": [
+                    "audio_mixed_raw.data",    # The Raw Audio
+                    "transcript.partial_data"  # The Real-time Text
+                ]
             }
         ]
     }
