@@ -13,7 +13,7 @@ WEBSOCKET_URL = f"wss://{NGROK_DOMAIN}/recall-audio-stream"
 
 print(f"🔌 Connecting to: {WEBSOCKET_URL}")
 
-MEETING_URL = "https://meet.google.com/vuq-vxnt-uei" 
+MEETING_URL = "https://meet.google.com/hqh-hcce-fxq" 
 
 print(f"🚀 Spawning bot...")
 

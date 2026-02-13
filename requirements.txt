@@ -7,3 +7,4 @@ gTTS
 websockets
 pyaudio
 openai
+openai-agents

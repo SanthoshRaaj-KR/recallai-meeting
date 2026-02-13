@@ -3,6 +3,17 @@ import os
 import base64
 from dotenv import load_dotenv
 from gtts import gTTS
+import random
+
+
+ML_QUESTIONS = [
+    "Explain what overfitting is in machine learning.",
+    "What is the difference between bias and variance?",
+    "How does gradient descent work?",
+    "What is the purpose of a validation set?",
+    "Explain the difference between supervised and unsupervised learning."
+]
+
 
 load_dotenv()
 API_KEY = os.getenv("RECALL_API_KEY")
@@ -20,6 +31,30 @@ print("-------------------------------------------------")
 print("⌨️  Type a message and press Enter to make the bot speak.")
 print("❌  Type 'exit' to quit.")
 print("-------------------------------------------------")
+
+# 🎯 Ask random ML question automatically
+question = random.choice(ML_QUESTIONS)
+print(f"\n🤖 Interview Bot asks: {question}")
+
+tts = gTTS(question, lang='en')
+tts.save("temp_question.mp3")
+
+with open("temp_question.mp3", "rb") as audio_file:
+    audio_b64 = base64.b64encode(audio_file.read()).decode('utf-8')
+
+requests.post(
+    f"https://ap-northeast-1.recall.ai/api/v1/bot/{BOT_ID}/output_audio/",
+    headers={
+        "Authorization": f"Token {API_KEY}",
+        "Content-Type": "application/json"
+    },
+    json={
+        "kind": "mp3",
+        "b64_data": audio_b64
+    }
+)
+
+print("🧠 Waiting for candidate answer...\n")
 
 while True:
     user_text = input("You > ")
