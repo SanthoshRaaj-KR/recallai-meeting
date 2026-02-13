@@ -100,6 +100,8 @@ RULES:
 1. Ignore grammar. Focus on "Is the thought finished?"
 2. If the text ends abruptly (e.g. "and...", "the...", "because..."), mark is_complete=False.
 3. If the text is a complete thought, mark is_complete=True.
+4. If the text ends with i am not sure , can you we skip , or pass or i dont know , or something like that mark as complete, because it indicates the user has finished their thought even if they are uncertain.
+5. If the same text comes for more than 3 times assume the person has answered.
 """,
     output_type=SentenceScoreOutput,
 )
