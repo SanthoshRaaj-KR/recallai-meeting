@@ -7,13 +7,13 @@ from gtts import gTTS
 load_dotenv()
 API_KEY = os.getenv("RECALL_API_KEY")
 
-NGROK_DOMAIN = "dcaa-136-233-9-107.ngrok-free.app" 
+NGROK_DOMAIN = "b88a-136-233-9-107.ngrok-free.app" 
 
 WEBSOCKET_URL = f"wss://{NGROK_DOMAIN}/recall-audio-stream"
 
 print(f"🔌 Connecting to: {WEBSOCKET_URL}")
 
-MEETING_URL = "https://meet.google.com/ess-efhf-rag" 
+MEETING_URL = "https://meet.google.com/cqs-whty-xnv" 
 
 print(f"🚀 Spawning bot...")
 
