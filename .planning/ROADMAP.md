@@ -60,7 +60,7 @@ Plans:
   5. Summaries generated from incomplete transcripts are tagged `status: partial`; only `status: complete` summaries are indexed for search by default
 **Plans**: 2 plans
 Plans:
-- [ ] 03-01-PLAN.md — SummarizerAgent with structured output and action item attribution
+- [x] 03-01-PLAN.md — SummarizerAgent with structured output and action item attribution
 - [ ] 03-02-PLAN.md — Ingestion wiring: auto-trigger on disconnect + /summarize Slack command
 
 ### Phase 4: Retrieval + Hybrid RAG
@@ -95,6 +95,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Prerequisite Refactor | 2/2 | Complete    | 2026-04-04 |
 | 2. Storage Foundation | 2/2 | Complete    | 2026-04-04 |
-| 3. Ingestion Pipeline | 0/2 | Planned | - |
+| 3. Ingestion Pipeline | 1/2 | In Progress|  |
 | 4. Retrieval + Hybrid RAG | 0/TBD | Not started | - |
 | 5. Orchestration + Answer Path | 0/TBD | Not started | - |

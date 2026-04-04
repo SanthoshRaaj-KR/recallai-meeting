@@ -19,8 +19,8 @@
 
 - [ ] **INGEST-01**: Bot automatically generates and stores a meeting summary when a meeting ends (triggered by Recall.ai end event or timeout heuristic)
 - [ ] **INGEST-02**: User can trigger summary generation at any time via `/summarize` Slack slash command
-- [ ] **INGEST-03**: Summary extraction produces structured output: decisions made, topics discussed, action items, participant list
-- [ ] **INGEST-04**: Each action item in the summary is attributed to the specific participant who committed to it
+- [x] **INGEST-03**: Summary extraction produces structured output: decisions made, topics discussed, action items, participant list
+- [x] **INGEST-04**: Each action item in the summary is attributed to the specific participant who committed to it
 
 ### Retrieval (RETR)
 
@@ -38,7 +38,7 @@
 ### Agents (AGENT)
 
 - [ ] **AGENT-01**: An Orchestrator Agent classifies incoming queries (live meeting vs. memory query vs. action item query) and delegates to specialist agents using `Agent.as_tool()` pattern
-- [ ] **AGENT-02**: A Summarizer Agent processes meeting transcripts and produces structured meeting summaries, storing results to both Pinecone and the JSON metadata file
+- [x] **AGENT-02**: A Summarizer Agent processes meeting transcripts and produces structured meeting summaries, storing results to both Pinecone and the JSON metadata file
 - [ ] **AGENT-03**: A Retriever Agent executes the hybrid RAG pipeline (dense + sparse + metadata filters) and returns ranked, relevant meeting context
 - [ ] **AGENT-04**: An Answer Agent synthesizes retrieved context into a natural language response formatted for Slack
 - [ ] **AGENT-05**: A Date Resolution Agent parses natural language date expressions into UTC date ranges and triggers a clarification loop when the expression is ambiguous or returns no results
@@ -75,8 +75,8 @@
 | INFRA-04 | Phase 2 | Complete |
 | INGEST-01 | Phase 3 | Pending |
 | INGEST-02 | Phase 3 | Pending |
-| INGEST-03 | Phase 3 | Pending |
-| INGEST-04 | Phase 3 | Pending |
+| INGEST-03 | Phase 3 | Complete |
+| INGEST-04 | Phase 3 | Complete |
 | RETR-01 | Phase 4 | Pending |
 | RETR-02 | Phase 5 | Pending |
 | RETR-03 | Phase 5 | Pending |
@@ -85,7 +85,7 @@
 | QUERY-03 | Phase 5 | Pending |
 | QUERY-04 | Phase 5 | Pending |
 | AGENT-01 | Phase 5 | Pending |
-| AGENT-02 | Phase 3 | Pending |
+| AGENT-02 | Phase 3 | Complete |
 | AGENT-03 | Phase 4 | Pending |
 | AGENT-04 | Phase 5 | Pending |
 | AGENT-05 | Phase 5 | Pending |
