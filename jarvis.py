@@ -722,11 +722,87 @@ def extract_wake_and_query(text: str) -> Optional[str]:
     return None
 
 # ============================================================================
+# ROLLING PIPELINE FLUSH
+# ============================================================================
+
+async def _flush_sentence_buffer(bot_id: str, force: bool = False) -> None:
+    """Atomically drain the sentence buffer, summarize, and write to .md.
+
+    Acquires _sentence_buffer_lock to check thresholds and drain atomically.
+    LLM call and file I/O happen outside the lock to avoid blocking other
+    buffer appends.
+
+    Args:
+        bot_id: Recall.ai bot ID (reserved for future per-meeting routing).
+        force: If True, flush regardless of count/time thresholds (D-02 interrupt flush).
+    """
+    global _sentence_buffer, _last_flush_ts, _current_batch_num, _current_meeting_entry, _meeting_header_written
+
+    async with _sentence_buffer_lock:
+        now = time.time()
+        sentence_count = len(_split_sentences("\n".join(_sentence_buffer)))
+        time_elapsed = now - _last_flush_ts if _last_flush_ts > 0 else 0
+
+        should_flush = force or (
+            sentence_count >= SENTENCE_FLUSH_COUNT or
+            (time_elapsed >= SENTENCE_FLUSH_SECONDS and sentence_count > 0)
+        )
+
+        if not should_flush or not _sentence_buffer:
+            return
+
+        batch_lines = list(_sentence_buffer)
+        _sentence_buffer.clear()
+        _last_flush_ts = now
+        _current_batch_num += 1
+        batch_num = _current_batch_num
+
+    # Outside lock: LLM call + file I/O (non-blocking, but no lock held)
+    batch_transcript = "\n".join(batch_lines)
+    try:
+        batch_summary = await rolling_summarizer.run(batch_transcript)
+    except Exception as e:
+        logger.error("RollingSummarizerAgent error: %s", e)
+        return
+
+    if _current_meeting_entry is None:
+        logger.warning("_flush_sentence_buffer: no meeting entry, skipping write")
+        return
+
+    # macOS: %-I not portable — use %I:%M %p and strip leading zero manually
+    raw_time = datetime.datetime.now().strftime("%I:%M %p")
+    timestamp_str = raw_time.lstrip("0") or raw_time  # "10:32 AM" or "9:05 AM"
+
+    # Write header on first batch of a meeting
+    if not _meeting_header_written:
+        await meeting_writer.write_meeting_header(_current_meeting_entry)
+        _meeting_header_written = True
+
+    await meeting_writer.append_batch(
+        entry=_current_meeting_entry,
+        batch_num=batch_num,
+        batch_summary=batch_summary,
+        timestamp_str=timestamp_str,
+    )
+
+    # Update participants and overview in index entry, then upsert
+    _current_meeting_entry.participants = list(
+        set(_current_meeting_entry.participants) | set(batch_summary.speakers)
+    )
+    _current_meeting_entry.overview = batch_summary.summary_text  # latest batch as overview
+    await meeting_writer.upsert_index(_current_meeting_entry)
+    logger.info("Flushed batch %d (%d lines) to .md", batch_num, len(batch_lines))
+
+
+# ============================================================================
 # WEBSOCKET HANDLER
 # ============================================================================
 
 @app.websocket("/recall-audio-stream")
 async def websocket_endpoint(websocket: WebSocket):
+    # Declare all module-level buffer state as global for this function scope
+    global _current_meeting_entry, _meeting_header_written, _current_batch_num, _last_flush_ts
+
     await websocket.accept()
     logger.info("WebSocket connected")
 
@@ -758,6 +834,29 @@ async def websocket_endpoint(websocket: WebSocket):
             if not bot_id:
                 continue
 
+            # Initialize meeting entry on first transcript (needed for .md header)
+            if _current_meeting_entry is None:
+                meeting_id = await state.get_bot_id() or f"mtg-{int(time.time())}"
+                today_str = datetime.date.today().isoformat()
+                _current_meeting_entry = MeetingIndexEntry(
+                    meeting_id=meeting_id,
+                    title=MEETING_CHANNEL_NAME,
+                    date=today_str,
+                    channel_id=SLACK_CHANNEL_ID,
+                    channel_name=MEETING_CHANNEL_NAME,
+                    overview="",
+                    md_path=str(Path("meetings") / SLACK_CHANNEL_ID / f"{today_str}_{meeting_id}.md"),
+                    participants=[],
+                    start_ts=int(time.time()),
+                )
+                _meeting_header_written = False
+
+            # Append to rolling sentence buffer (D-01 rolling pipeline)
+            async with _sentence_buffer_lock:
+                _sentence_buffer.append(f"{participant}: {sentence}")
+            # Check flush thresholds (non-blocking fire-and-forget)
+            asyncio.create_task(_flush_sentence_buffer(bot_id))
+
             query = extract_wake_and_query(sentence)
 
             if query is not None:
@@ -765,10 +864,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 if query:
                     # Full query in same sentence: "Hey Jarvis, what's the weather in Paris?"
                     await state.set_listening(False)
+                    # D-02: Flush buffer immediately on wake word; reset so next batch starts fresh
+                    await _flush_sentence_buffer(bot_id, force=True)
                     asyncio.create_task(handle_query(query, bot_id))
                 else:
                     # Bare wake word: "Hey Jarvis" -- acknowledge and wait for next chunk
                     await state.set_listening(True)
+                    # D-02: Flush buffer immediately on wake word; reset so next batch starts fresh
+                    await _flush_sentence_buffer(bot_id, force=True)
                     asyncio.create_task(asyncio.to_thread(speak, "Yes?", bot_id))
 
             elif await state.is_listening():
@@ -793,6 +896,20 @@ async def websocket_endpoint(websocket: WebSocket):
             asyncio.create_task(run_ingestion_pipeline(transcript, meeting_meta))
         else:
             logger.info("No transcript to summarize on disconnect")
+
+        # D-10: Final buffer flush to .md on disconnect (alongside Pinecone ingestion)
+        if _current_meeting_entry is not None:
+            _disconnect_bot_id = await state.get_bot_id() or ""
+            asyncio.create_task(_flush_sentence_buffer(_disconnect_bot_id, force=True))
+
+        # Reset buffer state so next meeting starts clean
+        _current_meeting_entry = None
+        _meeting_header_written = False
+        _current_batch_num = 0
+        _last_flush_ts = 0.0
+        async with _sentence_buffer_lock:
+            _sentence_buffer.clear()
+
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
 
