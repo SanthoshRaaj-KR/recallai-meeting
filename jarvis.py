@@ -29,9 +29,15 @@ import uvicorn
 from dotenv import load_dotenv
 from gtts import gTTS
 from openai import OpenAI
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 
 from meeting_state import MeetingState
+from storage.metadata_store import MetadataStore
+from storage.pinecone_client import PineconeClient
+from storage.models import MeetingRecord
+from agents.summarizer import SummarizerAgent
+from slack_bolt.async_app import AsyncApp
+from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
 
 # ============================================================================
@@ -52,6 +58,14 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
 
+# Ingestion pipeline env vars
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "meeting-memory")
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
+SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
+SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID", "")
+MEETING_CHANNEL_NAME = os.getenv("MEETING_CHANNEL_NAME", "general")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -63,6 +77,27 @@ app = FastAPI()
 # ============================================================================
 
 state = MeetingState()
+
+# ============================================================================
+# INGESTION SINGLETONS
+# ============================================================================
+
+metadata_store = MetadataStore(base_dir="./meetings")
+
+pinecone_client: Optional[PineconeClient] = None
+if PINECONE_API_KEY:
+    pinecone_client = PineconeClient(
+        api_key=PINECONE_API_KEY,
+        index_name=PINECONE_INDEX_NAME,
+    )
+
+summarizer = SummarizerAgent()
+
+slack_app: Optional[AsyncApp] = None
+slack_handler: Optional[AsyncSlackRequestHandler] = None
+if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
+    slack_app = AsyncApp(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
+    slack_handler = AsyncSlackRequestHandler(slack_app)
 
 # ============================================================================
 # RECALL.AI HELPERS
@@ -186,6 +221,92 @@ async def _run_tool(name: str, args: dict) -> str:
     if name == "get_meeting_summary":
         return await _get_meeting_transcript()
     return f"Unknown tool: {name}"
+
+# ============================================================================
+# INGESTION PIPELINE
+# ============================================================================
+
+async def run_ingestion_pipeline(transcript: str, meeting_meta: dict) -> MeetingRecord:
+    """
+    Run the full ingestion pipeline: summarize -> write disk -> conditionally upsert Pinecone.
+
+    Args:
+        transcript: Raw formatted transcript string ("Speaker: text\n...").
+        meeting_meta: Dict with meeting_id, channel_id, channel_name, start_ts,
+                      end_ts, duration_seconds, participants.
+
+    Returns:
+        The stored MeetingRecord.
+    """
+    record = await summarizer.run(transcript=transcript, meeting_meta=meeting_meta)
+    await metadata_store.write(record)
+    logger.info("Wrote meeting record to disk: %s", record.meeting_id)
+
+    if record.status == "complete" and pinecone_client is not None:
+        pinecone_client.upsert_meeting(record)
+        logger.info("Upserted meeting to Pinecone: %s", record.meeting_id)
+    elif record.status == "partial":
+        logger.info(
+            "Skipping Pinecone upsert for partial summary: %s (chars=%s)",
+            record.meeting_id,
+            record.raw_transcript_chars,
+        )
+
+    return record
+
+
+# Register /summarize Slack slash command when Slack is configured
+if slack_app is not None:
+    @slack_app.command("/summarize")
+    async def handle_summarize_command(ack, say, client, command):
+        """Slack slash command: trigger ingestion pipeline and post structured summary."""
+        await ack()  # Acknowledge within 3 seconds — Slack requirement
+
+        transcript = await state.get_transcript()
+        if not transcript or transcript == "[No transcript yet]":
+            await say("No meeting transcript available yet. Is the bot in a meeting?")
+            return
+
+        meeting_id = await state.get_bot_id() or f"mtg-{int(time.time())}"
+        meeting_meta = {
+            "meeting_id": meeting_id,
+            "channel_id": command.get("channel_id", SLACK_CHANNEL_ID),
+            "channel_name": command.get("channel_name", MEETING_CHANNEL_NAME),
+            "start_ts": int(time.time()) - 3600,
+            "end_ts": int(time.time()),
+            "duration_seconds": None,
+            "participants": [],
+        }
+
+        try:
+            record = await run_ingestion_pipeline(transcript, meeting_meta)
+        except Exception as e:
+            logger.error("Ingestion pipeline failed: %s", e)
+            await say(f"Summary failed: {e}")
+            return
+
+        # Format structured summary for Slack
+        action_items_text = "\n".join(
+            f"  \u2022 {item.owner}: {item.task}" + (f" (due: {item.due})" if item.due else "")
+            for item in record.action_items
+        ) or "  None identified"
+
+        decisions_text = "\n".join(f"  \u2022 {d}" for d in record.decisions) or "  None identified"
+        topics_text = "\n".join(f"  \u2022 {t}" for t in record.topics_covered) or "  None identified"
+        participants_text = ", ".join(record.participants) or "Unknown"
+
+        status_tag = " _(partial \u2014 meeting may still be in progress)_" if record.status == "partial" else ""
+
+        message = (
+            f"*Meeting Summary*{status_tag}\n\n"
+            f"*Participants:* {participants_text}\n\n"
+            f"*Topics Discussed:*\n{topics_text}\n\n"
+            f"*Decisions:*\n{decisions_text}\n\n"
+            f"*Action Items:*\n{action_items_text}"
+        )
+
+        target_channel = command.get("channel_id", SLACK_CHANNEL_ID)
+        await client.chat_postMessage(channel=target_channel, text=message)
 
 # ============================================================================
 # JARVIS QUERY HANDLER
@@ -327,7 +448,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 asyncio.create_task(handle_query(sentence, bot_id))
 
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
+        logger.info("WebSocket disconnected — triggering ingestion pipeline")
+        transcript = await state.get_transcript()
+        if transcript and transcript != "[No transcript yet]":
+            meeting_id = await state.get_bot_id() or f"mtg-{int(time.time())}"
+            meeting_meta = {
+                "meeting_id": meeting_id,
+                "channel_id": SLACK_CHANNEL_ID,
+                "channel_name": MEETING_CHANNEL_NAME,
+                "start_ts": int(time.time()) - 3600,  # approximate; real start_ts from state if available
+                "end_ts": int(time.time()),
+                "duration_seconds": None,
+                "participants": [],  # SummarizerAgent extracts participants from transcript
+            }
+            asyncio.create_task(run_ingestion_pipeline(transcript, meeting_meta))
+        else:
+            logger.info("No transcript to summarize on disconnect")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
 
@@ -335,6 +471,14 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/health")
 async def health():
     return await state.get_health_snapshot()
+
+
+@app.post("/slack/events")
+async def slack_events(req: Request):
+    """Route all Slack events (slash commands, actions) through the Bolt handler."""
+    if slack_handler is None:
+        return {"error": "Slack not configured"}
+    return await slack_handler.handle(req)
 
 # ============================================================================
 # ENTRY POINT

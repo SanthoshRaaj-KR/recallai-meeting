@@ -69,10 +69,16 @@ def mock_metadata_store(mocker):
 
 @pytest.fixture
 def mock_pinecone_client(mocker):
-    """Patch PineconeClient.upsert_meeting (sync call, use MagicMock)."""
-    mock = MagicMock(return_value=None)
-    mocker.patch("jarvis.pinecone_client.upsert_meeting", mock)
-    return mock
+    """Patch jarvis.pinecone_client with a MagicMock so upsert_meeting is available.
+
+    Since PINECONE_API_KEY is not set in test env, jarvis.pinecone_client is None.
+    We replace the module-level attribute with a MagicMock so the pipeline can call
+    upsert_meeting on it without real API calls.
+    """
+    mock_client = MagicMock()
+    mock_client.upsert_meeting = MagicMock(return_value=None)
+    mocker.patch("jarvis.pinecone_client", mock_client)
+    return mock_client.upsert_meeting
 
 
 # ============================================================================
@@ -333,7 +339,8 @@ class TestSummarizeSlashCommand:
         client.chat_postMessage.assert_called_once()
         call_kwargs = client.chat_postMessage.call_args
         assert call_kwargs.kwargs["channel"] == "C99999"
-        assert COMPLETE_RECORD.summary_text in call_kwargs.kwargs["text"]
+        # The Slack message contains decisions, topics, and participants (not raw summary_text)
+        assert COMPLETE_RECORD.decisions[0] in call_kwargs.kwargs["text"]
 
     async def test_summarize_command_acknowledges_immediately(self, mocker):
         """The /summarize command calls ack() before running the pipeline."""
