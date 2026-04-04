@@ -13,7 +13,7 @@ This milestone adds institutional memory to the existing Jarvis bot by building 
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Prerequisite Refactor** - Thread-safe meeting state and test infrastructure that unblocks all agent work (completed 2026-04-04)
-- [ ] **Phase 2: Storage Foundation** - Pinecone index + MetadataStore + PineconeClient with verified schema
+- [x] **Phase 2: Storage Foundation** - Pinecone index + MetadataStore + PineconeClient with verified schema (completed 2026-04-04)
 - [ ] **Phase 3: Ingestion Pipeline** - SummarizerAgent that writes real meeting records to disk and Pinecone
 - [ ] **Phase 4: Retrieval + Hybrid RAG** - RetrieverAgent with dense + sparse + metadata filter search
 - [ ] **Phase 5: Orchestration + Answer Path** - Full end-to-end query pipeline: natural language question to spoken answer
@@ -46,7 +46,7 @@ Plans:
 **Plans**: 2 plans
 Plans:
 - [x] 02-01-PLAN.md — MeetingRecord Pydantic model + MetadataStore (JSON read/write to disk)
-- [ ] 02-02-PLAN.md — PineconeClient (index creation + hybrid upsert + filtered query)
+- [x] 02-02-PLAN.md — PineconeClient (index creation + hybrid upsert + filtered query)
 
 ### Phase 3: Ingestion Pipeline
 **Goal**: At the end of any meeting, a structured summary is automatically stored to both disk and Pinecone with full metadata and speaker attribution
@@ -91,7 +91,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Prerequisite Refactor | 2/2 | Complete    | 2026-04-04 |
-| 2. Storage Foundation | 1/2 | In Progress|  |
+| 2. Storage Foundation | 2/2 | Complete   | 2026-04-04 |
 | 3. Ingestion Pipeline | 0/TBD | Not started | - |
 | 4. Retrieval + Hybrid RAG | 0/TBD | Not started | - |
 | 5. Orchestration + Answer Path | 0/TBD | Not started | - |
