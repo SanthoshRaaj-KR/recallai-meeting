@@ -30,7 +30,14 @@ Bob: I'll own the RFC. Can I get it reviewed by Thursday?
 Alice: Sure. I'll do the review. Also, we decided to drop the v1 endpoints.
 Carol: Agreed. Let's move forward with v2 only.
 Bob: One more thing — Carol, can you update the changelog?
-Carol: Yes, I'll handle that."""
+Carol: Yes, I'll handle that.
+Alice: Great, so the plan is: Bob writes the RFC, I review it, and Carol updates the changelog.
+Bob: Correct. And let's make sure the API contract is finalized before we start the migration.
+Carol: Agreed. I'll also draft a migration guide for the v1 to v2 transition.
+Alice: Good idea. Let's set a deadline of next Friday for the full migration guide.
+Carol: Works for me. I'll have a draft ready by Wednesday for review.
+Bob: I'll review Carol's draft on Thursday then.
+Alice: Perfect. We are aligned on everything."""
 
 # Verify SAMPLE_TRANSCRIPT >= 500 chars for long-transcript tests
 assert len(SAMPLE_TRANSCRIPT) >= 500, (
