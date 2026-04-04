@@ -31,6 +31,13 @@ from gtts import gTTS
 from openai import OpenAI
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 
+# Fix agents namespace collision: openai-agents SDK owns "agents" package;
+# extend its __path__ so "from agents.summarizer import ..." also resolves.
+import agents as _sdk_agents
+_LOCAL_AGENTS_DIR = os.path.join(os.path.dirname(__file__), "agents")
+if _LOCAL_AGENTS_DIR not in _sdk_agents.__path__:
+    _sdk_agents.__path__.append(_LOCAL_AGENTS_DIR)
+
 from meeting_state import MeetingState
 from storage.metadata_store import MetadataStore
 from storage.pinecone_client import PineconeClient
@@ -189,6 +196,70 @@ def speak(text: str, bot_id: str) -> bool:
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+
+# Pattern to find potential sentence-end split points: .!? followed by whitespace.
+_SENTENCE_END = re.compile(r'[.!?]\s+')
+
+# Known abbreviations whose trailing period should NOT be treated as a sentence boundary.
+_ABBREVS = frozenset({'Dr', 'Mr', 'Mrs', 'Ms', 'Prof', 'Sr', 'Jr', 'St', 'vs', 'etc', 'ie', 'eg'})
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentence-level chunks at .!? boundaries.
+
+    Identifies split points at terminal punctuation (.!?) followed by whitespace
+    and skips known abbreviations (Dr, Mr, Mrs, Ms, Prof, etc.) so they are not
+    treated as sentence boundaries.
+    Returns a list of non-empty stripped strings.
+    Single sentences with no terminal punctuation are returned as-is.
+    Empty input returns [].
+
+    Args:
+        text: Answer text to split.
+
+    Returns:
+        List of sentence strings.
+    """
+    if not text or not text.strip():
+        return []
+    text = text.strip()
+    result = []
+    last = 0
+    for m in _SENTENCE_END.finditer(text):
+        chunk = text[last:m.end()].strip()
+        # Check the word immediately before the punctuation — skip known abbreviations
+        word_match = re.search(r'(\w+)[.!?]\s*$', chunk)
+        if word_match and word_match.group(1) in _ABBREVS:
+            continue
+        result.append(chunk)
+        last = m.end()
+    tail = text[last:].strip()
+    if tail:
+        result.append(tail)
+    return result
+
+
+async def speak_chunked(text: str, bot_id: str) -> None:
+    """Convert text to speech and play it, sentence by sentence.
+
+    Splits text at sentence boundaries and calls speak() via asyncio.to_thread
+    for each chunk sequentially. The first sentence begins playing while
+    subsequent sentences are still being TTS-processed — reducing the silence
+    gap between LLM answer generation and first audible word.
+
+    Preserves the asyncio.to_thread pattern from the existing speak() calls
+    so blocking gTTS/HTTP calls stay off the event loop.
+
+    Args:
+        text: Full answer text to speak.
+        bot_id: Recall.ai bot ID for audio output endpoint.
+    """
+    chunks = _split_sentences(text)
+    if not chunks:
+        return
+    for chunk in chunks:
+        await asyncio.to_thread(speak, chunk, bot_id)
+
 
 # ============================================================================
 # TOOLS AVAILABLE TO JARVIS
