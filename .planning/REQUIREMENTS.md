@@ -26,7 +26,7 @@
 
 - [x] **RETR-01**: Query pipeline executes hybrid search combining dense semantic vectors, sparse BM25 vectors, and Pinecone metadata filters in a single query
 - [x] **RETR-02**: System parses natural language date expressions ("last Wednesday", "two weeks ago", "last standup") into exact UTC date ranges using dateparser
-- [ ] **RETR-03**: When a date query matches more than one meeting, bot presents a disambiguation list showing meeting titles, channels, and dates — user selects which meeting to query
+- [x] **RETR-03**: When a date query matches more than one meeting, bot presents a disambiguation list showing meeting titles, channels, and dates — user selects which meeting to query
 
 ### Query Types (QUERY)
 
@@ -37,7 +37,7 @@
 
 ### Agents (AGENT)
 
-- [ ] **AGENT-01**: An Orchestrator Agent classifies incoming queries (live meeting vs. memory query vs. action item query) and delegates to specialist agents using `Agent.as_tool()` pattern
+- [x] **AGENT-01**: An Orchestrator Agent classifies incoming queries (live meeting vs. memory query vs. action item query) and delegates to specialist agents using `Agent.as_tool()` pattern
 - [x] **AGENT-02**: A Summarizer Agent processes meeting transcripts and produces structured meeting summaries, storing results to both Pinecone and the JSON metadata file
 - [x] **AGENT-03**: A Retriever Agent executes the hybrid RAG pipeline (dense + sparse + metadata filters) and returns ranked, relevant meeting context
 - [x] **AGENT-04**: An Answer Agent synthesizes retrieved context into a natural language response formatted for Slack
@@ -79,12 +79,12 @@
 | INGEST-04 | Phase 3 | Complete |
 | RETR-01 | Phase 4 | Complete |
 | RETR-02 | Phase 5 | Complete |
-| RETR-03 | Phase 5 | Pending |
+| RETR-03 | Phase 5 | Complete |
 | QUERY-01 | Phase 5 | Complete |
 | QUERY-02 | Phase 5 | Complete |
 | QUERY-03 | Phase 5 | Complete |
 | QUERY-04 | Phase 5 | Complete |
-| AGENT-01 | Phase 5 | Pending |
+| AGENT-01 | Phase 5 | Complete |
 | AGENT-02 | Phase 3 | Complete |
 | AGENT-03 | Phase 4 | Complete |
 | AGENT-04 | Phase 5 | Complete |

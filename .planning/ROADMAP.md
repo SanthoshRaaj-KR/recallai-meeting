@@ -90,7 +90,7 @@ Plans:
 **Plans**: 3 plans
 Plans:
 - [x] 05-01-PLAN.md — DateResolutionAgent (NL date parsing) + AnswerAgent (synthesis with attribution)
-- [ ] 05-02-PLAN.md — OrchestratorAgent (classify, route, disambiguate, orchestrate)
+- [x] 05-02-PLAN.md — OrchestratorAgent (classify, route, disambiguate, orchestrate)
 - [ ] 05-03-PLAN.md — Slack /ask command + disambiguation wiring in jarvis.py
 
 ## Progress
@@ -104,4 +104,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Storage Foundation | 2/2 | Complete    | 2026-04-04 |
 | 3. Ingestion Pipeline | 2/2 | Complete   | 2026-04-04 |
 | 4. Retrieval + Hybrid RAG | 2/2 | Complete   | 2026-04-04 |
-| 5. Orchestration + Answer Path | 1/3 | In Progress|  |
+| 5. Orchestration + Answer Path | 2/3 | In Progress|  |
