@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Prerequisite Refactor** - Thread-safe meeting state and test infrastructure that unblocks all agent work (completed 2026-04-04)
 - [x] **Phase 2: Storage Foundation** - Pinecone index + MetadataStore + PineconeClient with verified schema (completed 2026-04-04)
 - [x] **Phase 3: Ingestion Pipeline** - SummarizerAgent that writes real meeting records to disk and Pinecone (completed 2026-04-04)
-- [ ] **Phase 4: Retrieval + Hybrid RAG** - RetrieverAgent with dense + sparse + metadata filter search
+- [x] **Phase 4: Retrieval + Hybrid RAG** - RetrieverAgent with dense + sparse + metadata filter search (completed 2026-04-04)
 - [ ] **Phase 5: Orchestration + Answer Path** - Full end-to-end query pipeline: natural language question to spoken answer
 
 ## Phase Details
@@ -75,7 +75,7 @@ Plans:
 **Plans**: 2 plans
 Plans:
 - [x] 04-01-PLAN.md — Alpha-weighted hybrid query + Pinecone reranker (extends PineconeClient)
-- [ ] 04-02-PLAN.md — RetrieverAgent wrapping PineconeClient.retrieve() with RetrievalResult output
+- [x] 04-02-PLAN.md — RetrieverAgent wrapping PineconeClient.retrieve() with RetrievalResult output
 
 ### Phase 5: Orchestration + Answer Path
 **Goal**: Users can ask natural language questions about past meetings via Slack or voice and receive accurate, attributed answers
@@ -99,5 +99,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Prerequisite Refactor | 2/2 | Complete    | 2026-04-04 |
 | 2. Storage Foundation | 2/2 | Complete    | 2026-04-04 |
 | 3. Ingestion Pipeline | 2/2 | Complete   | 2026-04-04 |
-| 4. Retrieval + Hybrid RAG | 1/2 | In Progress|  |
+| 4. Retrieval + Hybrid RAG | 2/2 | Complete   | 2026-04-04 |
 | 5. Orchestration + Answer Path | 0/TBD | Not started | - |

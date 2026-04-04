@@ -39,7 +39,7 @@
 
 - [ ] **AGENT-01**: An Orchestrator Agent classifies incoming queries (live meeting vs. memory query vs. action item query) and delegates to specialist agents using `Agent.as_tool()` pattern
 - [x] **AGENT-02**: A Summarizer Agent processes meeting transcripts and produces structured meeting summaries, storing results to both Pinecone and the JSON metadata file
-- [ ] **AGENT-03**: A Retriever Agent executes the hybrid RAG pipeline (dense + sparse + metadata filters) and returns ranked, relevant meeting context
+- [x] **AGENT-03**: A Retriever Agent executes the hybrid RAG pipeline (dense + sparse + metadata filters) and returns ranked, relevant meeting context
 - [ ] **AGENT-04**: An Answer Agent synthesizes retrieved context into a natural language response formatted for Slack
 - [ ] **AGENT-05**: A Date Resolution Agent parses natural language date expressions into UTC date ranges and triggers a clarification loop when the expression is ambiguous or returns no results
 
@@ -86,6 +86,6 @@
 | QUERY-04 | Phase 5 | Pending |
 | AGENT-01 | Phase 5 | Pending |
 | AGENT-02 | Phase 3 | Complete |
-| AGENT-03 | Phase 4 | Pending |
+| AGENT-03 | Phase 4 | Complete |
 | AGENT-04 | Phase 5 | Pending |
 | AGENT-05 | Phase 5 | Pending |
