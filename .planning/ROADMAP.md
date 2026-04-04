@@ -12,7 +12,7 @@ This milestone adds institutional memory to the existing Jarvis bot by building 
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Prerequisite Refactor** - Thread-safe meeting state and test infrastructure that unblocks all agent work
+- [x] **Phase 1: Prerequisite Refactor** - Thread-safe meeting state and test infrastructure that unblocks all agent work (completed 2026-04-04)
 - [ ] **Phase 2: Storage Foundation** - Pinecone index + MetadataStore + PineconeClient with verified schema
 - [ ] **Phase 3: Ingestion Pipeline** - SummarizerAgent that writes real meeting records to disk and Pinecone
 - [ ] **Phase 4: Retrieval + Hybrid RAG** - RetrieverAgent with dense + sparse + metadata filter search
@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 Plans:
 - [x] 01-01-PLAN.md — MeetingState class with asyncio.Lock + pinned dependencies + pytest config
-- [ ] 01-02-PLAN.md — Refactor jarvis.py to use MeetingState + concurrent integration tests
+- [x] 01-02-PLAN.md — Refactor jarvis.py to use MeetingState + concurrent integration tests
 
 ### Phase 2: Storage Foundation
 **Goal**: A meeting record can be written as JSON to disk and as a vector to Pinecone, then queried by channel and date
@@ -87,7 +87,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Prerequisite Refactor | 0/2 | Planning complete | - |
+| 1. Prerequisite Refactor | 2/2 | Complete   | 2026-04-04 |
 | 2. Storage Foundation | 0/TBD | Not started | - |
 | 3. Ingestion Pipeline | 0/TBD | Not started | - |
 | 4. Retrieval + Hybrid RAG | 0/TBD | Not started | - |
