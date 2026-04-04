@@ -14,6 +14,7 @@ Example commands:
 """
 
 import asyncio
+import datetime
 import os
 import re
 import sys
@@ -21,6 +22,7 @@ import json
 import time
 import base64
 import logging
+from pathlib import Path
 from threading import Thread
 from typing import Optional
 
@@ -41,12 +43,15 @@ if _LOCAL_AGENTS_DIR not in _sdk_agents.__path__:
 from meeting_state import MeetingState
 from storage.metadata_store import MetadataStore
 from storage.pinecone_client import PineconeClient
-from storage.models import MeetingRecord
+from storage.models import MeetingRecord, MeetingIndexEntry
 from agents.summarizer import SummarizerAgent
 from agents.retriever import RetrieverAgent
 from agents.date_resolver import DateResolutionAgent
 from agents.answer_agent import AnswerAgent
 from agents.orchestrator import OrchestratorAgent, OrchestratorResult
+from agents.rolling_summarizer import RollingSummarizerAgent
+from agents.meeting_writer import MeetingWriterAgent
+from agents.history_manager import HistoryManagerAgent
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
@@ -76,6 +81,10 @@ SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
 SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID", "")
 MEETING_CHANNEL_NAME = os.getenv("MEETING_CHANNEL_NAME", "general")
+
+# Rolling pipeline flush thresholds (D-01)
+SENTENCE_FLUSH_COUNT = int(os.getenv("SENTENCE_FLUSH_COUNT", "10"))   # N sentences
+SENTENCE_FLUSH_SECONDS = int(os.getenv("SENTENCE_FLUSH_SECONDS", "120"))  # T seconds (2 min)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -125,6 +134,26 @@ if pinecone_client is not None:
         date_resolver=DateResolutionAgent(),
         answer_agent=AnswerAgent(),
     )
+
+# ============================================================================
+# ROLLING PIPELINE SINGLETONS
+# ============================================================================
+
+rolling_summarizer = RollingSummarizerAgent()
+meeting_writer = MeetingWriterAgent(base_dir="./meetings")
+history_manager = HistoryManagerAgent(
+    meeting_writer=meeting_writer,
+    answer_agent=AnswerAgent(),
+    retriever=retriever_agent,  # None if Pinecone not configured — D-09 fallback
+)
+
+# Module-level rolling buffer state — protected by asyncio.Lock (Phase 1 mandate)
+_sentence_buffer: list[str] = []           # accumulated "Speaker: text" lines
+_sentence_buffer_lock = asyncio.Lock()
+_last_flush_ts: float = 0.0                # time.time() of last flush
+_current_batch_num: int = 0               # increments on each flush
+_current_meeting_entry: Optional[MeetingIndexEntry] = None  # active meeting entry
+_meeting_header_written: bool = False
 
 # ============================================================================
 # RECALL.AI HELPERS
