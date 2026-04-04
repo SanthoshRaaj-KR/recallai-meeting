@@ -19,6 +19,9 @@ Institutional memory for teams — every decision, action item, and discussion p
 - ✓ FastAPI + Uvicorn HTTP/WebSocket server — existing
 - ✓ asyncio.Lock-protected MeetingState class — no race conditions (INFRA-01, Validated in Phase 1: Prerequisite Refactor)
 - ✓ pytest + pytest-asyncio test harness — 13 tests passing including concurrent stress tests (Validated in Phase 1: Prerequisite Refactor)
+- ✓ `MeetingRecord` Pydantic model — single canonical schema driving JSON + Pinecone, 65 tests passing (INFRA-03, Validated in Phase 2: Storage Foundation)
+- ✓ `MetadataStore` — async JSON read/write at `meetings/{channel_id}/{meeting_id}.json` (INFRA-03, Validated in Phase 2: Storage Foundation)
+- ✓ `PineconeClient` — hybrid upsert (dense + sparse via `pinecone-sparse-english-v0`) + filtered query by `channel_id`/`start_ts` (INFRA-02, INFRA-04, Validated in Phase 2: Storage Foundation)
 
 ### Active
 
@@ -82,4 +85,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-04 after Phase 1: Prerequisite Refactor*
+*Last updated: 2026-04-04 after Phase 2: Storage Foundation*
