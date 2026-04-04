@@ -36,6 +36,10 @@ from storage.metadata_store import MetadataStore
 from storage.pinecone_client import PineconeClient
 from storage.models import MeetingRecord
 from agents.summarizer import SummarizerAgent
+from agents.retriever import RetrieverAgent
+from agents.date_resolver import DateResolutionAgent
+from agents.answer_agent import AnswerAgent
+from agents.orchestrator import OrchestratorAgent, OrchestratorResult
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
@@ -98,6 +102,22 @@ slack_handler: Optional[AsyncSlackRequestHandler] = None
 if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
     slack_app = AsyncApp(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
     slack_handler = AsyncSlackRequestHandler(slack_app)
+
+# ============================================================================
+# ORCHESTRATION SINGLETONS
+# ============================================================================
+
+_pending_disambig: dict[str, list[dict]] = {}  # keyed by user_id
+
+retriever_agent: Optional[RetrieverAgent] = None
+orchestrator: Optional[OrchestratorAgent] = None
+if pinecone_client is not None:
+    retriever_agent = RetrieverAgent(pinecone_client=pinecone_client)
+    orchestrator = OrchestratorAgent(
+        retriever=retriever_agent,
+        date_resolver=DateResolutionAgent(),
+        answer_agent=AnswerAgent(),
+    )
 
 # ============================================================================
 # RECALL.AI HELPERS
@@ -255,7 +275,119 @@ async def run_ingestion_pipeline(transcript: str, meeting_meta: dict) -> Meeting
     return record
 
 
-# Register /summarize Slack slash command when Slack is configured
+def _is_memory_query(query: str) -> bool:
+    """Return True if the query looks like a memory/history question.
+
+    Used by handle_query() to route wake-word queries through the orchestrator
+    rather than the existing weather/live-transcript tool-calling loop.
+    """
+    ql = query.lower()
+    patterns = [
+        "what did we", "what happened", "what was decided",
+        "last week", "last monday", "last tuesday", "last wednesday",
+        "last thursday", "last friday", "yesterday", "two weeks",
+        "action items", "what did i commit", "my tasks",
+        "summarize last", "recap of", "tell me about the meeting",
+    ]
+    return any(p in ql for p in patterns)
+
+
+async def _handle_memory_query(
+    query: str,
+    user_id: str,
+    channel_id: str,
+) -> OrchestratorResult:
+    """Route a memory query through the OrchestratorAgent.
+
+    Returns OrchestratorResult. If orchestrator is not configured (no Pinecone),
+    returns a static OrchestratorResult with a configuration error message.
+    """
+    if orchestrator is None:
+        return OrchestratorResult(
+            query=query,
+            query_type="memory_query",
+            answer="Memory queries are not configured — PINECONE_API_KEY is missing.",
+            source_meeting_ids=[],
+            confidence="low",
+        )
+    return await orchestrator.run(query=query, user_id=user_id, channel_id=channel_id)
+
+
+async def _handle_ask(ack, say, client, command):
+    """Slack slash command: /ask <question about past meetings>
+
+    Defined at module level so it can be imported in tests.
+    Registered with slack_app below if Slack is configured.
+    """
+    await ack()
+
+    query = (command.get("text") or "").strip()
+    user_id = command.get("user_id", "unknown")
+    channel_id = command.get("channel_id", SLACK_CHANNEL_ID)
+
+    if not query:
+        await say("Usage: `/ask <your question about past meetings>`\n"
+                  "Example: `/ask what did we decide about the API design?`")
+        return
+
+    try:
+        result = await _handle_memory_query(query, user_id, channel_id)
+    except Exception as e:
+        logger.error("OrchestratorAgent error in /ask: %s", e)
+        await say(f"Sorry, I encountered an error: {e}")
+        return
+
+    if result.needs_disambiguation:
+        lines = ["*Multiple meetings found. Please reply with the number of the meeting you mean:*\n"]
+        for opt in result.disambiguation_options:
+            lines.append(f"{opt['index']}. *{opt['title']}* — #{opt['channel']} on {opt['date']}")
+        _pending_disambig[user_id] = result.disambiguation_options
+        await say("\n".join(lines))
+    else:
+        confidence_tag = f" _(confidence: {result.confidence})_" if result.confidence != "high" else ""
+        await say(f"{result.answer}{confidence_tag}")
+
+
+async def _handle_message_disambig(message, say, client):
+    """Handle user replies to disambiguation prompts.
+
+    Defined at module level so it can be imported in tests.
+    Registered with slack_app below if Slack is configured.
+
+    If a user has a pending disambiguation and sends a digit, resolve
+    to the selected meeting and re-run the query scoped to that meeting_id.
+    """
+    user_id = message.get("user", "")
+    text = (message.get("text") or "").strip()
+    channel_id = message.get("channel", "")
+
+    pending = _pending_disambig.get(user_id)
+    if not pending:
+        return  # No pending disambiguation for this user
+
+    if not text.isdigit():
+        return  # Not a number reply — ignore
+
+    selection = int(text)
+    if selection < 1 or selection > len(pending):
+        await say(f"Please reply with a number between 1 and {len(pending)}.")
+        return
+
+    chosen = pending[selection - 1]
+    del _pending_disambig[user_id]
+
+    # Re-run the query scoped to the chosen meeting
+    scoped_query = f"Tell me about meeting {chosen['meeting_id']}"
+    try:
+        result = await _handle_memory_query(scoped_query, user_id, channel_id)
+    except Exception as e:
+        await say(f"Error retrieving that meeting: {e}")
+        return
+
+    await say(result.answer)
+
+
+# Register /summarize, /ask, and message handlers when Slack is configured
 if slack_app is not None:
     @slack_app.command("/summarize")
     async def handle_summarize_command(ack, say, client, command):
@@ -308,6 +440,9 @@ if slack_app is not None:
         target_channel = command.get("channel_id", SLACK_CHANNEL_ID)
         await client.chat_postMessage(channel=target_channel, text=message)
 
+    slack_app.command("/ask")(_handle_ask)
+    slack_app.event("message")(_handle_message_disambig)
+
 # ============================================================================
 # JARVIS QUERY HANDLER
 # ============================================================================
@@ -315,6 +450,28 @@ if slack_app is not None:
 async def handle_query(query: str, bot_id: str) -> None:
     """Send a user query to Jarvis and speak the response back in the meeting."""
     logger.info(f"Query: {query!r}")
+
+    # Route memory questions through the orchestrator if configured
+    if orchestrator is not None and _is_memory_query(query):
+        try:
+            result = await _handle_memory_query(
+                query=query,
+                user_id="voice",
+                channel_id=SLACK_CHANNEL_ID,
+            )
+            if not result.needs_disambiguation:
+                await asyncio.to_thread(speak, result.answer, bot_id)
+                return
+            # Disambiguation in voice context: speak the options aloud
+            spoken = "Multiple meetings found. " + " ".join(
+                f"Option {opt['index']}: {opt['title']} from {opt['date']}."
+                for opt in result.disambiguation_options
+            )
+            await asyncio.to_thread(speak, spoken, bot_id)
+            return
+        except Exception as e:
+            logger.error("Orchestrator error in handle_query: %s", e)
+            # Fall through to existing tool-calling loop on error
 
     system_prompt = (
         f"You are {BOT_NAME}, an AI assistant attending a meeting. "
