@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-04-04T12:01:21.521Z"
+status: executing
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-04-04T12:15:45.816Z"
 last_activity: 2026-04-04
 progress:
   total_phases: 5
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
+  total_plans: 4
+  completed_plans: 3
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** Institutional memory for teams — every decision, action item, and discussion from every meeting is instantly queryable
-**Current focus:** Phase 1 — Prerequisite Refactor
+**Current focus:** Phase 2 — Storage Foundation
 
 ## Current Position
 
-Phase: 2
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 2 (Storage Foundation) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-04-04
 
 Progress: [░░░░░░░░░░] 0%
@@ -54,6 +54,7 @@ Progress: [░░░░░░░░░░] 0%
 *Updated after each plan completion*
 | Phase 01-prerequisite-refactor P01 | 2 | 2 tasks | 5 files |
 | Phase 01-prerequisite-refactor P02 | 5 | 2 tasks | 2 files |
+| Phase 02-storage-foundation P01 | 2 | 1 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,8 @@ Recent decisions affecting current work:
 - [Phase Phase 01]: _sync_set_state helper used for main() sync-to-async bridge — uvicorn loop not yet running when main() sets state
 - [Phase Phase 01]: asyncio.to_thread used for speak() calls in handle_query — keeps blocking HTTP off the event loop
 - [Phase Phase 01]: asyncio.create_task used for handle_query dispatch — fire-and-forget from websocket_endpoint without blocking receive loop
+- [Phase 02-storage-foundation]: All timestamp fields (start_ts, end_ts, summarized_at) are Python int — no datetime objects in model, enforced by Pydantic type annotation
+- [Phase 02-storage-foundation]: MetadataStore raises FileNotFoundError on read of nonexistent path — explicit error, not None sentinel
 
 ### Pending Todos
 
@@ -85,6 +88,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-04T11:58:43.733Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-04-04T12:15:45.813Z
+Stopped at: Completed 02-01-PLAN.md
 Resume file: None

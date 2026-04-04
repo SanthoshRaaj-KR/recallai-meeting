@@ -45,7 +45,7 @@ Plans:
   4. A Pydantic model is the single canonical schema that drives both the JSON write and the Pinecone upsert — no schema divergence possible
 **Plans**: 2 plans
 Plans:
-- [ ] 02-01-PLAN.md — MeetingRecord Pydantic model + MetadataStore (JSON read/write to disk)
+- [x] 02-01-PLAN.md — MeetingRecord Pydantic model + MetadataStore (JSON read/write to disk)
 - [ ] 02-02-PLAN.md — PineconeClient (index creation + hybrid upsert + filtered query)
 
 ### Phase 3: Ingestion Pipeline
@@ -91,7 +91,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Prerequisite Refactor | 2/2 | Complete    | 2026-04-04 |
-| 2. Storage Foundation | 0/2 | Not started | - |
+| 2. Storage Foundation | 1/2 | In Progress|  |
 | 3. Ingestion Pipeline | 0/TBD | Not started | - |
 | 4. Retrieval + Hybrid RAG | 0/TBD | Not started | - |
 | 5. Orchestration + Answer Path | 0/TBD | Not started | - |
