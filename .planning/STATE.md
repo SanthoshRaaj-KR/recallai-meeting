@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-04-04T16:37:26.651Z"
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-04-04T16:38:18.425Z"
 last_activity: 2026-04-04
 progress:
   total_phases: 6
   completed_phases: 5
   total_plans: 14
-  completed_plans: 12
+  completed_plans: 13
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 06 (budget-model-switch-and-streaming-llm-to-tts-pipeline) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-04-04
 
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 05 P05-02 | 3 minutes | 2 tasks | 2 files |
 | Phase 05-orchestration-answer-path P05-03 | 3 minutes | 2 tasks | 2 files |
 | Phase 06-budget-model-switch-and-streaming-llm-to-tts-pipeline P06-01 | 1 | 1 tasks | 1 files |
+| Phase 06 P02 | 2 minutes | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -103,6 +104,8 @@ Recent decisions affecting current work:
 - [Phase 05]: _handle_ask and _handle_message_disambig defined at module level so they are importable in tests regardless of SLACK_BOT_TOKEN
 - [Phase 05]: _handle_memory_query returns OrchestratorResult with 'not configured' answer when orchestrator is None — no exception raised
 - [Phase 06]: OrchestratorAgent tests patch AsyncOpenAI to prevent OPENAI_API_KEY requirement at test time
+- [Phase 06]: _ABBREVS frozenset used for abbreviation-aware sentence splitting — prevents false sentence boundary detection on Dr/Mr/Mrs etc.
+- [Phase 06]: finditer-based sentence splitter chosen over re.split lookbehind — Python re does not support variable-width lookbehinds
 
 ### Roadmap Evolution
 
@@ -119,6 +122,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-04T16:37:26.647Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-04-04T16:38:18.421Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None
