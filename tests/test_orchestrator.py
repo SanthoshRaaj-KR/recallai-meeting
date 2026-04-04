@@ -120,11 +120,12 @@ class TestOrchestratorResult:
 class TestOrchestratorAgentInit:
     def test_init_requires_retriever_date_resolver_answer_agent(self):
         """OrchestratorAgent can be constructed with required dependencies."""
-        OrchestratorAgent(
-            retriever=MagicMock(),
-            date_resolver=MagicMock(),
-            answer_agent=MagicMock(),
-        )
+        with patch("agents.orchestrator.AsyncOpenAI", return_value=MagicMock()):
+            OrchestratorAgent(
+                retriever=MagicMock(),
+                date_resolver=MagicMock(),
+                answer_agent=MagicMock(),
+            )
         # Should not raise
 
 
