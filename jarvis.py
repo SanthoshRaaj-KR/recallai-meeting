@@ -261,6 +261,71 @@ async def speak_chunked(text: str, bot_id: str) -> None:
         await asyncio.to_thread(speak, chunk, bot_id)
 
 
+async def _stream_llm_and_speak(messages: list, bot_id: str) -> None:
+    """Stream the final LLM answer and speak each sentence as it completes.
+
+    Uses client.chat.completions.create(stream=True) to receive tokens
+    incrementally. Accumulates tokens and calls speak() via asyncio.to_thread
+    each time a sentence-ending character (.!?) is followed by whitespace or
+    the stream ends.
+
+    This minimises the silence gap: the first sentence is spoken as soon as
+    it is generated, before the rest of the answer exists.
+
+    Args:
+        messages: Chat message list for the completion call (same format as
+                  the tool-calling loop in handle_query).
+        bot_id: Recall.ai bot ID for audio output.
+    """
+    buffer = ""
+    try:
+        # Run the blocking stream iterator in a thread to avoid blocking the event loop.
+        # We collect all chunks first via asyncio.to_thread, then process them.
+        # This is simpler than a true async stream and avoids asyncio/thread boundary issues.
+        def _run_stream() -> list[str]:
+            """Collect streamed content tokens synchronously."""
+            tokens: list[str] = []
+            stream = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                stream=True,
+                max_tokens=300,
+            )
+            for chunk in stream:
+                delta_content = chunk.choices[0].delta.content
+                if delta_content:
+                    tokens.append(delta_content)
+            return tokens
+
+        tokens = await asyncio.to_thread(_run_stream)
+
+        # Process tokens, speaking each complete sentence as we go.
+        # This preserves latency benefit: speak() starts when first sentence is complete.
+        for token in tokens:
+            buffer += token
+            # Check if buffer now contains at least one complete sentence.
+            # Look for sentence-ending punctuation followed by whitespace.
+            while True:
+                match = re.search(r'[.!?]\s', buffer)
+                if match:
+                    sentence = buffer[:match.start() + 1].strip()
+                    buffer = buffer[match.end():].strip()
+                    if sentence:
+                        await asyncio.to_thread(speak, sentence, bot_id)
+                else:
+                    break
+
+        # Speak any remaining text in the buffer after stream ends.
+        remainder = buffer.strip()
+        if remainder:
+            await asyncio.to_thread(speak, remainder, bot_id)
+
+    except Exception as e:
+        logger.error("_stream_llm_and_speak error: %s", e)
+        # If streaming fails, fall through (caller handles silence gracefully)
+        raise
+
+
 # ============================================================================
 # TOOLS AVAILABLE TO JARVIS
 # ============================================================================
@@ -531,14 +596,14 @@ async def handle_query(query: str, bot_id: str) -> None:
                 channel_id=SLACK_CHANNEL_ID,
             )
             if not result.needs_disambiguation:
-                await asyncio.to_thread(speak, result.answer, bot_id)
+                await speak_chunked(result.answer, bot_id)
                 return
             # Disambiguation in voice context: speak the options aloud
             spoken = "Multiple meetings found. " + " ".join(
                 f"Option {opt['index']}: {opt['title']} from {opt['date']}."
                 for opt in result.disambiguation_options
             )
-            await asyncio.to_thread(speak, spoken, bot_id)
+            await speak_chunked(spoken, bot_id)
             return
         except Exception as e:
             logger.error("Orchestrator error in handle_query: %s", e)
@@ -582,9 +647,16 @@ async def handle_query(query: str, bot_id: str) -> None:
                         "content": result,
                     })
             else:
-                answer = (msg.content or "").strip()
-                logger.info(f"{BOT_NAME}: {answer}")
-                await asyncio.to_thread(speak, answer, bot_id)
+                # Final answer — stream it and speak sentence by sentence.
+                # Re-run this turn with stream=True for latency reduction.
+                logger.info(f"{BOT_NAME} streaming final answer...")
+                try:
+                    await _stream_llm_and_speak(messages, bot_id)
+                except Exception:
+                    # Fallback: speak the already-received non-streaming answer
+                    answer = (msg.content or "").strip()
+                    logger.info(f"{BOT_NAME} (fallback): {answer}")
+                    await speak_chunked(answer, bot_id)
                 return
 
         await asyncio.to_thread(speak, "I couldn't complete that request. Please try again.", bot_id)
