@@ -89,7 +89,7 @@ Plans:
   5. User asks "what did I commit to last week?" and receives a list of action items attributed to them with meeting context
 **Plans**: 3 plans
 Plans:
-- [ ] 05-01-PLAN.md — DateResolutionAgent (NL date parsing) + AnswerAgent (synthesis with attribution)
+- [x] 05-01-PLAN.md — DateResolutionAgent (NL date parsing) + AnswerAgent (synthesis with attribution)
 - [ ] 05-02-PLAN.md — OrchestratorAgent (classify, route, disambiguate, orchestrate)
 - [ ] 05-03-PLAN.md — Slack /ask command + disambiguation wiring in jarvis.py
 
@@ -104,4 +104,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Storage Foundation | 2/2 | Complete    | 2026-04-04 |
 | 3. Ingestion Pipeline | 2/2 | Complete   | 2026-04-04 |
 | 4. Retrieval + Hybrid RAG | 2/2 | Complete   | 2026-04-04 |
-| 5. Orchestration + Answer Path | 0/3 | Not started | - |
+| 5. Orchestration + Answer Path | 1/3 | In Progress|  |
