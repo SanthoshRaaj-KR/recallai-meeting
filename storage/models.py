@@ -55,3 +55,39 @@ class MeetingRecord(BaseModel):
     status: str = "complete"                               # "complete" or "partial"
     raw_transcript_chars: Optional[int] = None
     summarized_at: Optional[int] = None                   # Unix epoch integer
+
+
+class BatchSummaryOutput(BaseModel):
+    """Structured output schema for a single rolling-summarizer batch.
+
+    Returned by RollingSummarizerAgent for each flushed sentence buffer.
+    All fields are flat scalars or lists of strings — consistent with the
+    project-wide constraint of no nested JSON objects.
+    """
+
+    summary_text: str                       # 2-4 sentence prose summary of this batch
+    key_points: list[str] = Field(default_factory=list)   # short bullet-point phrases
+    speakers: list[str] = Field(default_factory=list)     # speaker names active in this batch
+
+
+class MeetingIndexEntry(BaseModel):
+    """Index entry for the per-meeting JSON index maintained by MeetingWriterAgent.
+
+    This is the fast-lookup path used by the History Manager to select a meeting
+    before loading the full .md file content. One entry per meeting, upserted
+    after each batch flush so the index reflects the meeting's current state.
+
+    Design constraints (same as MeetingRecord):
+    - start_ts is a Unix epoch integer — never a datetime object.
+    - All fields are flat scalars or lists of strings — no nested objects.
+    """
+
+    meeting_id: str
+    title: str                              # derived from channel name or meeting metadata
+    date: str                               # ISO date string (YYYY-MM-DD)
+    channel_id: str
+    channel_name: str
+    overview: str                           # 1-2 sentence description, updated each batch
+    md_path: str                            # relative path to the .md file
+    participants: list[str] = Field(default_factory=list)  # accumulated unique names
+    start_ts: int                           # Unix epoch integer — NEVER datetime
