@@ -105,16 +105,16 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 3. Ingestion Pipeline | 2/2 | Complete   | 2026-04-04 |
 | 4. Retrieval + Hybrid RAG | 2/2 | Complete   | 2026-04-04 |
 | 5. Orchestration + Answer Path | 3/3 | Complete   | 2026-04-04 |
-| 6. Budget model + streaming TTS | 0/3 | Planned | — |
+| 6. Budget model + streaming TTS | 1/3 | In Progress|  |
 
 ### Phase 6: Budget model switch and streaming LLM-to-TTS pipeline
 
 **Goal:** Every LLM call uses gpt-4o-mini (enforced by regression tests), and voice responses start playing the first sentence while the rest of the answer is still being TTS-processed — minimising the silence gap between wake word and first spoken word.
 **Requirements**: PERF-01, PERF-02
 **Depends on:** Phase 5
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 
 Plans:
-- [ ] 06-01-PLAN.md — Budget model audit: confirm gpt-4o-mini everywhere + regression tests
+- [x] 06-01-PLAN.md — Budget model audit: confirm gpt-4o-mini everywhere + regression tests
 - [ ] 06-02-PLAN.md — _split_sentences() + speak_chunked() utility functions in jarvis.py
 - [ ] 06-03-PLAN.md — _stream_llm_and_speak() + wire speak_chunked into handle_query() call sites
