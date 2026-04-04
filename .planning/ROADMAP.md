@@ -72,7 +72,10 @@ Plans:
   2. A channel-scoped query (e.g., only meetings from `#eng-standup`) correctly excludes meetings from other channels via `channel_id` metadata filter
   3. A date-range query (Unix epoch `$gte`/`$lte` filter) returns only meetings within the specified window — verified by checking result timestamps
   4. Pinecone reranker reduces the top-20 candidates to a ranked top-5 to top-8 list that can be inspected for relevance
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 04-01-PLAN.md — Alpha-weighted hybrid query + Pinecone reranker (extends PineconeClient)
+- [ ] 04-02-PLAN.md — RetrieverAgent wrapping PineconeClient.retrieve() with RetrievalResult output
 
 ### Phase 5: Orchestration + Answer Path
 **Goal**: Users can ask natural language questions about past meetings via Slack or voice and receive accurate, attributed answers
@@ -96,5 +99,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Prerequisite Refactor | 2/2 | Complete    | 2026-04-04 |
 | 2. Storage Foundation | 2/2 | Complete    | 2026-04-04 |
 | 3. Ingestion Pipeline | 2/2 | Complete   | 2026-04-04 |
-| 4. Retrieval + Hybrid RAG | 0/TBD | Not started | - |
+| 4. Retrieval + Hybrid RAG | 0/2 | Not started | - |
 | 5. Orchestration + Answer Path | 0/TBD | Not started | - |
