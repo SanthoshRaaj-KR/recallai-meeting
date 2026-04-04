@@ -187,6 +187,7 @@ class PineconeClient:
         start_ts: Optional[int] = None,
         end_ts: Optional[int] = None,
         top_k: int = 10,
+        alpha: float = 0.7,
     ) -> list[dict]:
         """
         Hybrid query against the Pinecone index with optional metadata filters.
@@ -201,12 +202,21 @@ class PineconeClient:
             start_ts: Optional start of date range as Unix epoch integer ($gte).
             end_ts: Optional end of date range as Unix epoch integer ($lte).
             top_k: Number of results to return (default: 10).
+            alpha: Float in [0.0, 1.0] controlling dense/sparse balance.
+                alpha=1.0 → pure dense (semantic search).
+                alpha=0.0 → pure sparse (keyword search).
+                Default 0.7 is research-backed for conversational meeting queries.
+                Dense values are scaled by alpha; sparse values by (1 - alpha).
 
         Returns:
             List of dicts, each with "id", "score", and "metadata" keys.
         """
         dense = self._embed_dense(query_text)
         sparse = self._embed_sparse(query_text, input_type="query")
+
+        # Alpha weighting: scale dense by alpha, sparse by (1 - alpha)
+        dense = [v * alpha for v in dense]
+        sparse = {"indices": sparse["indices"], "values": [v * (1 - alpha) for v in sparse["values"]]}
 
         # Build metadata filter — flat Pinecone filter operators
         filter_conditions: dict = {}
@@ -234,3 +244,90 @@ class PineconeClient:
             {"id": m.id, "score": m.score, "metadata": m.metadata}
             for m in response.matches
         ]
+
+    def rerank(
+        self,
+        query_text: str,
+        results: list[dict],
+        top_n: int = 5,
+    ) -> list[dict]:
+        """
+        Rerank query results using Pinecone's neural reranker.
+
+        Calls pc.inference.rerank() with model="bge-reranker-v2-m3". Documents are
+        built from result metadata summary_text. Returns reranked results with an
+        added "rerank_score" field.
+
+        Args:
+            query_text: The original query string (used as the reranker's query).
+            results: List of dicts from query() — each has "id", "score", "metadata".
+            top_n: Number of results to return after reranking (default: 5).
+
+        Returns:
+            List of dicts, each with "id", "score", "metadata", "rerank_score" keys,
+            ordered by descending rerank_score.
+        """
+        if not results:
+            return []
+
+        documents = [
+            {"id": r["id"], "text": r["metadata"].get("summary_text", "")}
+            for r in results
+        ]
+
+        reranked = self._pc.inference.rerank(
+            model="bge-reranker-v2-m3",
+            query=query_text,
+            documents=documents,
+            top_n=top_n,
+        )
+
+        output = []
+        for item in reranked:
+            original = results[item.index]
+            output.append({
+                "id": original["id"],
+                "score": original["score"],
+                "metadata": original["metadata"],
+                "rerank_score": item.score,
+            })
+        return output
+
+    def retrieve(
+        self,
+        query_text: str,
+        channel_id: Optional[str] = None,
+        start_ts: Optional[int] = None,
+        end_ts: Optional[int] = None,
+        alpha: float = 0.7,
+        top_k: int = 20,
+        top_n: int = 5,
+    ) -> list[dict]:
+        """
+        Full hybrid retrieval pipeline: hybrid query then neural rerank.
+
+        Calls query() with top_k=20 to get broad candidates, then rerank() to
+        reduce to the top_n most relevant results using Pinecone's neural reranker.
+
+        Args:
+            query_text: Natural language query.
+            channel_id: Optional Slack channel ID filter ($eq).
+            start_ts: Optional start of date range as Unix epoch integer ($gte).
+            end_ts: Optional end of date range as Unix epoch integer ($lte).
+            alpha: Dense/sparse balance for query() (default: 0.7).
+            top_k: Candidates to fetch before reranking (default: 20).
+            top_n: Final results to return after reranking (default: 5).
+
+        Returns:
+            List of top_n dicts ordered by descending rerank_score, each with
+            "id", "score", "metadata", "rerank_score" keys.
+        """
+        candidates = self.query(
+            query_text=query_text,
+            channel_id=channel_id,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            top_k=top_k,
+            alpha=alpha,
+        )
+        return self.rerank(query_text, candidates, top_n=top_n)
