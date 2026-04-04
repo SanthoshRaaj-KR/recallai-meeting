@@ -17,8 +17,8 @@
 
 ### Ingestion (INGEST)
 
-- [ ] **INGEST-01**: Bot automatically generates and stores a meeting summary when a meeting ends (triggered by Recall.ai end event or timeout heuristic)
-- [ ] **INGEST-02**: User can trigger summary generation at any time via `/summarize` Slack slash command
+- [x] **INGEST-01**: Bot automatically generates and stores a meeting summary when a meeting ends (triggered by Recall.ai end event or timeout heuristic)
+- [x] **INGEST-02**: User can trigger summary generation at any time via `/summarize` Slack slash command
 - [x] **INGEST-03**: Summary extraction produces structured output: decisions made, topics discussed, action items, participant list
 - [x] **INGEST-04**: Each action item in the summary is attributed to the specific participant who committed to it
 
@@ -73,8 +73,8 @@
 | INFRA-02 | Phase 2 | Complete |
 | INFRA-03 | Phase 2 | Complete |
 | INFRA-04 | Phase 2 | Complete |
-| INGEST-01 | Phase 3 | Pending |
-| INGEST-02 | Phase 3 | Pending |
+| INGEST-01 | Phase 3 | Complete |
+| INGEST-02 | Phase 3 | Complete |
 | INGEST-03 | Phase 3 | Complete |
 | INGEST-04 | Phase 3 | Complete |
 | RETR-01 | Phase 4 | Pending |
