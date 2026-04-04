@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Storage Foundation** - Pinecone index + MetadataStore + PineconeClient with verified schema (completed 2026-04-04)
 - [x] **Phase 3: Ingestion Pipeline** - SummarizerAgent that writes real meeting records to disk and Pinecone (completed 2026-04-04)
 - [x] **Phase 4: Retrieval + Hybrid RAG** - RetrieverAgent with dense + sparse + metadata filter search (completed 2026-04-04)
-- [ ] **Phase 5: Orchestration + Answer Path** - Full end-to-end query pipeline: natural language question to spoken answer
+- [x] **Phase 5: Orchestration + Answer Path** - Full end-to-end query pipeline: natural language question to spoken answer (completed 2026-04-04)
 
 ## Phase Details
 
@@ -91,7 +91,7 @@ Plans:
 Plans:
 - [x] 05-01-PLAN.md — DateResolutionAgent (NL date parsing) + AnswerAgent (synthesis with attribution)
 - [x] 05-02-PLAN.md — OrchestratorAgent (classify, route, disambiguate, orchestrate)
-- [ ] 05-03-PLAN.md — Slack /ask command + disambiguation wiring in jarvis.py
+- [x] 05-03-PLAN.md — Slack /ask command + disambiguation wiring in jarvis.py
 
 ## Progress
 
@@ -104,4 +104,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Storage Foundation | 2/2 | Complete    | 2026-04-04 |
 | 3. Ingestion Pipeline | 2/2 | Complete   | 2026-04-04 |
 | 4. Retrieval + Hybrid RAG | 2/2 | Complete   | 2026-04-04 |
-| 5. Orchestration + Answer Path | 2/3 | In Progress|  |
+| 5. Orchestration + Answer Path | 3/3 | Complete   | 2026-04-04 |
