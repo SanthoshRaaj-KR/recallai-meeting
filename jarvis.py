@@ -616,27 +616,39 @@ async def handle_query(query: str, bot_id: str) -> None:
     """Send a user query to Jarvis and speak the response back in the meeting."""
     logger.info(f"Query: {query!r}")
 
-    # Route memory questions through the orchestrator if configured
-    if orchestrator is not None and _is_memory_query(query):
-        try:
-            result = await _handle_memory_query(
-                query=query,
-                user_id="voice",
-                channel_id=SLACK_CHANNEL_ID,
-            )
+    # Route memory queries: prefer HistoryManagerAgent (.md path) over OrchestratorAgent (Pinecone path)
+    if _is_memory_query(query):
+        routed = False
+        result = None
+
+        if history_manager is not None:
+            try:
+                result = await history_manager.run(
+                    query=query,
+                    user_id="voice",
+                    channel_id=SLACK_CHANNEL_ID,
+                )
+                routed = True
+            except Exception as e:
+                logger.error("HistoryManagerAgent error, falling back to OrchestratorAgent: %s", e)
+
+        if not routed and orchestrator is not None:
+            try:
+                result = await orchestrator.run(query=query, user_id="voice", channel_id=SLACK_CHANNEL_ID)
+                routed = True
+            except Exception as e:
+                logger.error("OrchestratorAgent error in handle_query: %s", e)
+
+        if routed and result is not None:
             if not result.needs_disambiguation:
                 await speak_chunked(result.answer, bot_id)
                 return
-            # Disambiguation in voice context: speak the options aloud
             spoken = "Multiple meetings found. " + " ".join(
                 f"Option {opt['index']}: {opt['title']} from {opt['date']}."
                 for opt in result.disambiguation_options
             )
             await speak_chunked(spoken, bot_id)
             return
-        except Exception as e:
-            logger.error("Orchestrator error in handle_query: %s", e)
-            # Fall through to existing tool-calling loop on error
 
     system_prompt = (
         f"You are {BOT_NAME}, an AI assistant attending a meeting. "
