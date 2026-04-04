@@ -24,7 +24,7 @@
 
 ### Retrieval (RETR)
 
-- [ ] **RETR-01**: Query pipeline executes hybrid search combining dense semantic vectors, sparse BM25 vectors, and Pinecone metadata filters in a single query
+- [x] **RETR-01**: Query pipeline executes hybrid search combining dense semantic vectors, sparse BM25 vectors, and Pinecone metadata filters in a single query
 - [ ] **RETR-02**: System parses natural language date expressions ("last Wednesday", "two weeks ago", "last standup") into exact UTC date ranges using dateparser
 - [ ] **RETR-03**: When a date query matches more than one meeting, bot presents a disambiguation list showing meeting titles, channels, and dates — user selects which meeting to query
 
@@ -77,7 +77,7 @@
 | INGEST-02 | Phase 3 | Complete |
 | INGEST-03 | Phase 3 | Complete |
 | INGEST-04 | Phase 3 | Complete |
-| RETR-01 | Phase 4 | Pending |
+| RETR-01 | Phase 4 | Complete |
 | RETR-02 | Phase 5 | Pending |
 | RETR-03 | Phase 5 | Pending |
 | QUERY-01 | Phase 5 | Pending |

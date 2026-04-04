@@ -74,7 +74,7 @@ Plans:
   4. Pinecone reranker reduces the top-20 candidates to a ranked top-5 to top-8 list that can be inspected for relevance
 **Plans**: 2 plans
 Plans:
-- [ ] 04-01-PLAN.md — Alpha-weighted hybrid query + Pinecone reranker (extends PineconeClient)
+- [x] 04-01-PLAN.md — Alpha-weighted hybrid query + Pinecone reranker (extends PineconeClient)
 - [ ] 04-02-PLAN.md — RetrieverAgent wrapping PineconeClient.retrieve() with RetrievalResult output
 
 ### Phase 5: Orchestration + Answer Path
@@ -99,5 +99,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Prerequisite Refactor | 2/2 | Complete    | 2026-04-04 |
 | 2. Storage Foundation | 2/2 | Complete    | 2026-04-04 |
 | 3. Ingestion Pipeline | 2/2 | Complete   | 2026-04-04 |
-| 4. Retrieval + Hybrid RAG | 0/2 | Not started | - |
+| 4. Retrieval + Hybrid RAG | 1/2 | In Progress|  |
 | 5. Orchestration + Answer Path | 0/TBD | Not started | - |
