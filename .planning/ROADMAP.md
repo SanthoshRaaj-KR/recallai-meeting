@@ -87,7 +87,11 @@ Plans:
   3. When a natural language date matches more than one meeting, the bot presents a disambiguation list (meeting title, channel, date) and waits for user selection before answering
   4. User asks "has this topic come up before?" and receives a response synthesizing relevant instances across meeting history
   5. User asks "what did I commit to last week?" and receives a list of action items attributed to them with meeting context
-**Plans**: TBD
+**Plans**: 3 plans
+Plans:
+- [ ] 05-01-PLAN.md — DateResolutionAgent (NL date parsing) + AnswerAgent (synthesis with attribution)
+- [ ] 05-02-PLAN.md — OrchestratorAgent (classify, route, disambiguate, orchestrate)
+- [ ] 05-03-PLAN.md — Slack /ask command + disambiguation wiring in jarvis.py
 
 ## Progress
 
@@ -100,4 +104,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Storage Foundation | 2/2 | Complete    | 2026-04-04 |
 | 3. Ingestion Pipeline | 2/2 | Complete   | 2026-04-04 |
 | 4. Retrieval + Hybrid RAG | 2/2 | Complete   | 2026-04-04 |
-| 5. Orchestration + Answer Path | 0/TBD | Not started | - |
+| 5. Orchestration + Answer Path | 0/3 | Not started | - |
