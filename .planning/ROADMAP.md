@@ -29,7 +29,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. A concurrent test simulating simultaneous WebSocket transcript writes and agent reads produces no state corruption
   3. pytest + pytest-asyncio harness runs with at least one passing async test; CI pattern is established
   4. All existing dependencies in requirements.txt are pinned to exact versions; new deps (pinecone, aiofiles, dateparser, pydantic, pytest-asyncio) are added
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 01-01-PLAN.md — MeetingState class with asyncio.Lock + pinned dependencies + pytest config
+- [ ] 01-02-PLAN.md — Refactor jarvis.py to use MeetingState + concurrent integration tests
 
 ### Phase 2: Storage Foundation
 **Goal**: A meeting record can be written as JSON to disk and as a vector to Pinecone, then queried by channel and date
@@ -84,7 +87,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Prerequisite Refactor | 0/TBD | Not started | - |
+| 1. Prerequisite Refactor | 0/2 | Planning complete | - |
 | 2. Storage Foundation | 0/TBD | Not started | - |
 | 3. Ingestion Pipeline | 0/TBD | Not started | - |
 | 4. Retrieval + Hybrid RAG | 0/TBD | Not started | - |
