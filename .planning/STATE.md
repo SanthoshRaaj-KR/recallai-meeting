@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 06-02-PLAN.md
-last_updated: "2026-04-04T16:38:18.425Z"
+status: verifying
+stopped_at: Completed 06-03-PLAN.md
+last_updated: "2026-04-04T16:42:27.056Z"
 last_activity: 2026-04-04
 progress:
   total_phases: 6
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 14
-  completed_plans: 13
+  completed_plans: 14
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 06 (budget-model-switch-and-streaming-llm-to-tts-pipeline) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-04
 
 Progress: [░░░░░░░░░░] 0%
@@ -65,6 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 05-orchestration-answer-path P05-03 | 3 minutes | 2 tasks | 2 files |
 | Phase 06-budget-model-switch-and-streaming-llm-to-tts-pipeline P06-01 | 1 | 1 tasks | 1 files |
 | Phase 06 P02 | 2 minutes | 1 tasks | 2 files |
+| Phase 06 P03 | 4 minutes | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -106,6 +107,8 @@ Recent decisions affecting current work:
 - [Phase 06]: OrchestratorAgent tests patch AsyncOpenAI to prevent OPENAI_API_KEY requirement at test time
 - [Phase 06]: _ABBREVS frozenset used for abbreviation-aware sentence splitting — prevents false sentence boundary detection on Dr/Mr/Mrs etc.
 - [Phase 06]: finditer-based sentence splitter chosen over re.split lookbehind — Python re does not support variable-width lookbehinds
+- [Phase 06]: _run_stream inner function collected entirely via asyncio.to_thread before token processing — avoids async/thread boundary complexity while still freeing event loop during generation
+- [Phase 06]: Fallback to speak_chunked on _stream_llm_and_speak exception — guarantees voice output even if streaming fails
 
 ### Roadmap Evolution
 
@@ -122,6 +125,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-04T16:38:18.421Z
-Stopped at: Completed 06-02-PLAN.md
+Last session: 2026-04-04T16:42:27.051Z
+Stopped at: Completed 06-03-PLAN.md
 Resume file: None
