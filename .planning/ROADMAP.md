@@ -58,7 +58,10 @@ Plans:
   3. Every action item in the summary identifies the specific participant who committed to it (not "someone" or left blank)
   4. Summary output is structured (not free text): decisions list, topics list, action items list with owner/task fields, participant list
   5. Summaries generated from incomplete transcripts are tagged `status: partial`; only `status: complete` summaries are indexed for search by default
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 03-01-PLAN.md — SummarizerAgent with structured output and action item attribution
+- [ ] 03-02-PLAN.md — Ingestion wiring: auto-trigger on disconnect + /summarize Slack command
 
 ### Phase 4: Retrieval + Hybrid RAG
 **Goal**: Given a query with optional date and channel filters, the system returns ranked, relevant meeting excerpts with measurable retrieval quality
@@ -92,6 +95,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Prerequisite Refactor | 2/2 | Complete    | 2026-04-04 |
 | 2. Storage Foundation | 2/2 | Complete    | 2026-04-04 |
-| 3. Ingestion Pipeline | 0/TBD | Not started | - |
+| 3. Ingestion Pipeline | 0/2 | Planned | - |
 | 4. Retrieval + Hybrid RAG | 0/TBD | Not started | - |
 | 5. Orchestration + Answer Path | 0/TBD | Not started | - |
