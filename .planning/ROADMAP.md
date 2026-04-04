@@ -124,9 +124,9 @@ Plans:
 **Goal:** Replace end-of-meeting batch summarization with a real-time rolling pipeline: sentence buffer flushes to structured .md files during the meeting, a JSON index enables LLM-driven meeting selection, and voice memory queries are answered from .md content rather than raw Pinecone vectors.
 **Requirements**: AGENT-06, AGENT-07, AGENT-08
 **Depends on:** Phase 6
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [x] 07-01-PLAN.md — RollingSummarizerAgent + MeetingWriterAgent: BatchSummaryOutput schema, dual-threshold flush, append-only .md sections, JSON meeting index
 - [x] 07-02-PLAN.md — HistoryManagerAgent: LLM-based meeting selection from JSON index, disambiguation flow, Pinecone semantic fallback
-- [ ] 07-03-PLAN.md — Wire new pipeline into jarvis.py: sentence buffer, interrupt flush on wake word, route memory_query through HistoryManagerAgent, reset on disconnect
+- [x] 07-03-PLAN.md — Wire new pipeline into jarvis.py: sentence buffer, interrupt flush on wake word, route memory_query through HistoryManagerAgent, reset on disconnect
