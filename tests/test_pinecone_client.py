@@ -581,3 +581,333 @@ def test_live_hybrid_smoke():
         top_k=5,
     )
     assert len(results_combined) > 0, "Expected results with combined channel + date filter"
+
+
+# ---------------------------------------------------------------------------
+# TestQueryAlpha — alpha weighting for dense/sparse balance
+# ---------------------------------------------------------------------------
+
+
+class TestQueryAlpha:
+    """Test query() alpha parameter scales dense and sparse vectors correctly."""
+
+    def _setup_client(self, mock_openai, mock_pinecone, dense_value=0.1, sparse_values=(0.5, 0.3, 0.8)):
+        from storage.pinecone_client import PineconeClient
+
+        pc_instance = mock_pinecone.return_value
+        openai_instance = mock_openai.return_value
+
+        # Mock dense embedding with configurable value
+        mock_resp = MagicMock()
+        mock_resp.data = [MagicMock()]
+        mock_resp.data[0].embedding = [dense_value] * 1536
+        openai_instance.embeddings.create.return_value = mock_resp
+
+        # Mock sparse embedding with configurable values
+        mock_emb = make_sparse_embedding(values=sparse_values)
+        mock_response = MagicMock()
+        mock_response.__getitem__ = lambda self, i: mock_emb
+        pc_instance.inference.embed.return_value = mock_response
+
+        mock_index = MagicMock()
+        mock_index.query.return_value = MagicMock(matches=[])
+        pc_instance.Index.return_value = mock_index
+
+        client = PineconeClient(api_key="test-key")
+        return client, pc_instance, mock_index
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_query_alpha_scales_dense_values(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(
+            mock_openai, mock_pinecone, dense_value=0.1
+        )
+
+        client.query("text", alpha=0.5)
+
+        call_kwargs = mock_index.query.call_args[1]
+        vector = call_kwargs["vector"]
+        assert all(abs(v - 0.05) < 1e-9 for v in vector), (
+            f"Expected all dense values to be 0.05, got: {vector[:3]}"
+        )
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_query_alpha_scales_sparse_values(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(
+            mock_openai, mock_pinecone, sparse_values=(0.5, 0.3, 0.8)
+        )
+
+        client.query("text", alpha=0.5)
+
+        call_kwargs = mock_index.query.call_args[1]
+        sparse_values = call_kwargs["sparse_vector"]["values"]
+        expected = [0.25, 0.15, 0.4]
+        assert all(abs(a - b) < 1e-9 for a, b in zip(sparse_values, expected)), (
+            f"Expected sparse values {expected}, got: {sparse_values}"
+        )
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_query_alpha_default_is_0_7(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(
+            mock_openai, mock_pinecone, dense_value=1.0, sparse_values=(1.0,)
+        )
+
+        client.query("text")  # no alpha arg — uses default
+
+        call_kwargs = mock_index.query.call_args[1]
+        assert abs(call_kwargs["vector"][0] - 0.7) < 1e-9, (
+            f"Expected dense[0]=0.7, got {call_kwargs['vector'][0]}"
+        )
+        assert abs(call_kwargs["sparse_vector"]["values"][0] - 0.3) < 1e-9, (
+            f"Expected sparse[0]=0.3, got {call_kwargs['sparse_vector']['values'][0]}"
+        )
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_query_alpha_1_0_pure_dense(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(
+            mock_openai, mock_pinecone, dense_value=0.5, sparse_values=(0.9, 0.6)
+        )
+
+        client.query("text", alpha=1.0)
+
+        call_kwargs = mock_index.query.call_args[1]
+        # Dense scaled by 1.0 — unchanged
+        assert all(abs(v - 0.5) < 1e-9 for v in call_kwargs["vector"]), (
+            "Expected all dense values to remain 0.5 with alpha=1.0"
+        )
+        # Sparse scaled by 0.0 — all zero
+        assert all(abs(v - 0.0) < 1e-9 for v in call_kwargs["sparse_vector"]["values"]), (
+            "Expected all sparse values to be 0.0 with alpha=1.0"
+        )
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_query_alpha_0_0_pure_sparse(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(
+            mock_openai, mock_pinecone, dense_value=0.5, sparse_values=(0.9, 0.6)
+        )
+
+        client.query("text", alpha=0.0)
+
+        call_kwargs = mock_index.query.call_args[1]
+        # Dense scaled by 0.0 — all zero
+        assert all(abs(v - 0.0) < 1e-9 for v in call_kwargs["vector"]), (
+            "Expected all dense values to be 0.0 with alpha=0.0"
+        )
+        # Sparse scaled by 1.0 — unchanged
+        sparse_values = call_kwargs["sparse_vector"]["values"]
+        expected = [0.9, 0.6]
+        assert all(abs(a - b) < 1e-9 for a, b in zip(sparse_values, expected)), (
+            f"Expected sparse values {expected}, got: {sparse_values}"
+        )
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_query_backward_compatible_no_alpha_arg(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+
+        client.query("text")  # no alpha arg
+
+        mock_index.query.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestRerank — neural reranking via Pinecone inference
+# ---------------------------------------------------------------------------
+
+
+class TestRerank:
+    """Test rerank() calls Pinecone inference reranker and returns enriched dicts."""
+
+    results = [
+        {"id": "mtg-001", "score": 0.9, "metadata": {"summary_text": "Q2 roadmap sprint planning discussion", "channel_id": "C01"}},
+        {"id": "mtg-002", "score": 0.8, "metadata": {"summary_text": "API design review session", "channel_id": "C01"}},
+        {"id": "mtg-003", "score": 0.75, "metadata": {"summary_text": "Incident retrospective meeting", "channel_id": "C02"}},
+    ]
+
+    def _setup_client(self, mock_openai, mock_pinecone):
+        from storage.pinecone_client import PineconeClient
+
+        pc_instance = mock_pinecone.return_value
+        openai_instance = mock_openai.return_value
+        openai_instance.embeddings.create.return_value = make_dense_embedding()
+
+        mock_index = MagicMock()
+        pc_instance.Index.return_value = mock_index
+
+        client = PineconeClient(api_key="test-key")
+        return client, pc_instance, mock_index
+
+    def _make_rerank_result(self, index, score, doc_id):
+        item = MagicMock()
+        item.index = index
+        item.score = score
+        item.document = {"id": doc_id, "text": "..."}
+        return item
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_rerank_calls_inference_rerank_with_correct_model(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+
+        pc_instance.inference.rerank.return_value = [
+            self._make_rerank_result(0, 0.99, "mtg-001"),
+            self._make_rerank_result(2, 0.85, "mtg-003"),
+        ]
+
+        client.rerank("my query", self.results, top_n=2)
+
+        pc_instance.inference.rerank.assert_called_once()
+        call_kwargs = pc_instance.inference.rerank.call_args[1]
+        assert call_kwargs["model"] == "bge-reranker-v2-m3"
+        assert call_kwargs["query"] == "my query"
+        assert call_kwargs["top_n"] == 2
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_rerank_documents_built_from_summary_text(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+
+        pc_instance.inference.rerank.return_value = [
+            self._make_rerank_result(0, 0.99, "mtg-001"),
+            self._make_rerank_result(2, 0.85, "mtg-003"),
+        ]
+
+        client.rerank("my query", self.results, top_n=2)
+
+        call_kwargs = pc_instance.inference.rerank.call_args[1]
+        documents = call_kwargs["documents"]
+        assert isinstance(documents, list)
+        assert documents[0] == {"id": "mtg-001", "text": "Q2 roadmap sprint planning discussion"}
+        assert documents[1] == {"id": "mtg-002", "text": "API design review session"}
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_rerank_returns_list_with_rerank_score(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+
+        pc_instance.inference.rerank.return_value = [
+            self._make_rerank_result(0, 0.99, "mtg-001"),
+            self._make_rerank_result(2, 0.85, "mtg-003"),
+        ]
+
+        returned = client.rerank("my query", self.results, top_n=2)
+
+        assert isinstance(returned, list)
+        assert len(returned) == 2
+        for item in returned:
+            assert "id" in item
+            assert "score" in item
+            assert "metadata" in item
+            assert "rerank_score" in item
+        assert returned[0]["rerank_score"] == 0.99
+        assert returned[0]["id"] == "mtg-001"
+        assert returned[0]["metadata"] == self.results[0]["metadata"]
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_rerank_default_top_n_is_5(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+
+        pc_instance.inference.rerank.return_value = []
+
+        client.rerank("query", self.results)  # no top_n arg
+
+        call_kwargs = pc_instance.inference.rerank.call_args[1]
+        assert call_kwargs["top_n"] == 5
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_rerank_empty_results_returns_empty_list(self, mock_openai, mock_pinecone):
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+
+        pc_instance.inference.rerank.return_value = []
+
+        returned = client.rerank("query", [], top_n=5)
+
+        assert returned == []
+
+
+# ---------------------------------------------------------------------------
+# TestRetrieve — full pipeline: query then rerank
+# ---------------------------------------------------------------------------
+
+
+class TestRetrieve:
+    """Test retrieve() calls query(top_k=20) then rerank(top_n=5) in sequence."""
+
+    def _setup_client(self, mock_openai, mock_pinecone):
+        from storage.pinecone_client import PineconeClient
+
+        pc_instance = mock_pinecone.return_value
+        openai_instance = mock_openai.return_value
+        openai_instance.embeddings.create.return_value = make_dense_embedding()
+
+        mock_index = MagicMock()
+        pc_instance.Index.return_value = mock_index
+
+        client = PineconeClient(api_key="test-key")
+        return client, pc_instance, mock_index
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_retrieve_calls_query_with_top_k_20(self, mock_openai, mock_pinecone):
+        from storage.pinecone_client import PineconeClient
+        from unittest.mock import patch as mock_patch
+
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+
+        with mock_patch.object(PineconeClient, "query", return_value=[]) as mock_query, \
+             mock_patch.object(PineconeClient, "rerank", return_value=[]) as mock_rerank:
+            client.retrieve("what was discussed?")
+            mock_query.assert_called_once_with(
+                query_text="what was discussed?", top_k=20,
+                channel_id=None, start_ts=None, end_ts=None, alpha=0.7
+            )
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_retrieve_calls_rerank_with_query_results(self, mock_openai, mock_pinecone):
+        from storage.pinecone_client import PineconeClient
+        from unittest.mock import patch as mock_patch
+
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+        fake_results = [{"id": "m1", "score": 0.9, "metadata": {}}] * 20
+
+        with mock_patch.object(PineconeClient, "query", return_value=fake_results) as mock_query, \
+             mock_patch.object(PineconeClient, "rerank", return_value=fake_results[:5]) as mock_rerank:
+            client.retrieve("question")
+            mock_rerank.assert_called_once_with("question", fake_results, top_n=5)
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_retrieve_passes_filters_through_to_query(self, mock_openai, mock_pinecone):
+        from storage.pinecone_client import PineconeClient
+        from unittest.mock import patch as mock_patch
+
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+
+        with mock_patch.object(PineconeClient, "query", return_value=[]) as mock_query, \
+             mock_patch.object(PineconeClient, "rerank", return_value=[]) as mock_rerank:
+            client.retrieve("query", channel_id="C999", start_ts=100, end_ts=200)
+            call_kwargs = mock_query.call_args[1]
+            assert call_kwargs["channel_id"] == "C999"
+            assert call_kwargs["start_ts"] == 100
+            assert call_kwargs["end_ts"] == 200
+
+    @patch("storage.pinecone_client.Pinecone")
+    @patch("storage.pinecone_client.OpenAI")
+    def test_retrieve_returns_reranked_results(self, mock_openai, mock_pinecone):
+        from storage.pinecone_client import PineconeClient
+        from unittest.mock import patch as mock_patch
+
+        client, pc_instance, mock_index = self._setup_client(mock_openai, mock_pinecone)
+        reranked = [{"id": "m1", "score": 0.9, "metadata": {}, "rerank_score": 0.99}]
+
+        with mock_patch.object(PineconeClient, "query", return_value=[{"id": "m1", "score": 0.9, "metadata": {}}]), \
+             mock_patch.object(PineconeClient, "rerank", return_value=reranked):
+            result = client.retrieve("q")
+            assert result == reranked
