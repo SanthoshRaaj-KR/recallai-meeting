@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. All existing dependencies in requirements.txt are pinned to exact versions; new deps (pinecone, aiofiles, dateparser, pydantic, pytest-asyncio) are added
 **Plans**: 2 plans
 Plans:
-- [ ] 01-01-PLAN.md — MeetingState class with asyncio.Lock + pinned dependencies + pytest config
+- [x] 01-01-PLAN.md — MeetingState class with asyncio.Lock + pinned dependencies + pytest config
 - [ ] 01-02-PLAN.md — Refactor jarvis.py to use MeetingState + concurrent integration tests
 
 ### Phase 2: Storage Foundation

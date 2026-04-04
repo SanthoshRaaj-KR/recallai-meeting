@@ -10,7 +10,7 @@
 
 ### Infrastructure (INFRA)
 
-- [ ] **INFRA-01**: Bot uses asyncio.Lock to protect shared meeting state, preventing race conditions when agent runs overlap with WebSocket transcript handlers
+- [x] **INFRA-01**: Bot uses asyncio.Lock to protect shared meeting state, preventing race conditions when agent runs overlap with WebSocket transcript handlers
 - [ ] **INFRA-02**: Pinecone index is created with `metric="dotproduct"` and supports both dense (`values`) and sparse (`sparse_values`) vectors in a single index
 - [ ] **INFRA-03**: Each meeting produces a JSON metadata file containing: meeting_id, timestamp (Unix epoch int), duration_seconds, channel_id, channel_name, participants, summary_text, topics_covered, action_items, decisions, series_name, recurrence_pattern
 - [ ] **INFRA-04**: Sparse vectorization uses Pinecone's `pinecone-sparse-english-v0` inference model (no local corpus fitting required)
@@ -69,7 +69,7 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INFRA-01 | Phase 1 | Pending |
+| INFRA-01 | Phase 1 | Complete |
 | INFRA-02 | Phase 2 | Pending |
 | INFRA-03 | Phase 2 | Pending |
 | INFRA-04 | Phase 2 | Pending |
