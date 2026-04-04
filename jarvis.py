@@ -13,6 +13,7 @@ Example commands:
   "Hey Jarvis, who is the current CEO of Apple?"
 """
 
+import asyncio
 import os
 import re
 import sys
@@ -29,6 +30,8 @@ from dotenv import load_dotenv
 from gtts import gTTS
 from openai import OpenAI
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+from meeting_state import MeetingState
 
 
 # ============================================================================
@@ -59,12 +62,7 @@ app = FastAPI()
 # MEETING STATE
 # ============================================================================
 
-meeting_state = {
-    "bot_id": None,
-    "transcript_log": [],   # [{participant, text, timestamp}, ...]
-    "is_active": False,
-    "jarvis_listening": False,  # True after bare "Hey Jarvis" with no query
-}
+state = MeetingState()
 
 # ============================================================================
 # RECALL.AI HELPERS
@@ -105,12 +103,12 @@ def create_bot(meeting_url: str) -> Optional[str]:
         )
         if response.status_code in [200, 201]:
             bot_id = response.json()["id"]
-            logger.info(f"✅ Bot created: {bot_id}")
+            logger.info(f"Bot created: {bot_id}")
             return bot_id
-        logger.error(f"❌ Bot creation failed: {response.status_code} — {response.text}")
+        logger.error(f"Bot creation failed: {response.status_code} -- {response.text}")
         return None
     except Exception as e:
-        logger.error(f"❌ Bot creation exception: {e}")
+        logger.error(f"Bot creation exception: {e}")
         return None
 
 
@@ -131,7 +129,7 @@ def speak(text: str, bot_id: str) -> bool:
         )
         return resp.status_code == 200
     except Exception as e:
-        logger.error(f"❌ speak() error: {e}")
+        logger.error(f"speak() error: {e}")
         return False
     finally:
         if os.path.exists(tmp):
@@ -150,12 +148,9 @@ def _fetch_weather(city: str) -> str:
         return f"Weather service unavailable: {e}"
 
 
-def _get_meeting_transcript() -> str:
+async def _get_meeting_transcript() -> str:
     """Return the accumulated meeting transcript as a readable string."""
-    if not meeting_state["transcript_log"]:
-        return "[No transcript yet]"
-    lines = [f"{e['participant']}: {e['text']}" for e in meeting_state["transcript_log"]]
-    return "\n".join(lines)
+    return await state.get_transcript()
 
 
 # OpenAI function-calling tool definitions
@@ -185,20 +180,20 @@ TOOLS = [
 ]
 
 
-def _run_tool(name: str, args: dict) -> str:
+async def _run_tool(name: str, args: dict) -> str:
     if name == "get_weather":
         return _fetch_weather(args.get("city", ""))
     if name == "get_meeting_summary":
-        return _get_meeting_transcript()
+        return await _get_meeting_transcript()
     return f"Unknown tool: {name}"
 
 # ============================================================================
 # JARVIS QUERY HANDLER
 # ============================================================================
 
-def handle_query(query: str, bot_id: str) -> None:
+async def handle_query(query: str, bot_id: str) -> None:
     """Send a user query to Jarvis and speak the response back in the meeting."""
-    logger.info(f"🧠 Query: {query!r}")
+    logger.info(f"Query: {query!r}")
 
     system_prompt = (
         f"You are {BOT_NAME}, an AI assistant attending a meeting. "
@@ -230,8 +225,8 @@ def handle_query(query: str, bot_id: str) -> None:
                 messages.append(msg)
                 for tc in msg.tool_calls:
                     args = json.loads(tc.function.arguments)
-                    result = _run_tool(tc.function.name, args)
-                    logger.info(f"🔧 Tool {tc.function.name}({args}) → {result[:80]}")
+                    result = await _run_tool(tc.function.name, args)
+                    logger.info(f"Tool {tc.function.name}({args}) -> {result[:80]}")
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -239,21 +234,21 @@ def handle_query(query: str, bot_id: str) -> None:
                     })
             else:
                 answer = (msg.content or "").strip()
-                logger.info(f"🤖 {BOT_NAME}: {answer}")
-                speak(answer, bot_id)
+                logger.info(f"{BOT_NAME}: {answer}")
+                await asyncio.to_thread(speak, answer, bot_id)
                 return
 
-        speak("I couldn't complete that request. Please try again.", bot_id)
+        await asyncio.to_thread(speak, "I couldn't complete that request. Please try again.", bot_id)
 
     except Exception as e:
         error_str = str(e)
-        logger.error(f"❌ handle_query error: {error_str}")
+        logger.error(f"handle_query error: {error_str}")
         if "insufficient_quota" in error_str or "429" in error_str:
-            speak("Sorry, the AI service is out of credits. Please check the OpenAI billing.", bot_id)
+            await asyncio.to_thread(speak, "Sorry, the AI service is out of credits. Please check the OpenAI billing.", bot_id)
         elif "401" in error_str or "invalid_api_key" in error_str:
-            speak("Sorry, the AI service API key is invalid.", bot_id)
+            await asyncio.to_thread(speak, "Sorry, the AI service API key is invalid.", bot_id)
         else:
-            speak("Sorry, I ran into an error. Please try again.", bot_id)
+            await asyncio.to_thread(speak, "Sorry, I ran into an error. Please try again.", bot_id)
 
 # ============================================================================
 # WAKE WORD DETECTION
@@ -283,7 +278,7 @@ def extract_wake_and_query(text: str) -> Optional[str]:
 @app.websocket("/recall-audio-stream")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    logger.info("🔌 WebSocket connected")
+    logger.info("WebSocket connected")
 
     try:
         while True:
@@ -304,16 +299,12 @@ async def websocket_endpoint(websocket: WebSocket):
             if BOT_NAME.lower() in participant.lower():
                 continue
 
-            logger.info(f"💬 {participant}: {sentence}")
+            logger.info(f"{participant}: {sentence}")
 
             # Append to meeting log
-            meeting_state["transcript_log"].append({
-                "participant": participant,
-                "text": sentence,
-                "timestamp": time.time(),
-            })
+            await state.add_transcript(participant, sentence, time.time())
 
-            bot_id = meeting_state["bot_id"]
+            bot_id = await state.get_bot_id()
             if not bot_id:
                 continue
 
@@ -323,32 +314,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Wake word detected in this chunk
                 if query:
                     # Full query in same sentence: "Hey Jarvis, what's the weather in Paris?"
-                    meeting_state["jarvis_listening"] = False
-                    Thread(target=handle_query, args=(query, bot_id), daemon=True).start()
+                    await state.set_listening(False)
+                    asyncio.create_task(handle_query(query, bot_id))
                 else:
-                    # Bare wake word: "Hey Jarvis" — acknowledge and wait for next chunk
-                    meeting_state["jarvis_listening"] = True
-                    Thread(target=speak, args=("Yes?", bot_id), daemon=True).start()
+                    # Bare wake word: "Hey Jarvis" -- acknowledge and wait for next chunk
+                    await state.set_listening(True)
+                    asyncio.create_task(asyncio.to_thread(speak, "Yes?", bot_id))
 
-            elif meeting_state["jarvis_listening"]:
+            elif await state.is_listening():
                 # Previous chunk was just the wake word; this chunk is the query
-                meeting_state["jarvis_listening"] = False
-                Thread(target=handle_query, args=(sentence, bot_id), daemon=True).start()
+                await state.set_listening(False)
+                asyncio.create_task(handle_query(sentence, bot_id))
 
     except WebSocketDisconnect:
-        logger.info("🔌 WebSocket disconnected")
+        logger.info("WebSocket disconnected")
     except Exception as e:
-        logger.error(f"❌ WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}")
 
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "healthy",
-        "bot_id": meeting_state["bot_id"],
-        "active": meeting_state["is_active"],
-        "transcript_lines": len(meeting_state["transcript_log"]),
-    }
+    return await state.get_health_snapshot()
 
 # ============================================================================
 # ENTRY POINT
@@ -358,52 +344,61 @@ def _start_server():
     uvicorn.run(app, host=APP_HOST, port=APP_PORT, log_level="warning")
 
 
+def _sync_set_state(coro):
+    """Run an async state operation from synchronous main()."""
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def main():
     print("=" * 60)
-    print(f"🤖 {BOT_NAME} Meeting Assistant")
+    print(f"{BOT_NAME} Meeting Assistant")
     print(f'   Wake word: "Hey {BOT_NAME}" or "{BOT_NAME}"')
     print("=" * 60)
 
     missing = [k for k in ("RECALL_API_KEY", "OPENAI_API_KEY", "WEBHOOK_URL") if not os.getenv(k)]
     if missing:
         for k in missing:
-            print(f"❌ {k} not set in .env")
+            print(f"{k} not set in .env")
         sys.exit(1)
 
     # Start WebSocket server
     Thread(target=_start_server, daemon=True).start()
-    print(f"✅ Listening on {APP_HOST}:{APP_PORT}")
+    print(f"Listening on {APP_HOST}:{APP_PORT}")
     time.sleep(2)
 
     # Resolve meeting URL
     meeting_url = MEETING_URL or input("\nMeeting URL (Google Meet / Zoom / Teams): ").strip()
     if not meeting_url:
-        print("❌ No meeting URL provided")
+        print("No meeting URL provided")
         sys.exit(1)
 
     # Spawn bot
-    print(f"🚀 Joining: {meeting_url}")
+    print(f"Joining: {meeting_url}")
     bot_id = create_bot(meeting_url)
     if not bot_id:
-        print("❌ Failed to spawn bot")
+        print("Failed to spawn bot")
         sys.exit(1)
 
-    meeting_state["bot_id"] = bot_id
-    meeting_state["is_active"] = True
+    _sync_set_state(state.set_bot_id(bot_id))
+    _sync_set_state(state.set_active(True))
 
     with open("bot_id.txt", "w") as f:
         f.write(bot_id)
 
-    print(f"✅ Bot joined! ID: {bot_id}")
-    print(f'👂 Listening for "Hey {BOT_NAME}"...')
+    print(f"Bot joined! ID: {bot_id}")
+    print(f'Listening for "Hey {BOT_NAME}"...')
     print("   Ctrl+C to stop\n")
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print(f"\n⚠️  {BOT_NAME} shutting down.")
-        meeting_state["is_active"] = False
+        print(f"\n{BOT_NAME} shutting down.")
+        _sync_set_state(state.set_active(False))
 
 
 if __name__ == "__main__":
