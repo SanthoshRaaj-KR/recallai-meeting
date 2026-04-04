@@ -25,14 +25,18 @@ Institutional memory for teams — every decision, action item, and discussion p
 
 ### Active
 
-- [ ] Meeting summary generation at end of each meeting (auto-detect + `/summarize` manual trigger)
-- [ ] Pinecone storage for meeting summaries + embeddings
-- [ ] JSON metadata file per meeting (meeting_id, timestamp, duration, channel_id, channel_name, participants, summary_text, topics_covered, series_name, recurrence_pattern)
-- [ ] Fully agentic architecture using OpenAI Agents SDK with multi-agent handoffs
-- [ ] Hybrid RAG pipeline: semantic (Pinecone) + keyword (BM25) + metadata filters
-- [ ] Natural language date resolution ("last Wednesday" → exact date range → clarify if ambiguous)
-- [ ] Recurring meeting series: Slack channel = meeting series identity
-- [ ] Query types: exact event lookup, general summary, cross-meeting trends, action item tracking
+*(All milestone requirements validated — see Validated section)*
+
+### Validated (continued)
+
+- ✓ Meeting summary generation at end of each meeting (auto-detect + `/summarize` manual trigger) — (Validated in Phase 3: Summarization Pipeline)
+- ✓ Pinecone storage for meeting summaries + embeddings — (Validated in Phase 3: Summarization Pipeline)
+- ✓ JSON metadata file per meeting (Validated in Phase 2: Storage Foundation)
+- ✓ Fully agentic architecture using OpenAI Agents SDK with multi-agent handoffs — `SummarizerAgent`, `RetrieverAgent`, `OrchestratorAgent`, `AnswerAgent`, `DateResolutionAgent` (Validated in Phase 5: Orchestration Answer Path)
+- ✓ Hybrid RAG pipeline: semantic (Pinecone) + keyword (BM25) + metadata filters — `RetrieverAgent` with reranking (Validated in Phase 4: Retriever Agent)
+- ✓ Natural language date resolution — `DateResolutionAgent` converts NL expressions to UTC epoch ranges, OrchestratorAgent triggers disambiguation when >1 meeting matches (Validated in Phase 5: Orchestration Answer Path)
+- ✓ Query types: decision, summary, cross_meeting, action_items — all handled by `AnswerAgent` (Validated in Phase 5: Orchestration Answer Path)
+- ✓ `/ask` Slack slash command routes to OrchestratorAgent with disambiguation flow (Validated in Phase 5: Orchestration Answer Path)
 
 ### Out of Scope
 
@@ -42,11 +46,11 @@ Institutional memory for teams — every decision, action item, and discussion p
 
 ## Context
 
-- **Existing bot**: `jarvis.py` — monolithic Python file with FastAPI, Recall.ai WebSocket, OpenAI tool calling, gTTS audio playback
-- **Current architecture**: Single-agent with tool use; moving to multi-agent handoffs with OpenAI Agents SDK
+- **Existing bot**: `jarvis.py` — FastAPI + Recall.ai WebSocket + `/ask` slash command + OrchestratorAgent integration
+- **Current architecture**: Multi-agent pipeline: `SummarizerAgent` → Pinecone → `RetrieverAgent` → `OrchestratorAgent` → `DateResolutionAgent` + `AnswerAgent`
 - **Meeting data source**: Recall.ai provides real-time transcript chunks via WebSocket
-- **Slack integration**: Bot joins huddles, listens to transcripts, responds in-channel
-- **Test harness established**: pytest + pytest-asyncio with asyncio_mode=auto; 13 tests passing (Phase 1)
+- **Slack integration**: Bot joins huddles, listens to transcripts, responds in-channel; `/ask` routes memory queries through full orchestration pipeline
+- **Test harness**: pytest + pytest-asyncio, 181 tests passing (Phase 5 complete — full milestone delivered)
 
 ## Constraints
 
@@ -85,4 +89,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-04 after Phase 2: Storage Foundation*
+*Last updated: 2026-04-04 after Phase 5: Orchestration Answer Path (milestone complete)*
