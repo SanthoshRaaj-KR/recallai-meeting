@@ -1,0 +1,91 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-04-05T04:49:27.175Z",
+  "phase": "07",
+  "phase_name": "fully-agentic-meeting-pipeline-redesign",
+  "phase_dir": ".planning/phases/07-fully-agentic-meeting-pipeline-redesign",
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "07-01: Rolling Summarizer + Meeting Writer", "status": "done", "commit": "f648710"},
+    {"id": 2, "name": "07-02: History Manager Agent", "status": "done", "commit": "8fc7cca"},
+    {"id": 3, "name": "07-03: Wire rolling pipeline into jarvis.py", "status": "done", "commit": "f648710"},
+    {"id": 4, "name": "Bug fix: voice overlap serialization (_speak_lock)", "status": "done", "commit": "in_debug_session"},
+    {"id": 5, "name": "Bug fix: header write race (_header_lock)", "status": "done", "commit": "in_debug_session"},
+    {"id": 6, "name": "Improvement: in-memory index cache in MeetingWriterAgent", "status": "done", "commit": "uncommitted"},
+    {"id": 7, "name": "Improvement: channel/date pre-filter in HistoryManagerAgent", "status": "done", "commit": "uncommitted"},
+    {"id": 8, "name": "Improvement: full_transcript field in answer_agent metadata", "status": "done", "commit": "uncommitted"},
+    {"id": 9, "name": "Redesign: transcript-first .md format (no batch sections)", "status": "done", "commit": "uncommitted"},
+    {"id": 10, "name": "Redesign: MeetingMetadataAgent (end-of-meeting, replaces RollingSummarizerAgent)", "status": "done", "commit": "uncommitted"},
+    {"id": 11, "name": "Redesign: append_transcript_lines + finalize_meeting in MeetingWriterAgent", "status": "done", "commit": "uncommitted"},
+    {"id": 12, "name": "Update tests for new transcript-first design", "status": "done", "commit": "uncommitted"}
+  ],
+  "remaining_tasks": [
+    {"id": 13, "name": "Commit all uncommitted changes (models, agents, jarvis, tests)", "status": "not_started"},
+    {"id": 14, "name": "Run /gsd:verify-work 7 to validate phase goal achievement", "status": "not_started"},
+    {"id": 15, "name": "Consider cross-meeting query support (improvement #5 from analysis)", "status": "not_started"}
+  ],
+  "blockers": [],
+  "human_actions_pending": [],
+  "decisions": [
+    {
+      "decision": "Replace per-batch LLM summarization with raw transcript append during meeting",
+      "rationale": "Cheaper (no LLM per flush), cleaner .md (readable transcript vs summarized blobs), single LLM call at end-of-meeting for metadata",
+      "phase": "07"
+    },
+    {
+      "decision": "MeetingMetadataOutput has: overview, goals, key_decisions, conclusions",
+      "rationale": "These are the fields the selection LLM needs to pick the right meeting; populated once at disconnect",
+      "phase": "07"
+    },
+    {
+      "decision": "In-memory index cache in MeetingWriterAgent (invalidated on upsert)",
+      "rationale": "Avoids disk read on every memory query; safe because upsert always refreshes cache",
+      "phase": "07"
+    },
+    {
+      "decision": "Pre-filter entries by channel_id and date window BEFORE LLM selection call",
+      "rationale": "Reduces LLM context size 60-80% for common cases; skip LLM entirely when pre-filter uniquely identifies one meeting (only when filters actually narrowed the list)",
+      "phase": "07"
+    },
+    {
+      "decision": "Use full_transcript key (not summary_text) for .md content passed to AnswerAgent",
+      "rationale": "AnswerAgent now labels it 'Full Meeting Transcript' so LLM knows it has complete content; Pinecone path unchanged (still uses summary_text)",
+      "phase": "07"
+    },
+    {
+      "decision": "_speak_lock serializes all voice output (speak, speak_chunked, _stream_llm_and_speak, ack Yes?)",
+      "rationale": "Fixes Bug 1a: concurrent wake-word triggers caused audio overlap",
+      "phase": "07"
+    },
+    {
+      "decision": "Thread-unique temp filenames in speak() using threading.get_ident()",
+      "rationale": "Fixes Bug 1b: hardcoded temp_jarvis.mp3 caused file corruption in concurrent threads",
+      "phase": "07"
+    },
+    {
+      "decision": "_header_lock guards _meeting_header_written flag in _flush_sentence_buffer",
+      "rationale": "Fixes Bug 2a: disconnect flush racing with time-based flush could both see False and double-write header (w mode truncates file)",
+      "phase": "07"
+    },
+    {
+      "decision": "_full_transcript_lines accumulates ALL lines across the whole meeting; only cleared at disconnect",
+      "rationale": "_sentence_buffer is periodically drained; full transcript needed for MeetingMetadataAgent at disconnect",
+      "phase": "07"
+    }
+  ],
+  "uncommitted_files": [
+    "agents/answer_agent.py",
+    "agents/history_manager.py",
+    "agents/meeting_writer.py",
+    "agents/rolling_summarizer.py",
+    "jarvis.py",
+    "storage/models.py",
+    "tests/test_jarvis_rolling_pipeline.py",
+    "tests/test_rolling_pipeline.py"
+  ],
+  "next_action": "Commit all uncommitted changes, then run /gsd:verify-work 7",
+  "context_notes": "Phase 7 execution is complete (3 plans done, 209 tests pass). Post-execution we fixed 3 bugs (voice overlap, temp file collision, header write race) and made 3 retrieval improvements (index cache, pre-filter, full_transcript label). Then redesigned the .md format: raw transcript during meeting, one LLM call at end for metadata. All changes are tested and passing but uncommitted."
+}

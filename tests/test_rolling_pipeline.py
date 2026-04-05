@@ -1,16 +1,14 @@
 """
-Tests for Plan 07-01: Rolling Summarizer + Meeting Writer pipeline.
+Tests for Plan 07-01: Meeting Writer pipeline (updated for transcript-first design).
 
 Tests cover:
-1. BatchSummaryOutput model validation
-2. MeetingIndexEntry model validation
-3. RollingSummarizerAgent.run() — mocked Runner.run()
+1. MeetingMetadataOutput model validation
+2. MeetingIndexEntry model validation (including new goals/key_decisions/conclusions fields)
+3. MeetingMetadataAgent.run() — mocked Runner.run()
 4. MeetingWriterAgent.write_meeting_header() — real filesystem under tmp_path
-5. MeetingWriterAgent.append_batch() — real filesystem, append-only verification
-6. MeetingWriterAgent.upsert_index() — create and update idempotency
-7. MeetingWriterAgent.read_index() — empty list when no index exists
-
-No mocking of filesystem for writer tests — tmp_path fixture throughout (Plan spec).
+5. MeetingWriterAgent.append_transcript_lines() — real filesystem, append-only
+6. MeetingWriterAgent.finalize_meeting() — appends Meeting Summary section
+7. MeetingWriterAgent.upsert_index() — create and update idempotency
 """
 
 import asyncio
@@ -19,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from storage.models import BatchSummaryOutput, MeetingIndexEntry
+from storage.models import MeetingIndexEntry, MeetingMetadataOutput
 
 
 # ---------------------------------------------------------------------------
@@ -27,14 +25,13 @@ from storage.models import BatchSummaryOutput, MeetingIndexEntry
 # ---------------------------------------------------------------------------
 
 def _make_index_entry(**overrides) -> MeetingIndexEntry:
-    """Return a sample MeetingIndexEntry with sensible defaults."""
     defaults = dict(
         meeting_id="mtg-abc",
         title="Engineering Standup",
         date="2026-04-05",
         channel_id="C123",
         channel_name="eng-standup",
-        overview="Discussed sprint blockers and deployment timeline.",
+        overview="",
         md_path="meetings/C123/2026-04-05_mtg-abc.md",
         participants=["Alice", "Bob"],
         start_ts=1775328000,
@@ -43,31 +40,33 @@ def _make_index_entry(**overrides) -> MeetingIndexEntry:
     return MeetingIndexEntry(**defaults)
 
 
-def _make_batch_summary(**overrides) -> BatchSummaryOutput:
-    """Return a sample BatchSummaryOutput with sensible defaults."""
+def _make_metadata(**overrides) -> MeetingMetadataOutput:
     defaults = dict(
-        summary_text="Alice outlined the deployment plan. Bob raised a concern about CI.",
-        key_points=["Deployment on Friday", "CI pipeline issue"],
-        speakers=["Alice", "Bob"],
+        overview="Team discussed deployment and CI issues.",
+        goals=["Unblock deployment", "Resolve CI failures"],
+        key_decisions=["Deploy on Friday", "Bob owns CI fix"],
+        conclusions=["All blockers assigned", "Next sync Thursday"],
     )
     defaults.update(overrides)
-    return BatchSummaryOutput(**defaults)
+    return MeetingMetadataOutput(**defaults)
 
 
 # ---------------------------------------------------------------------------
-# Test 1: BatchSummaryOutput model validation
+# Test 1: MeetingMetadataOutput model validation
 # ---------------------------------------------------------------------------
 
-def test_batch_summary_output_valid():
-    """BatchSummaryOutput instantiates with valid data and fields are correct types."""
-    output = BatchSummaryOutput(
-        summary_text="s",
-        key_points=["a"],
-        speakers=["Alice"],
+def test_meeting_metadata_output_valid():
+    """MeetingMetadataOutput instantiates with valid data."""
+    output = MeetingMetadataOutput(
+        overview="Short overview.",
+        goals=["Goal A"],
+        key_decisions=["Decision X"],
+        conclusions=["Conclusion Z"],
     )
-    assert isinstance(output.speakers, list)
-    assert output.key_points == ["a"]
-    assert output.summary_text == "s"
+    assert output.overview == "Short overview."
+    assert isinstance(output.goals, list)
+    assert isinstance(output.key_decisions, list)
+    assert isinstance(output.conclusions, list)
 
 
 # ---------------------------------------------------------------------------
@@ -75,44 +74,38 @@ def test_batch_summary_output_valid():
 # ---------------------------------------------------------------------------
 
 def test_meeting_index_entry_valid():
-    """MeetingIndexEntry instantiates and all required fields are accessible."""
+    """MeetingIndexEntry includes new metadata fields with correct defaults."""
     entry = _make_index_entry()
     assert entry.meeting_id == "mtg-abc"
-    assert entry.title == "Engineering Standup"
-    assert entry.date == "2026-04-05"
     assert entry.channel_id == "C123"
-    assert entry.channel_name == "eng-standup"
-    assert entry.overview == "Discussed sprint blockers and deployment timeline."
-    assert entry.md_path == "meetings/C123/2026-04-05_mtg-abc.md"
-    assert entry.participants == ["Alice", "Bob"]
+    assert entry.goals == []
+    assert entry.key_decisions == []
+    assert entry.conclusions == []
     assert isinstance(entry.start_ts, int)
 
 
 # ---------------------------------------------------------------------------
-# Test 3: RollingSummarizerAgent returns BatchSummaryOutput
+# Test 3: MeetingMetadataAgent.run() delegates to Runner.run()
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_rolling_summarizer_agent_run():
-    """RollingSummarizerAgent.run() delegates to Runner.run() and returns BatchSummaryOutput."""
-    from agents.rolling_summarizer import RollingSummarizerAgent
+async def test_meeting_metadata_agent_run():
+    """MeetingMetadataAgent.run() calls Runner.run() and returns MeetingMetadataOutput."""
+    from agents.rolling_summarizer import MeetingMetadataAgent
 
-    fake_output = _make_batch_summary()
+    fake_output = _make_metadata()
     mock_result = MagicMock()
     mock_result.final_output = fake_output
 
     with patch("agents.rolling_summarizer.Runner.run", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = mock_result
-        agent = RollingSummarizerAgent()
+        agent = MeetingMetadataAgent()
         transcript = "Alice: Hello\nBob: Hi there"
         result = await agent.run(transcript)
 
-    assert isinstance(result, BatchSummaryOutput)
-    assert result.summary_text == fake_output.summary_text
+    assert isinstance(result, MeetingMetadataOutput)
+    assert result.overview == fake_output.overview
     mock_run.assert_called_once()
-    call_kwargs = mock_run.call_args
-    # Verify the transcript string was passed as input
-    assert call_kwargs.kwargs.get("input") == transcript or transcript in str(call_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -130,97 +123,82 @@ async def test_write_meeting_header_creates_file(tmp_path):
     await writer.write_meeting_header(entry)
 
     expected_path = tmp_path / "C123" / "2026-04-05_mtg-abc.md"
-    assert expected_path.exists(), f"Expected .md file at {expected_path}"
-
+    assert expected_path.exists()
     content = expected_path.read_text()
     assert "# Meeting:" in content
-    assert "**Channel:**" in content
-    assert "**Date:**" in content
     assert "Engineering Standup" in content
     assert "2026-04-05" in content
+    assert "**Participants:**" in content
 
 
 # ---------------------------------------------------------------------------
-# Test 5: append_batch appends sections without rewriting
+# Test 5: append_transcript_lines appends raw lines, preserves header
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_append_batch_appends_two_sections(tmp_path):
-    """append_batch appends two batch sections and preserves the original header."""
+async def test_append_transcript_lines_appends_and_preserves_header(tmp_path):
+    """append_transcript_lines appends raw lines without rewriting the header."""
     from agents.meeting_writer import MeetingWriterAgent
 
     writer = MeetingWriterAgent(base_dir=str(tmp_path))
     entry = _make_index_entry()
 
-    # Write header first
     await writer.write_meeting_header(entry)
+    await writer.append_transcript_lines(entry, ["Alice: Good morning.", "Bob: Let's start."])
+    await writer.append_transcript_lines(entry, ["Alice: Any blockers?"])
 
-    batch1 = _make_batch_summary(
-        summary_text="First batch content.",
-        key_points=["Point A"],
-        speakers=["Alice"],
-    )
-    batch2 = _make_batch_summary(
-        summary_text="Second batch content.",
-        key_points=["Point B"],
-        speakers=["Bob"],
-    )
-
-    await writer.append_batch(entry, batch_num=1, batch_summary=batch1, timestamp_str="10:00 AM")
-    await writer.append_batch(entry, batch_num=2, batch_summary=batch2, timestamp_str="10:05 AM")
-
-    expected_path = tmp_path / "C123" / "2026-04-05_mtg-abc.md"
-    content = expected_path.read_text()
-
-    # Original header is preserved
+    content = (tmp_path / "C123" / "2026-04-05_mtg-abc.md").read_text()
     assert "# Meeting:" in content
-
-    # Both batch sections are present
-    assert "Batch 1" in content
-    assert "Batch 2" in content
-
-    # Speakers line present in each section
-    assert "**Speakers:** Alice" in content
-    assert "**Speakers:** Bob" in content
+    assert "Alice: Good morning." in content
+    assert "Bob: Let's start." in content
+    assert "Alice: Any blockers?" in content
 
 
 # ---------------------------------------------------------------------------
-# Test 6: upsert_index create and update
+# Test 6: finalize_meeting appends Meeting Summary section
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_finalize_meeting_appends_summary_section(tmp_path):
+    """finalize_meeting appends a structured Meeting Summary after the transcript."""
+    from agents.meeting_writer import MeetingWriterAgent
+
+    writer = MeetingWriterAgent(base_dir=str(tmp_path))
+    entry = _make_index_entry()
+    metadata = _make_metadata()
+
+    await writer.write_meeting_header(entry)
+    await writer.append_transcript_lines(entry, ["Alice: Hello."])
+    await writer.finalize_meeting(entry, metadata)
+
+    content = (tmp_path / "C123" / "2026-04-05_mtg-abc.md").read_text()
+    assert "## Meeting Summary" in content
+    assert "**Goals:**" in content
+    assert "**Key Decisions:**" in content
+    assert "**Conclusions:**" in content
+    assert "Unblock deployment" in content
+    assert "Deploy on Friday" in content
+    # Transcript still present above the summary
+    assert "Alice: Hello." in content
+
+
+# ---------------------------------------------------------------------------
+# Test 7: upsert_index create and update idempotency
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_upsert_index_creates_and_updates(tmp_path):
-    """upsert_index creates index on first call; second call with same meeting_id replaces entry."""
+    """upsert_index creates index; second call with same meeting_id replaces entry."""
     from agents.meeting_writer import MeetingWriterAgent
 
     writer = MeetingWriterAgent(base_dir=str(tmp_path))
-    entry = _make_index_entry(overview="Initial overview.")
-
-    # First upsert — creates the index
+    entry = _make_index_entry(overview="Initial.")
     await writer.upsert_index(entry)
 
-    # Second upsert — same meeting_id, updated overview
-    updated_entry = _make_index_entry(overview="Updated overview after batch 2.")
-    await writer.upsert_index(updated_entry)
+    updated = _make_index_entry(overview="Updated.", goals=["Goal X"])
+    await writer.upsert_index(updated)
 
-    # read_index should return exactly one entry (no duplicates)
     entries = await writer.read_index()
-    assert len(entries) == 1, f"Expected 1 entry, got {len(entries)}"
-
-    # The overview should reflect the second upsert
-    assert entries[0].overview == "Updated overview after batch 2."
-
-
-# ---------------------------------------------------------------------------
-# Test 7: read_index returns empty list when no index exists
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_read_index_returns_empty_when_no_file(tmp_path):
-    """read_index returns [] without raising an exception when the index file is absent."""
-    from agents.meeting_writer import MeetingWriterAgent
-
-    writer = MeetingWriterAgent(base_dir=str(tmp_path))
-    result = await writer.read_index()
-
-    assert result == [], f"Expected empty list, got {result}"
+    assert len(entries) == 1
+    assert entries[0].overview == "Updated."
+    assert entries[0].goals == ["Goal X"]

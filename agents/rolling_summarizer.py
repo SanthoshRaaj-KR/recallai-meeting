@@ -1,61 +1,77 @@
 """
-RollingSummarizerAgent: processes a single batch of meeting transcript lines and
-returns a BatchSummaryOutput with summary_text, key_points, and speakers.
+MeetingMetadataAgent: processes the full meeting transcript at end-of-meeting
+and returns a MeetingMetadataOutput with overview, goals, key_decisions, and
+conclusions.
 
-This agent is invoked each time the sentence buffer is flushed (either by sentence
-count threshold or the time ceiling). It does NOT accumulate context across batches —
-each call summarizes only the lines passed to it.
+This agent is invoked ONCE per meeting on disconnect — not per-batch. During
+the meeting, transcript lines are appended directly to the .md file without any
+LLM processing. The metadata section (goals, decisions, conclusions) is generated
+here and appended as a structured "Meeting Summary" block at the end of the .md
+file, and stored in the JSON index for the History Manager's selection LLM.
 
 Design notes:
-- Follows the same Agent(output_type=...) pattern as SummarizerAgent in summarizer.py.
-- Does NOT catch exceptions — callers (jarvis.py flush handler) handle failures.
+- Follows the same Agent(output_type=...) pattern as SummarizerAgent.
 - Uses gpt-4o-mini per Phase 6 mandate (budget model switch).
+- Does NOT catch exceptions — callers (jarvis.py disconnect handler) handle failures.
+
+Backwards compatibility:
+- RollingSummarizerAgent is re-exported as an alias so any existing test imports
+  do not break during the migration window.
 """
 
 from agents import Agent, Runner  # openai-agents SDK (namespace extended via conftest.py)
-from storage.models import BatchSummaryOutput
+from storage.models import MeetingMetadataOutput
 
 _INSTRUCTIONS = """\
-You are a real-time meeting summarizer. Given a batch of meeting transcript lines
-(format: "Speaker: utterance"), produce a concise summary of this batch only.
+You are a meeting analyst. Given a full meeting transcript (format: "Speaker: utterance"),
+extract concise, structured metadata for the meeting.
 
 Return:
-- summary_text: 2-4 sentence prose. Be specific — name topics and outcomes discussed.
-- key_points: Up to 5 short bullet-point phrases capturing the most important points.
-- speakers: List of unique speaker names who appear in the transcript lines.
+- overview: 1-2 sentence description of what the meeting was about and who attended.
+- goals: Up to 5 short phrases describing what the meeting aimed to achieve.
+- key_decisions: Up to 10 short phrases, each a clear decision that was reached.
+  Only include decisions explicitly agreed upon — not proposals or suggestions.
+- conclusions: Up to 5 short phrases summarising how the meeting concluded or
+  what the overall outcome was.
 
-Stay factual. Do not infer beyond what is said. Do not reference other batches.
+Stay factual. Do not infer beyond what is said. Be concise — each item should be
+a short phrase, not a full sentence.
 """
 
 
-class RollingSummarizerAgent:
-    """Summarizes a single flushed batch of transcript lines into structured output.
+class MeetingMetadataAgent:
+    """Generates structured metadata from the full meeting transcript at end-of-meeting.
 
-    Each call is stateless — the agent does not retain context between batches.
-    The batch_transcript string is the complete input for one summarization call.
+    Called once on meeting disconnect. Takes the entire accumulated transcript and
+    returns goals, key decisions, and conclusions for the .md summary section and
+    the JSON meeting index.
     """
 
     def __init__(self, model: str = "gpt-4o-mini"):
         self._model = model
         self._agent = Agent(
-            name="rolling-batch-summarizer",
+            name="meeting-metadata-agent",
             instructions=_INSTRUCTIONS,
             model=model,
-            output_type=BatchSummaryOutput,
+            output_type=MeetingMetadataOutput,
         )
 
-    async def run(self, batch_transcript: str) -> BatchSummaryOutput:
-        """Summarize one batch of transcript lines.
+    async def run(self, full_transcript: str) -> MeetingMetadataOutput:
+        """Generate meeting metadata from the full transcript.
 
         Args:
-            batch_transcript: String of transcript lines, one per line, in the
-                format "Speaker: utterance\\nSpeaker2: utterance\\n..."
+            full_transcript: Complete meeting transcript as a single string,
+                one "Speaker: utterance" line per line.
 
         Returns:
-            BatchSummaryOutput with summary_text, key_points, and speakers.
+            MeetingMetadataOutput with overview, goals, key_decisions, conclusions.
 
         Raises:
             Any exception raised by the SDK Runner is propagated to the caller.
         """
-        result = await Runner.run(self._agent, input=batch_transcript)
+        result = await Runner.run(self._agent, input=full_transcript)
         return result.final_output
+
+
+# Backwards-compat alias — keeps existing imports working during migration
+RollingSummarizerAgent = MeetingMetadataAgent

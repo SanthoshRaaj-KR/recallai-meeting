@@ -23,7 +23,7 @@ from pathlib import Path
 
 import aiofiles
 
-from storage.models import BatchSummaryOutput, MeetingIndexEntry
+from storage.models import MeetingIndexEntry, MeetingMetadataOutput
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class MeetingWriterAgent:
         self._base_dir = Path(base_dir)
         self._lock = asyncio.Lock()
         self._index_path = Path(base_dir) / "meeting_index.json"
+        self._index_cache: list[MeetingIndexEntry] | None = None
 
     def _md_path(self, channel_id: str, date_str: str, meeting_id: str) -> Path:
         """Return the canonical .md file path for a meeting.
@@ -77,51 +78,67 @@ class MeetingWriterAgent:
                 await f.write(header)
             logger.debug("Wrote meeting header: %s", md_path)
 
-    async def append_batch(
+    async def append_transcript_lines(
         self,
         entry: MeetingIndexEntry,
-        batch_num: int,
-        batch_summary: BatchSummaryOutput,
-        timestamp_str: str,
+        lines: list[str],
     ) -> None:
-        """Append a batch summary section to the meeting's .md file.
+        """Append raw transcript lines to the meeting's .md file.
 
-        Always opens in append mode ("a") — existing content is never rewritten.
-        This method is the only place batch content is written; the file is safe
-        to read concurrently while being written (D-06).
+        Opens in append mode — existing content is never rewritten.
+        Lines should be in "Speaker: utterance" format.
 
         Args:
             entry: MeetingIndexEntry identifying which .md file to append to.
-            batch_num: Sequential batch number (1-based).
-            batch_summary: BatchSummaryOutput from RollingSummarizerAgent.
-            timestamp_str: Human-readable time formatted as "HH:MM AM/PM" by caller.
+            lines: List of "Speaker: utterance" strings to append.
+        """
+        if not lines:
+            return
+        async with self._lock:
+            md_path = self._md_path(entry.channel_id, entry.date, entry.meeting_id)
+            block = "\n".join(lines) + "\n"
+            async with aiofiles.open(md_path, "a") as f:
+                await f.write(block)
+            logger.debug("Appended %d transcript lines to %s", len(lines), md_path)
+
+    async def finalize_meeting(
+        self,
+        entry: MeetingIndexEntry,
+        metadata: MeetingMetadataOutput,
+    ) -> None:
+        """Append the structured Meeting Summary section at end-of-meeting.
+
+        Called once on disconnect after MeetingMetadataAgent has run. Appends
+        a clean summary block containing goals, key decisions, and conclusions.
+
+        Args:
+            entry: MeetingIndexEntry identifying which .md file to finalize.
+            metadata: MeetingMetadataOutput from MeetingMetadataAgent.
         """
         async with self._lock:
             md_path = self._md_path(entry.channel_id, entry.date, entry.meeting_id)
-            key_points_block = "\n".join(f"- {p}" for p in batch_summary.key_points)
-            speakers_str = ", ".join(batch_summary.speakers)
+
+            goals_block = "\n".join(f"- {g}" for g in metadata.goals) or "- None recorded"
+            decisions_block = "\n".join(f"- {d}" for d in metadata.key_decisions) or "- None recorded"
+            conclusions_block = "\n".join(f"- {c}" for c in metadata.conclusions) or "- None recorded"
+
             section = (
-                f"## {timestamp_str} — Batch {batch_num}\n"
-                f"\n"
-                f"{batch_summary.summary_text}\n"
-                f"\n"
-                f"**Key Points:**\n"
-                f"{key_points_block}\n"
-                f"\n"
-                f"**Speakers:** {speakers_str}\n"
-                f"\n"
-                f"---\n"
-                f"\n"
+                f"\n---\n\n"
+                f"## Meeting Summary\n\n"
+                f"**Goals:**\n{goals_block}\n\n"
+                f"**Key Decisions:**\n{decisions_block}\n\n"
+                f"**Conclusions:**\n{conclusions_block}\n"
             )
             async with aiofiles.open(md_path, "a") as f:
                 await f.write(section)
-            logger.debug("Appended batch %d to %s", batch_num, md_path)
+            logger.debug("Finalized meeting summary for %s", entry.meeting_id)
 
     async def upsert_index(self, entry: MeetingIndexEntry) -> None:
         """Create or update the meeting's entry in the JSON index.
 
-        Reads the current index, replaces an existing entry with the same
-        meeting_id, or appends a new entry. Writes the updated list back.
+        Reads the current index (or uses in-memory cache), replaces an existing
+        entry with the same meeting_id, or appends a new entry. Writes the
+        updated list back and refreshes the cache atomically.
 
         Args:
             entry: MeetingIndexEntry to insert or update.
@@ -134,34 +151,49 @@ class MeetingWriterAgent:
                 entries = json.loads(raw) if raw.strip() else []
 
             # Replace existing entry with same meeting_id, or append
+            entry_dict = json.loads(entry.model_dump_json())
             updated = False
             for i, item in enumerate(entries):
                 if item.get("meeting_id") == entry.meeting_id:
-                    entries[i] = json.loads(entry.model_dump_json())
+                    entries[i] = entry_dict
                     updated = True
                     break
             if not updated:
-                entries.append(json.loads(entry.model_dump_json()))
+                entries.append(entry_dict)
 
             async with aiofiles.open(self._index_path, "w") as f:
                 await f.write(json.dumps(entries, indent=2))
+
+            # Refresh in-memory cache so the next read_index() is instant
+            self._index_cache = [MeetingIndexEntry.model_validate(item) for item in entries]
             logger.debug("Upserted index entry: %s", entry.meeting_id)
 
     async def read_index(self) -> list[MeetingIndexEntry]:
         """Read and return all entries from the JSON meeting index.
 
-        Returns an empty list if the index file does not exist yet.
+        Returns the in-memory cache when available (populated by upsert_index
+        or a prior read). Falls back to disk on the first call or after a cache
+        miss. Returns an empty list if the index file does not exist yet.
 
         Returns:
             List of MeetingIndexEntry objects, one per meeting.
         """
+        # Fast path: return cached list without touching disk
+        if self._index_cache is not None:
+            return self._index_cache
         async with self._lock:
+            # Re-check after acquiring lock — another coroutine may have
+            # populated the cache while we waited.
+            if self._index_cache is not None:
+                return self._index_cache
             if not self._index_path.exists():
-                return []
+                self._index_cache = []
+                return self._index_cache
             async with aiofiles.open(self._index_path, "r") as f:
                 raw = await f.read()
             entries = json.loads(raw) if raw.strip() else []
-            return [MeetingIndexEntry.model_validate(item) for item in entries]
+            self._index_cache = [MeetingIndexEntry.model_validate(item) for item in entries]
+            return self._index_cache
 
     async def read_md(self, md_path: str) -> str:
         """Read and return the full content of a meeting .md file.

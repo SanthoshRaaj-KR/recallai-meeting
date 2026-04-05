@@ -115,10 +115,21 @@ class AnswerAgent:
             context_parts = []
             for item in retrieval_result.results:
                 metadata = item.get("metadata", {})
+                # full_transcript is set by HistoryManagerAgent (full .md content);
+                # summary_text is set by the Pinecone/RetrieverAgent path (short snippet).
+                # Use whichever is present, with the correct label so the LLM knows
+                # whether it is reading a snippet or a complete meeting document.
+                full_transcript = metadata.get("full_transcript")
+                if full_transcript:
+                    content_label = "Full Meeting Transcript"
+                    content = full_transcript
+                else:
+                    content_label = "Summary"
+                    content = metadata.get("summary_text", "N/A")
                 part = (
                     f"--- Meeting: {metadata.get('channel_name', 'unknown')} "
                     f"| start_ts: {metadata.get('start_ts', 'N/A')} ---\n"
-                    f"Summary: {metadata.get('summary_text', 'N/A')}\n"
+                    f"{content_label}: {content}\n"
                     f"Decisions: {metadata.get('decisions', [])}\n"
                     f"Topics: {metadata.get('topics_covered', [])}\n"
                     f"Participants: {metadata.get('participants', [])}\n"

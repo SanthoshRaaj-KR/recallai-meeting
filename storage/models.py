@@ -57,25 +57,30 @@ class MeetingRecord(BaseModel):
     summarized_at: Optional[int] = None                   # Unix epoch integer
 
 
-class BatchSummaryOutput(BaseModel):
-    """Structured output schema for a single rolling-summarizer batch.
+class MeetingMetadataOutput(BaseModel):
+    """Structured output from MeetingMetadataAgent — generated once at end-of-meeting.
 
-    Returned by RollingSummarizerAgent for each flushed sentence buffer.
-    All fields are flat scalars or lists of strings — consistent with the
-    project-wide constraint of no nested JSON objects.
+    Contains the high-level metadata extracted from the full meeting transcript.
+    These fields are appended to the .md file as a "Meeting Summary" section and
+    stored in the JSON index so the History Manager's selection LLM can use them
+    to identify the most relevant meeting for a user's query.
+
+    All fields are flat scalars or lists of strings — no nested objects.
     """
 
-    summary_text: str                       # 2-4 sentence prose summary of this batch
-    key_points: list[str] = Field(default_factory=list)   # short bullet-point phrases
-    speakers: list[str] = Field(default_factory=list)     # speaker names active in this batch
+    overview: str                            # 1-2 sentence description of the meeting
+    goals: list[str] = Field(default_factory=list)        # what the meeting aimed to achieve
+    key_decisions: list[str] = Field(default_factory=list) # decisions reached
+    conclusions: list[str] = Field(default_factory=list)  # how the meeting concluded
 
 
 class MeetingIndexEntry(BaseModel):
     """Index entry for the per-meeting JSON index maintained by MeetingWriterAgent.
 
     This is the fast-lookup path used by the History Manager to select a meeting
-    before loading the full .md file content. One entry per meeting, upserted
-    after each batch flush so the index reflects the meeting's current state.
+    before loading the full .md file content. One entry per meeting; metadata
+    fields (overview, goals, key_decisions, conclusions) are populated once at
+    end-of-meeting by MeetingMetadataAgent.
 
     Design constraints (same as MeetingRecord):
     - start_ts is a Unix epoch integer — never a datetime object.
@@ -87,7 +92,10 @@ class MeetingIndexEntry(BaseModel):
     date: str                               # ISO date string (YYYY-MM-DD)
     channel_id: str
     channel_name: str
-    overview: str                           # 1-2 sentence description, updated each batch
+    overview: str = ""                      # 1-2 sentence description; set at end-of-meeting
     md_path: str                            # relative path to the .md file
     participants: list[str] = Field(default_factory=list)  # accumulated unique names
     start_ts: int                           # Unix epoch integer — NEVER datetime
+    goals: list[str] = Field(default_factory=list)        # populated at end-of-meeting
+    key_decisions: list[str] = Field(default_factory=list) # populated at end-of-meeting
+    conclusions: list[str] = Field(default_factory=list)  # populated at end-of-meeting
