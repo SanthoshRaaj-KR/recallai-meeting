@@ -8,3 +8,8 @@ websockets
 pyaudio
 openai
 openai-agents
+pinecone-client
+docling
+pydantic
+beautifulsoup4
+pytest
