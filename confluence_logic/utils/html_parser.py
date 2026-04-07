@@ -19,6 +19,13 @@ def _is_full_page_mode(heading_string: Optional[str]) -> bool:
 def _looks_like_html(text: str) -> bool:
     return "<" in text and ">" in text
 
+def _resolve_target_html(section_html: str, target: str) -> str:
+    if not target:
+        return target
+    if _looks_like_html(target):
+        return target
+    return _resolve_visible_text_target(section_html, target)
+
 def _resolve_visible_text_target(section_html: str, target_text: str) -> str:
     """
     Resolve a plain-text target into a unique outer HTML block within the section.
@@ -124,9 +131,7 @@ def edit_block_in_section(html_content: str, heading_string: Optional[str], old_
     section_html = "".join(str(n) for n in nodes_to_remove)
     
     if old_block_html:
-        resolved_old_block_html = old_block_html
-        if not _looks_like_html(old_block_html):
-            resolved_old_block_html = _resolve_visible_text_target(section_html, old_block_html)
+        resolved_old_block_html = _resolve_target_html(section_html, old_block_html)
 
         occurrences = section_html.count(resolved_old_block_html)
         if occurrences == 0:
@@ -153,6 +158,63 @@ def edit_block_in_section(html_content: str, heading_string: Optional[str], old_
             current_anchor.insert_after(new_element)
             current_anchor = new_element
         
+    return str(soup)
+
+def delete_content_in_section(
+    html_content: str,
+    heading_string: Optional[str],
+    target_html_or_text: str = "",
+    delete_entire_section: bool = False,
+) -> str:
+    """
+    Dedicated delete operation.
+    - delete_entire_section=True with a real heading removes the heading and its bounded section.
+    - target_html_or_text removes a unique block from the selected bounded area.
+    - FULL_PAGE with no target clears the page body.
+    - Root with no target clears only the intro area before the first heading.
+    """
+    anchor, nodes_to_remove, soup = find_bounded_section(html_content, heading_string)
+    section_html = "".join(str(n) for n in nodes_to_remove)
+
+    if delete_entire_section and anchor is not None:
+        anchor.extract()
+        for node in nodes_to_remove:
+            node.extract()
+        return str(soup)
+
+    if target_html_or_text:
+        resolved_target = _resolve_target_html(section_html, target_html_or_text)
+        occurrences = section_html.count(resolved_target)
+        if occurrences == 0:
+            raise ValueError("The delete target was not found within the specified bounded section.")
+        if occurrences > 1:
+            raise ValueError(
+                f"The delete target appears {occurrences} times. Provide a more specific unique target."
+            )
+
+        new_section_html = section_html.replace(resolved_target, "", 1)
+        for node in nodes_to_remove:
+            node.extract()
+
+        new_soup = BeautifulSoup(new_section_html, "html.parser")
+        if anchor is None:
+            container = soup.body if soup.body else soup
+            for new_element in reversed(list(new_soup.contents)):
+                container.insert(0, new_element)
+        else:
+            current_anchor = anchor
+            for new_element in list(new_soup.contents):
+                current_anchor.insert_after(new_element)
+                current_anchor = new_element
+        return str(soup)
+
+    for node in nodes_to_remove:
+        node.extract()
+
+    if anchor is None and _is_full_page_mode(heading_string):
+        container = soup.body if soup.body else soup
+        container.clear()
+
     return str(soup)
 
 def extract_headings(html_content: str) -> List[str]:

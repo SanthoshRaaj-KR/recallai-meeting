@@ -1,9 +1,9 @@
 import pytest
 from unittest.mock import patch
 from confluence_logic.agents.tools import (
-    search_workspace_knowledge, fetch_live_page, preview_edit, commit_document_edit, update_page_title, list_workspace_pages
+    search_workspace_knowledge, fetch_live_page, preview_edit, preview_delete, commit_delete, commit_document_edit, update_page_title, list_workspace_pages
 )
-from confluence_logic.utils.html_parser import edit_block_in_section, get_section_html
+from confluence_logic.utils.html_parser import delete_content_in_section, edit_block_in_section, get_section_html
 
 @patch('confluence_logic.agents.tools.get_connector')
 @patch('confluence_logic.agents.tools.get_store')
@@ -121,6 +121,44 @@ def test_plain_text_target_resolves_to_unique_block():
     assert "<p>14</p>" not in result
     assert "Why donuts are awesome" in result
     assert "Common mistakes" in result
+
+def test_delete_entire_section_removes_heading_and_body():
+    html = "<h2>Common mistakes</h2><p>mistake body</p><h2>Keep</h2><p>keep me</p>"
+    result = delete_content_in_section(html, "Common mistakes", delete_entire_section=True)
+    assert "Common mistakes" not in result
+    assert "mistake body" not in result
+    assert "Keep" in result
+    assert "keep me" in result
+
+def test_delete_unique_visible_text_block_inside_full_page():
+    html = "<h2>Overview</h2><p>Delete me</p><p>Keep me</p>"
+    result = delete_content_in_section(html, "FULL_PAGE", target_html_or_text="Delete me")
+    assert "Delete me" not in result
+    assert "Keep me" in result
+
+@patch('confluence_logic.agents.tools.get_connector')
+def test_preview_delete(mock_get_connector):
+    mock_connector = mock_get_connector.return_value
+    mock_connector.fetch_page_html.return_value = "<h2>Common mistakes</h2><p>mistake body</p><h2>Keep</h2><p>keep me</p>"
+
+    resp = preview_delete("123", "Common mistakes", delete_entire_section=True)
+    assert resp.success is True
+    assert "Common mistakes" in resp.diff
+
+@patch('confluence_logic.agents.tools.get_connector')
+@patch('confluence_logic.ingestion.doc_pipeline.IngestionPipeline.process_page')
+def test_commit_delete(mock_pipeline, mock_get_connector):
+    mock_connector = mock_get_connector.return_value
+    mock_connector.fetch_page_html.return_value = "<h2>Common mistakes</h2><p>mistake body</p><h2>Keep</h2><p>keep me</p>"
+    mock_connector.push_update.return_value = True
+
+    resp = commit_delete("123", 4, "Common mistakes", delete_entire_section=True)
+    assert resp.success is True
+    mock_connector.push_update.assert_called_once()
+    pushed_html = mock_connector.push_update.call_args.args[1]
+    assert "Common mistakes" not in pushed_html
+    assert "Keep" in pushed_html
+    mock_pipeline.assert_called_once_with("123")
 
 @patch('confluence_logic.agents.tools.get_connector')
 @patch('confluence_logic.ingestion.doc_pipeline.IngestionPipeline.process_page')

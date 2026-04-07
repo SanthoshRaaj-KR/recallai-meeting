@@ -4,7 +4,7 @@ from typing import List, Optional
 from ..db.vector_store import PineconeStore
 from ..connectors.confluence import ConfluenceConnector
 from ..core.schemas import SearchResponse, CandidatePage, LivePageResponse, PreviewResponse, CommitResponse, CreatePageResponse, PageSectionInput
-from ..utils.html_parser import edit_block_in_section, extract_headings, get_section_html
+from ..utils.html_parser import delete_content_in_section, edit_block_in_section, extract_headings, get_section_html
 import logging
 from agents import function_tool
 
@@ -177,6 +177,38 @@ def preview_edit(page_id: str, heading_string: str, old_block_html: str = "", ne
         return PreviewResponse(success=False, diff="", message=f"Failed DOM manipulation: {str(e)}")
 
 @function_tool
+def preview_delete(
+    page_id: str,
+    heading_string: str,
+    target_html_or_text: str = "",
+    delete_entire_section: bool = False,
+) -> PreviewResponse:
+    """Generates a preview for a delete operation without changing the existing edit tool behavior."""
+    try:
+        live_html = get_connector().fetch_page_html(page_id)
+        new_document_html = delete_content_in_section(
+            live_html,
+            heading_string,
+            target_html_or_text=target_html_or_text,
+            delete_entire_section=delete_entire_section,
+        )
+
+        diff_lines = list(difflib.unified_diff(
+            live_html.splitlines(keepends=True),
+            new_document_html.splitlines(keepends=True),
+            fromfile='Current',
+            tofile='PreviewDelete'
+        ))
+
+        diff_str = "".join(diff_lines)
+        if not diff_str:
+            return PreviewResponse(success=False, diff="", message="No visible delete changes detected.")
+
+        return PreviewResponse(success=True, diff=diff_str, message="Delete preview generated.")
+    except Exception as e:
+        return PreviewResponse(success=False, diff="", message=f"Failed delete preview: {str(e)}")
+
+@function_tool
 def update_page_title(page_id: str, expected_version: int, new_title: str) -> CommitResponse:
     """Updates the title of an existing Confluence page without creating a new page."""
     try:
@@ -220,6 +252,72 @@ def update_page_title(page_id: str, expected_version: int, new_title: str) -> Co
         return CommitResponse(success=False, version=None, message=message)
     except Exception as e:
         logger.error(f"Title update failed: {e}")
+        message = str(e)
+        _tool_run_state.set({"last_action": "commit", "success": False, "message": message})
+        return CommitResponse(success=False, version=None, message=message)
+
+@function_tool
+def commit_delete(
+    page_id: str,
+    expected_version: int,
+    heading_string: str,
+    target_html_or_text: str = "",
+    delete_entire_section: bool = False,
+) -> CommitResponse:
+    """Commits a dedicated delete operation for sections or unique content blocks."""
+    try:
+        live_html = get_connector().fetch_page_html(page_id)
+        new_document_html = delete_content_in_section(
+            live_html,
+            heading_string,
+            target_html_or_text=target_html_or_text,
+            delete_entire_section=delete_entire_section,
+        )
+
+        try:
+            success = get_connector().push_update(page_id, new_document_html, expected_version=expected_version)
+            committed_version = expected_version + 1 if success else None
+        except ValueError as ve:
+            if not _is_version_conflict(ve):
+                raise
+            logger.error(f"Version Lock conflict during delete: {ve}")
+            refreshed_metadata = get_connector().get_page_metadata(page_id)
+            refreshed_version = refreshed_metadata.get("version", {}).get("number", 1)
+            refreshed_html = get_connector().fetch_page_html(page_id)
+            refreshed_document_html = delete_content_in_section(
+                refreshed_html,
+                heading_string,
+                target_html_or_text=target_html_or_text,
+                delete_entire_section=delete_entire_section,
+            )
+            success = get_connector().push_update(page_id, refreshed_document_html, expected_version=refreshed_version)
+            committed_version = refreshed_version + 1 if success else None
+
+        if success:
+            try:
+                from ..ingestion.doc_pipeline import IngestionPipeline
+                IngestionPipeline().process_page(page_id)
+            except Exception as pipeline_err:
+                logger.error(f"Post-delete automatic re-indexing failed for {page_id}: {pipeline_err}")
+
+            message = f"Delete successful on page {page_id}"
+            _tool_run_state.set({"last_action": "commit", "success": True, "message": message})
+            return CommitResponse(success=True, version=committed_version, message=message)
+
+        message = "Delete update failed."
+        _tool_run_state.set({"last_action": "commit", "success": False, "message": message})
+        return CommitResponse(success=False, version=None, message=message)
+    except ValueError as ve:
+        if _is_version_conflict(ve):
+            logger.error(f"Version Lock conflict during delete: {ve}")
+            message = f"ConflictError: {str(ve)} Please re-fetch_live_page."
+        else:
+            logger.error(f"Delete target resolution failed: {ve}")
+            message = str(ve)
+        _tool_run_state.set({"last_action": "commit", "success": False, "message": message})
+        return CommitResponse(success=False, version=None, message=message)
+    except Exception as e:
+        logger.error(f"Commit delete failed: {e}")
         message = str(e)
         _tool_run_state.set({"last_action": "commit", "success": False, "message": message})
         return CommitResponse(success=False, version=None, message=message)

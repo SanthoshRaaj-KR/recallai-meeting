@@ -1,7 +1,7 @@
 import logging
 from typing import List, Tuple
 from agents import Agent, Runner
-from .tools import search_workspace_knowledge, fetch_live_page, preview_edit, commit_document_edit, update_page_title, reset_tool_state, get_tool_state
+from .tools import search_workspace_knowledge, fetch_live_page, preview_edit, preview_delete, commit_delete, commit_document_edit, update_page_title, reset_tool_state, get_tool_state
 from .reframer_agent import ReframerAgent
 
 logger = logging.getLogger(__name__)
@@ -12,7 +12,7 @@ class EditorAgent:
         self.reframer = ReframerAgent(model=model)
         self.history: List[Tuple[str, str]] = []
         self.max_history_turns = 6
-        from .tools import search_workspace_knowledge, fetch_live_page, preview_edit, commit_document_edit, update_page_title, create_confluence_page
+        from .tools import search_workspace_knowledge, fetch_live_page, preview_edit, preview_delete, commit_delete, commit_document_edit, update_page_title, create_confluence_page
         self.agent = Agent(
             name="Jarvis Editor",
             model=model,
@@ -27,13 +27,16 @@ class EditorAgent:
                 "- FETCH: use 'fetch_live_page(page_id, heading_string)' to retrieve true components. Use 'Root' only for top-of-page intro edits. Use 'FULL_PAGE' when the user wants to replace or delete the entire page body.\n"
                 "- PREVIEW: use 'preview_edit(page_id, heading_string, old_block_html, new_block_html)' to diff-test. Pass 'Root' for top intro edits and 'FULL_PAGE' for full-page rewrites.\n"
                 "- COMMIT: use 'commit_document_edit(page_id, expected_version, heading_string, old, new)'.\n"
+                "- DELETE: For deletions, prefer the dedicated delete tools instead of empty-string edits. Use 'preview_delete(page_id, heading_string, target_html_or_text, delete_entire_section)' and then 'commit_delete(page_id, expected_version, heading_string, target_html_or_text, delete_entire_section)'.\n"
+                "- If the user says to remove or delete an entire section, pass the real heading name with delete_entire_section=true.\n"
+                "- If the user wants to delete only one block, paragraph, bullet group, or visible text chunk, pass that target text to the delete tools and leave delete_entire_section=false.\n"
                 "- If the user says to remove all content, replace the entire page, rewrite the whole page, or start fresh, you must use heading_string='FULL_PAGE'. Do not use 'Root' for that.\n"
                 "- If the user wants to replace visible text that is not a heading, use heading_string='FULL_PAGE' or the relevant real heading, and pass the visible text itself as old_block_html. The edit tools can resolve a unique visible-text block.\n"
                 "- Use a heading name only when the target is actually a page heading from available_headings. Do not treat arbitrary text like '14' as a heading unless you saw it in available_headings.\n"
                 "- Never claim success unless the most recent create/commit tool returned success=true. If a tool fails or conflicts, explicitly say the edit did not complete.\n"
                 "Your final text response to the user must be a highly concise, friendly voice confirmation (1-2 sentences max)."
             ),
-            tools=[search_workspace_knowledge, fetch_live_page, preview_edit, commit_document_edit, update_page_title, create_confluence_page]
+            tools=[search_workspace_knowledge, fetch_live_page, preview_edit, preview_delete, commit_delete, commit_document_edit, update_page_title, create_confluence_page]
         )
 
     def clear_memory(self) -> None:
