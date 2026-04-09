@@ -1,8 +1,11 @@
+import asyncio
 import pytest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from confluence_logic.agents.tools import (
-    search_workspace_knowledge, fetch_live_page, preview_edit, preview_delete, commit_delete, commit_document_edit, update_page_title, list_workspace_pages
+    search_workspace_knowledge, fetch_live_page, preview_edit, preview_delete, commit_delete, commit_document_edit, update_page_title, list_workspace_pages, format_page_titles_for_user
 )
+from confluence_logic.core.schemas import CandidatePage
 from confluence_logic.utils.html_parser import delete_content_in_section, edit_block_in_section, get_section_html
 
 @patch('confluence_logic.agents.tools.get_connector')
@@ -192,6 +195,25 @@ def test_list_workspace_pages(mock_get_connector):
     assert resp.candidates[0].title == "Sample AI Page"
     assert resp.candidates[1].page_id == "124"
 
+def test_format_page_titles_for_user_omits_metadata():
+    formatted = format_page_titles_for_user([
+        CandidatePage(page_id="1", title="Sample AI Page", space_key="DEV", snippet="About AI"),
+        CandidatePage(page_id="2", title="ML Notes", space_key="DEV", snippet="About ML"),
+    ])
+
+    assert formatted == "Sample AI Page, ML Notes"
+    assert "DEV" not in formatted
+    assert "(" not in formatted
+
+def test_format_page_titles_for_user_disambiguates_duplicates_with_heading():
+    formatted = format_page_titles_for_user([
+        CandidatePage(page_id="1", title="Notes", heading="Quarterly Goals", space_key="DEV", snippet="A"),
+        CandidatePage(page_id="2", title="Notes", heading="QBR", space_key="DEV", snippet="B"),
+    ])
+
+    assert "Notes - Quarterly Goals" in formatted
+    assert "Notes - QBR" in formatted
+
 @patch('confluence_logic.agents.tools.get_connector')
 @patch('confluence_logic.ingestion.doc_pipeline.IngestionPipeline.process_page')
 def test_update_page_title_tool(mock_pipeline, mock_get_connector):
@@ -208,3 +230,50 @@ def test_update_page_title_tool(mock_pipeline, mock_get_connector):
         title_override="Why Donuts Are Awesome",
     )
     mock_pipeline.assert_called_once_with("123")
+
+@patch("confluence_logic.agents.editor_agent.Runner.run", new_callable=AsyncMock)
+def test_handle_prepared_query_bypasses_reframer(mock_runner_run):
+    from confluence_logic.agents.editor_agent import EditorAgent
+
+    agent = EditorAgent(model="gpt-5-mini")
+    agent.reframer.handle_query = AsyncMock(return_value="ACTION: clarify")
+    mock_runner_run.return_value = SimpleNamespace(final_output="Prepared edit completed.")
+
+    result = asyncio.run(agent.handle_prepared_query(
+        "Edit the Sample AI Page and add current AI trends.",
+        original_query="update sample ai page",
+    ))
+
+    assert result == "Prepared edit completed."
+    agent.reframer.handle_query.assert_not_awaited()
+    mock_runner_run.assert_awaited_once()
+
+@patch("confluence_logic.agents.editor_agent.list_workspace_pages")
+def test_handle_prepared_query_lists_titles_cleanly(mock_list_workspace_pages):
+    from confluence_logic.agents.editor_agent import EditorAgent
+
+    agent = EditorAgent(model="gpt-5-mini")
+    mock_list_workspace_pages.return_value = SimpleNamespace(
+        candidates=[
+            CandidatePage(page_id="1", title="Sample AI Page", space_key="DEV", snippet="About AI"),
+            CandidatePage(page_id="2", title="ML Notes", space_key="DEV", snippet="About ML"),
+        ]
+    )
+
+    result = asyncio.run(agent.handle_prepared_query("LIST_PAGES", original_query="what pages are available"))
+    assert result == "Sample AI Page, ML Notes"
+
+
+def test_editor_agent_master_exposes_specialist_tools():
+    from confluence_logic.agents.editor_agent import EditorAgent
+
+    agent = EditorAgent(model="gpt-5-mini")
+    tool_names = {tool.name for tool in agent.agent.tools}
+
+    assert {
+        "resolve_request",
+        "list_recent_pages",
+        "edit_existing_page",
+        "delete_from_page",
+        "create_new_page",
+    }.issubset(tool_names)

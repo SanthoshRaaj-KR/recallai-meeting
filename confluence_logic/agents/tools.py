@@ -1,6 +1,6 @@
 import difflib
 from contextvars import ContextVar
-from typing import List, Optional
+from typing import Callable, List, Optional
 from ..db.vector_store import PineconeStore
 from ..connectors.confluence import ConfluenceConnector
 from ..core.schemas import SearchResponse, CandidatePage, LivePageResponse, PreviewResponse, CommitResponse, CreatePageResponse, PageSectionInput
@@ -16,6 +16,10 @@ _connector = None
 _tool_run_state: ContextVar[dict] = ContextVar(
     "tool_run_state",
     default={"last_action": None, "success": None, "message": ""},
+)
+_mutation_observer: ContextVar[Optional[Callable[[str], None]]] = ContextVar(
+    "mutation_observer",
+    default=None,
 )
 
 def get_store():
@@ -36,6 +40,19 @@ def reset_tool_state() -> None:
 def get_tool_state() -> dict:
     return _tool_run_state.get()
 
+def set_mutation_observer(observer: Optional[Callable[[str], None]]) -> None:
+    _mutation_observer.set(observer)
+
+def _emit_mutation_started(action: str) -> None:
+    observer = _mutation_observer.get()
+    if observer is None:
+        return
+
+    try:
+        observer(action)
+    except Exception as e:
+        logger.warning(f"Mutation observer failed: {e}")
+
 def _is_version_conflict(error: Exception) -> bool:
     return "Version Conflict" in str(error)
 
@@ -51,6 +68,32 @@ def _candidate_from_metadata(meta: dict) -> CandidatePage:
         space_key=meta.get("space_key", ""),
         snippet=(meta.get("text_summary") or meta.get("excerpt") or meta.get("title") or "")[:140],
     )
+
+def format_page_titles_for_user(candidates: List[CandidatePage]) -> str:
+    """Renders user-facing page titles without leaking internal metadata by default."""
+    if not candidates:
+        return "I couldn't find any pages."
+
+    title_counts: dict[str, int] = {}
+    for candidate in candidates:
+        title_counts[candidate.title] = title_counts.get(candidate.title, 0) + 1
+
+    rendered_titles: List[str] = []
+    for candidate in candidates:
+        title = candidate.title
+        if title_counts[title] > 1 and candidate.heading:
+            rendered_titles.append(f"{title} - {candidate.heading}")
+        else:
+            rendered_titles.append(title)
+
+    deduped: List[str] = []
+    seen = set()
+    for title in rendered_titles:
+        if title not in seen:
+            deduped.append(title)
+            seen.add(title)
+
+    return ", ".join(deduped)
 
 @function_tool
 def list_workspace_pages(limit: int = 100) -> SearchResponse:
@@ -213,6 +256,7 @@ def update_page_title(page_id: str, expected_version: int, new_title: str) -> Co
     """Updates the title of an existing Confluence page without creating a new page."""
     try:
         live_html = get_connector().fetch_page_html(page_id)
+        _emit_mutation_started("update_title")
         try:
             success = get_connector().push_update(
                 page_id,
@@ -274,6 +318,7 @@ def commit_delete(
             delete_entire_section=delete_entire_section,
         )
 
+        _emit_mutation_started("delete")
         try:
             success = get_connector().push_update(page_id, new_document_html, expected_version=expected_version)
             committed_version = expected_version + 1 if success else None
@@ -329,6 +374,7 @@ def commit_document_edit(page_id: str, expected_version: int, heading_string: st
         live_html = get_connector().fetch_page_html(page_id)
         new_document_html = edit_block_in_section(live_html, heading_string, old_block_html, new_block_html)
 
+        _emit_mutation_started("edit")
         try:
             success = get_connector().push_update(page_id, new_document_html, expected_version=expected_version)
             committed_version = expected_version + 1 if success else None
@@ -388,6 +434,7 @@ def create_confluence_page(
     
     try:
         html_payload = build_page_html(title=title, sections=sections, body_text=body_text)
+        _emit_mutation_started("create")
         result = get_connector().create_page(
             space_key=space_key,
             title=title,

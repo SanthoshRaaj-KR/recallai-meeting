@@ -41,3 +41,20 @@ class CommitResponse(BaseModel):
     success: bool
     version: Optional[int]
     message: str
+
+class MasterVoiceDecision(BaseModel):
+    immediate_reply: str
+    needs_clarification: bool
+    clarification_question: Optional[str] = None
+    proceed_reply: Optional[str] = None
+    execution_request: Optional[str] = None
+    intent: str = "edit"
+    rationale: Optional[str] = None
+
+class ResolverDecision(BaseModel):
+    action: str
+    page_title: Optional[str] = None
+    page_id: Optional[str] = None
+    heading: Optional[str] = None
+    reframed_request: str
+    rationale: str

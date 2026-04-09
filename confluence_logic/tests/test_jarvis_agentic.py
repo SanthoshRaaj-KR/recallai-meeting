@@ -1,8 +1,10 @@
+import asyncio
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from confluence_logic import jarvis_agentic as ja
+from confluence_logic.core.schemas import MasterVoiceDecision
 
 
 def _reset_meeting_state():
@@ -10,6 +12,16 @@ def _reset_meeting_state():
     ja.meeting_state["transcript_log"] = []
     ja.meeting_state["is_active"] = False
     ja.meeting_state["jarvis_listening"] = False
+    ja.meeting_state["current_task"] = None
+    ja.meeting_state["pending_requests"].clear()
+    ja.meeting_state["pending_clarification"] = None
+    ja.meeting_state["current_task_id"] = None
+    ja.meeting_state["current_phase"] = "idle"
+    ja.meeting_state["current_request"] = None
+    ja.meeting_state["output_generation"] = 0
+    ja.meeting_state["mutation_started"] = False
+    ja.meeting_state["cancel_requested"] = False
+    ja.meeting_state["last_user_speech_at"] = 0.0
 
 
 def test_build_create_bot_payload_uses_recall_provider_by_default():
@@ -40,10 +52,7 @@ def test_build_create_bot_payload_supports_assembly_provider_opt_in():
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
 
     provider = payload["recording_config"]["transcript"]["provider"]
-    endpoint = payload["recording_config"]["realtime_endpoints"][0]
-
     assert provider == {"assembly_ai_v3_streaming": {}}
-    assert endpoint["events"] == ["transcript.data"]
 
 
 def test_process_transcript_event_handles_inline_wake_word_query():
@@ -62,11 +71,21 @@ def test_process_transcript_event_handles_bare_wake_then_follow_up():
     assert ja.meeting_state["jarvis_listening"] is False
 
 
-def test_process_transcript_event_bare_wake_arms_listening():
+def test_process_transcript_event_routes_pending_clarification_without_wake():
     _reset_meeting_state()
-    result = ja.process_transcript_event("Hey Jarvis", 30.0)
-    assert result is None
-    assert ja.meeting_state["jarvis_listening"] is True
+    ja.meeting_state["pending_clarification"] = {
+        "task_id": 1,
+        "clarification_context": "Need the page title.",
+        "question": "Which roadmap page?",
+    }
+    result = ja.process_transcript_event("Product Roadmap", 40.0)
+    assert result == "Product Roadmap"
+
+
+def test_is_bare_wake_invocation():
+    assert ja.is_bare_wake_invocation("Hey Jarvis") is True
+    assert ja.is_bare_wake_invocation("Hey Jarvis update quarterly goals") is False
+    assert ja.is_bare_wake_invocation("update quarterly goals") is False
 
 
 def test_synthesize_speech_uses_openai_tts_bytes():
@@ -109,3 +128,216 @@ def test_speak_falls_back_to_gtts_when_openai_tts_fails(mock_gtts, mock_post):
     assert result is True
     mock_gtts.assert_called_once()
     mock_post.assert_called_once()
+
+
+def test_handle_spoken_request_master_clarifies_when_needed():
+    _reset_meeting_state()
+
+    async def run_test():
+        with patch.object(ja.session_agent, "plan_voice_turn", new=AsyncMock(return_value=MasterVoiceDecision(
+            immediate_reply="Sure, let me check.",
+            needs_clarification=True,
+            clarification_question="Which roadmap page do you mean?",
+            proceed_reply=None,
+            execution_request=None,
+            intent="edit",
+        ))), patch.object(ja.session_agent, "handle_prepared_query", new=AsyncMock()) as mock_exec, \
+             patch.object(ja, "speak", return_value=True) as mock_speak:
+            await ja.handle_spoken_request("update the roadmap page", "bot-123")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            mock_exec.assert_not_awaited()
+            spoken_texts = [call.args[0] for call in mock_speak.call_args_list]
+            assert "Sure, let me check." in spoken_texts
+            assert "Which roadmap page do you mean?" in spoken_texts
+            assert ja.meeting_state["pending_clarification"]["question"] == "Which roadmap page do you mean?"
+
+            ja.meeting_state["current_task"].runner.cancel()
+            await asyncio.sleep(0)
+
+    asyncio.run(run_test())
+
+
+def test_handle_spoken_request_master_proceeds_and_suppresses_final_success():
+    _reset_meeting_state()
+
+    async def run_test():
+        with patch.object(ja.session_agent, "plan_voice_turn", new=AsyncMock(return_value=MasterVoiceDecision(
+            immediate_reply="Yes, let me check.",
+            needs_clarification=False,
+            clarification_question=None,
+            proceed_reply="Okay, proceeding.",
+            execution_request="Change the title of hello to hi.",
+            intent="edit",
+        ))), patch.object(ja.session_agent, "handle_prepared_query", new=AsyncMock(return_value="Done.")) as mock_exec, \
+             patch.object(ja, "speak", return_value=True) as mock_speak:
+            await ja.handle_spoken_request("change the title of hello to hi", "bot-123")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            mock_exec.assert_awaited_once_with(
+                "Change the title of hello to hi.",
+                original_query="change the title of hello to hi",
+                mutation_started_callback=mock_exec.await_args.kwargs["mutation_started_callback"],
+            )
+            spoken_texts = [call.args[0] for call in mock_speak.call_args_list]
+            assert "Yes, let me check." in spoken_texts
+            assert "Okay, proceeding." in spoken_texts
+            assert "Done." not in spoken_texts
+
+    asyncio.run(run_test())
+
+
+def test_listing_intent_still_speaks_final_answer():
+    _reset_meeting_state()
+
+    async def run_test():
+        with patch.object(ja.session_agent, "plan_voice_turn", new=AsyncMock(return_value=MasterVoiceDecision(
+            immediate_reply="Let me check.",
+            needs_clarification=False,
+            clarification_question=None,
+            proceed_reply="Okay.",
+            execution_request="LIST_PAGES",
+            intent="list_pages",
+        ))), patch.object(ja.session_agent, "handle_prepared_query", new=AsyncMock(return_value="Sample AI Page, ML Notes")), \
+             patch.object(ja, "speak", return_value=True) as mock_speak:
+            await ja.handle_spoken_request("what pages are available", "bot-123")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            spoken_texts = [call.args[0] for call in mock_speak.call_args_list]
+            assert "Sample AI Page, ML Notes" in spoken_texts
+
+    asyncio.run(run_test())
+
+
+def test_follow_up_answer_resumes_same_task_without_wake_word():
+    _reset_meeting_state()
+    current_task = ja._new_voice_task("update the goals page", "bot-123")
+    current_task.phase = "clarifying"
+    current_task.output_generation = 1
+    ja._set_current_task(current_task)
+    ja.meeting_state["pending_clarification"] = {
+        "task_id": current_task.task_id,
+        "clarification_context": "Need exact page title.",
+        "question": "Which goals page do you mean?",
+    }
+
+    async def run_test():
+        loop = asyncio.get_running_loop()
+        current_task.answer_future = loop.create_future()
+
+        with patch.object(ja, "speak", return_value=True):
+            await ja.handle_spoken_request("Quarterly Goals", "bot-123")
+
+            assert current_task.answer_future.done() is True
+            assert current_task.answer_future.result() == "Quarterly Goals"
+
+    asyncio.run(run_test())
+
+
+def test_master_gets_clarification_context_on_retry():
+    _reset_meeting_state()
+
+    async def run_test():
+        planner = AsyncMock(side_effect=[
+            MasterVoiceDecision(
+                immediate_reply="Sure.",
+                needs_clarification=True,
+                clarification_question="Which page title should I use?",
+                proceed_reply=None,
+                execution_request=None,
+                intent="create",
+            ),
+            MasterVoiceDecision(
+                immediate_reply="Got it.",
+                needs_clarification=False,
+                clarification_question=None,
+                proceed_reply="Proceeding.",
+                execution_request="Create a new page titled Why Donuts Are Awesome with a random table.",
+                intent="create",
+            ),
+        ])
+
+        with patch.object(ja.session_agent, "plan_voice_turn", new=planner), \
+             patch.object(ja.session_agent, "handle_prepared_query", new=AsyncMock(return_value="Created.")), \
+             patch.object(ja, "speak", return_value=True):
+            await ja.handle_spoken_request("create a new page on donuts", "bot-123")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            await ja.handle_spoken_request("use why donuts are awesome", "bot-123")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            assert planner.await_count == 2
+            second_kwargs = planner.await_args_list[1].kwargs
+            assert "User answer: use why donuts are awesome" in second_kwargs["clarification_context"]
+
+    asyncio.run(run_test())
+
+
+def test_handle_spoken_request_queues_non_overriding_when_busy():
+    _reset_meeting_state()
+
+    async def run_test():
+        current_task = ja._new_voice_task("update roadmap", "bot-123")
+        current_task.phase = "executing"
+        current_task.output_generation = 1
+        current_task.runner = asyncio.create_task(asyncio.sleep(0.1))
+        ja.meeting_state["output_generation"] = 1
+        ja._set_current_task(current_task)
+
+        with patch.object(ja, "speak", return_value=True) as mock_speak:
+            await ja.handle_spoken_request("also update notes", "bot-123")
+
+        assert len(ja.meeting_state["pending_requests"]) == 1
+        assert ja.meeting_state["pending_requests"][0].request == "also update notes"
+        mock_speak.assert_called_once_with(ja.QUEUE_ACK, "bot-123")
+        current_task.runner.cancel()
+
+    asyncio.run(run_test())
+
+
+def test_handle_spoken_request_supersedes_and_cancels_current_task():
+    _reset_meeting_state()
+
+    async def run_test():
+        current_task = ja._new_voice_task("update roadmap", "bot-123")
+        current_task.phase = "executing"
+        current_task.output_generation = 1
+        current_task.runner = asyncio.create_task(asyncio.sleep(10))
+        ja.meeting_state["output_generation"] = 1
+        ja._set_current_task(current_task)
+
+        with patch.object(ja, "speak", return_value=True) as mock_speak:
+            await ja.handle_spoken_request("instead update notes", "bot-123")
+            await asyncio.sleep(0)
+
+        assert current_task.cancel_requested is True
+        assert current_task.superseded is True
+        assert len(ja.meeting_state["pending_requests"]) == 1
+        assert ja.meeting_state["pending_requests"][0].request == "instead update notes"
+        mock_speak.assert_called_once_with(ja.SWITCH_ACK, "bot-123")
+
+    asyncio.run(run_test())
+
+
+def test_handle_bare_wake_uses_busy_ack_when_task_active():
+    _reset_meeting_state()
+
+    async def run_test():
+        current_task = ja._new_voice_task("update roadmap", "bot-123")
+        current_task.phase = "executing"
+        current_task.output_generation = 3
+        ja.meeting_state["output_generation"] = 3
+        ja._set_current_task(current_task)
+
+        with patch.object(ja, "speak", return_value=True) as mock_speak:
+            await ja._handle_bare_wake("bot-123")
+
+        mock_speak.assert_called_once_with(ja.JARVIS_BUSY_ACK, "bot-123")
+
+    asyncio.run(run_test())

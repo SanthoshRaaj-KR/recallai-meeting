@@ -13,12 +13,16 @@ import asyncio
 import base64
 import logging
 import os
+import random
 import re
 import sys
 import time
+from collections import deque
+from dataclasses import dataclass
 from io import BytesIO
+from itertools import count
 from threading import Thread
-from typing import Optional
+from typing import Deque, Optional
 
 import requests
 import uvicorn
@@ -49,6 +53,9 @@ JARVIS_TTS_PROVIDER = os.getenv("JARVIS_TTS_PROVIDER", "openai").strip().lower()
 JARVIS_TTS_MODEL = os.getenv("JARVIS_TTS_MODEL", "gpt-4o-mini-tts").strip()
 JARVIS_TTS_VOICE = os.getenv("JARVIS_TTS_VOICE", "echo").strip()
 JARVIS_TTS_SPEED = float(os.getenv("JARVIS_TTS_SPEED", "1.0"))
+JARVIS_WAKE_ACK = os.getenv("JARVIS_WAKE_ACK", "Yes?").strip()
+JARVIS_BUSY_ACK = os.getenv("JARVIS_BUSY_ACK", "I'm already on it. Give me a moment.").strip()
+JARVIS_SPEECH_HOLD_SECONDS = float(os.getenv("JARVIS_SPEECH_HOLD_SECONDS", "0.8"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,15 +71,78 @@ if RECALL_TRANSCRIPT_PROVIDER == "assembly_ai_v3_streaming" and ASSEMBLY_API:
         "to be configured in the Recall transcription credentials dashboard."
     )
 
+_DYNAMIC_ACK_FALLBACKS = {
+    "queued": "Noted, I'll handle that shortly.",
+    "switching": "On it, switching now.",
+    "error": "Sorry, I hit a snag there.",
+}
+
+_INSTANT_ACKS = [
+    "On it.",
+    "Sure thing.",
+    "Give me a sec.",
+    "Got it.",
+    "One moment.",
+    "Right away.",
+    "Working on it.",
+    "Let me check.",
+]
+
+
+@dataclass
+class VoiceTask:
+    task_id: int
+    request: str
+    bot_id: str
+    created_at: float
+    phase: str = "queued"
+    intent: str = "edit"
+    cancel_requested: bool = False
+    superseded: bool = False
+    from_queue: bool = False
+    mutation_started: bool = False
+    clarification_context: str = ""
+    question: str = ""
+    latest_user_reply: str = ""
+    output_generation: int = 0
+    execution_request: str = ""
+    pre_planned_decision: object = None
+    answer_future: Optional[asyncio.Future] = None
+    runner: Optional[asyncio.Task] = None
+
 meeting_state = {
     "bot_id": None,
     "transcript_log": [],
     "is_active": False,
     "jarvis_listening": False,
+    "current_task": None,
+    "pending_requests": deque(),
+    "pending_clarification": None,
+    "current_task_id": None,
+    "current_phase": "idle",
+    "current_request": None,
+    "output_generation": 0,
+    "mutation_started": False,
+    "cancel_requested": False,
+    "last_user_speech_at": 0.0,
+    "parallel_runners": [],
 }
 
 _openai_client: Optional[OpenAI] = None
 _WAKE_PATTERN = re.compile(r"(?:hey\s+)?jarvis[,.]?\s*(.*)", re.IGNORECASE)
+_OVERRIDE_PATTERN = re.compile(r"\b(stop|cancel|instead|forget that|never mind|nevermind|wait|change that|changed my mind|changed mind|don't do|dont do|undo)\b", re.IGNORECASE)
+_ADDITIVE_PATTERN = re.compile(r"\b(also|after that|then|next)\b", re.IGNORECASE)
+_STATUS_PATTERN = re.compile(
+    r"\b(what are you|what're you|whatcha|status|working on|doing right now"
+    r"|what.*doing|are you busy|how.*going|update me|progress|what.*task"
+    r"|are you idle|anything pending|what.*queue)",
+    re.IGNORECASE,
+)
+_task_counter = count(1)
+_state_lock: Optional[asyncio.Lock] = None
+_state_lock_loop = None
+_output_lock: Optional[asyncio.Lock] = None
+_output_lock_loop = None
 
 
 def get_openai_client() -> OpenAI:
@@ -80,6 +150,136 @@ def get_openai_client() -> OpenAI:
     if _openai_client is None:
         _openai_client = OpenAI()
     return _openai_client
+
+
+def _get_state_lock() -> asyncio.Lock:
+    global _state_lock, _state_lock_loop
+    loop = asyncio.get_running_loop()
+    if _state_lock is None or _state_lock_loop is not loop:
+        _state_lock = asyncio.Lock()
+        _state_lock_loop = loop
+    return _state_lock
+
+
+def _get_output_lock() -> asyncio.Lock:
+    global _output_lock, _output_lock_loop
+    loop = asyncio.get_running_loop()
+    if _output_lock is None or _output_lock_loop is not loop:
+        _output_lock = asyncio.Lock()
+        _output_lock_loop = loop
+    return _output_lock
+
+
+def _set_current_task(task: Optional[VoiceTask]) -> None:
+    meeting_state["current_task"] = task
+    meeting_state["current_task_id"] = task.task_id if task else None
+    meeting_state["current_phase"] = task.phase if task else "idle"
+    meeting_state["current_request"] = task.request if task else None
+    meeting_state["mutation_started"] = task.mutation_started if task else False
+    meeting_state["cancel_requested"] = task.cancel_requested if task else False
+
+
+def _set_task_phase(task: VoiceTask, phase: str) -> None:
+    task.phase = phase
+    current = meeting_state.get("current_task")
+    if current is not None and current.task_id == task.task_id:
+        meeting_state["current_phase"] = phase
+
+
+def _update_task_request(task: VoiceTask, request: str) -> None:
+    task.request = request.strip()
+    current = meeting_state.get("current_task")
+    if current is not None and current.task_id == task.task_id:
+        meeting_state["current_request"] = task.request
+
+
+def _next_output_generation() -> int:
+    meeting_state["output_generation"] += 1
+    return meeting_state["output_generation"]
+
+
+def _new_voice_task(request: str, bot_id: str) -> VoiceTask:
+    return VoiceTask(
+        task_id=next(_task_counter),
+        request=request.strip(),
+        bot_id=bot_id,
+        created_at=time.time(),
+    )
+
+
+async def _generate_dynamic_ack(context: str, new_request: str = "", current_request: str = "") -> str:
+    """Generate a short, natural acknowledgement via a fast LLM call instead of hardcoded text."""
+    prompts = {
+        "queued": (
+            f"You're currently working on: '{current_request}'. "
+            f"The user just asked: '{new_request}'. "
+            "Generate a very short (4-8 words) natural voice acknowledgement that you'll handle "
+            "their new request after you finish the current one. Be warm and natural."
+        ),
+        "switching": (
+            f"You were working on: '{current_request}'. "
+            f"The user wants you to switch to: '{new_request}'. "
+            "Generate a very short (3-6 words) natural voice acknowledgement that you're switching tasks."
+        ),
+        "error": (
+            f"You hit a technical error while working on: '{new_request}'. "
+            "Generate a very short (5-10 words) natural voice apology. Be straightforward."
+        ),
+    }
+    system_prompt = (
+        "You are Jarvis, a professional voice assistant in a meeting. "
+        "Respond with ONLY the short acknowledgement text. No quotes, no extra text."
+    )
+    user_prompt = prompts.get(context, f"Generate a very short natural acknowledgement for: {context}")
+
+    try:
+        response = await asyncio.to_thread(
+            lambda: get_openai_client().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=30,
+                temperature=0.7,
+            )
+        )
+        text = (response.choices[0].message.content or "").strip().strip('"\'')
+        return text or _DYNAMIC_ACK_FALLBACKS.get(context, "Got it.")
+    except Exception as e:
+        logger.warning("Dynamic ack generation failed: %s", e)
+        return _DYNAMIC_ACK_FALLBACKS.get(context, "Got it.")
+
+
+def _looks_like_clarification_prompt(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized or not normalized.endswith("?"):
+        return False
+
+    markers = (
+        "which page",
+        "what page",
+        "do you mean",
+        "which one",
+        "what should i change",
+        "what would you like me to change",
+        "what should i update",
+        "which title",
+        "which section",
+        "could you confirm",
+        "can you confirm",
+        "please confirm",
+        "what page name",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _is_override_request(text: str) -> bool:
+    return bool(_OVERRIDE_PATTERN.search((text or "").lower()))
+
+
+def _is_additive_request(text: str) -> bool:
+    return bool(_ADDITIVE_PATTERN.search((text or "").lower()))
 
 
 def build_transcript_provider_config() -> dict:
@@ -91,9 +291,12 @@ def build_transcript_provider_config() -> dict:
             }
         }
 
-    if RECALL_TRANSCRIPT_PROVIDER == "assembly_ai_v3_streaming":
+    if RECALL_TRANSCRIPT_PROVIDER in ("assembly_ai_v3", "assembly_ai_v3_streaming"):
         return {
-            "assembly_ai_v3_streaming": {}
+            "assembly_ai_v3_streaming": {
+                "language_code": LANGUAGE_CODE,
+                "speech_model": os.getenv("ASSEMBLY_SPEECH_MODEL", "u3-rt-pro"),
+            }
         }
 
     return {
@@ -197,15 +400,481 @@ def speak(text: str, bot_id: str) -> bool:
         return False
 
 
-async def handle_query(query: str, bot_id: str) -> None:
-    logger.info("Query String Detected: %r", query)
+def _format_pending_clarification(task: Optional[VoiceTask] = None) -> str:
+    current_task = task or meeting_state.get("current_task")
+    if current_task is None:
+        return ""
+
+    pending = meeting_state.get("pending_clarification")
+    pending_for_task = None
+    if pending and pending.get("task_id") == current_task.task_id:
+        pending_for_task = pending
+
+    lines = [
+        f"Original request: {current_task.request}",
+        f"Clarification context: {(pending_for_task or {}).get('clarification_context', current_task.clarification_context)}",
+        f"Last question asked: {(pending_for_task or {}).get('question', current_task.question)}",
+        f"Latest user reply: {current_task.latest_user_reply}",
+    ]
+    return "\n".join(line for line in lines if line.split(":", 1)[1].strip())
+
+
+def _append_clarification_context(existing: str, addition: str) -> str:
+    extra = (addition or "").strip()
+    if not extra:
+        return existing
+    if not existing:
+        return extra
+    if extra in existing:
+        return existing
+    return f"{existing}\n{extra}"
+
+
+def _record_clarification_answer(task: VoiceTask, answer: str) -> None:
+    answer_text = (answer or "").strip()
+    if not answer_text:
+        return
+    task.latest_user_reply = answer_text
+    task.clarification_context = _append_clarification_context(
+        task.clarification_context,
+        f"User answer: {answer_text}",
+    )
+
+
+def _has_other_pending_work(task: VoiceTask) -> bool:
+    current = meeting_state.get("current_task")
+    if current is not None and current.task_id != task.task_id:
+        return True
+
+    if any(queued.task_id != task.task_id for queued in meeting_state["pending_requests"]):
+        return True
+
+    return False
+
+
+def _build_request_reference(task: VoiceTask) -> str:
+    request = (task.request or "").strip()
+    normalized = request.lower()
+
+    title_match = re.search(r"(?:title|rename|retitle).*?\bto\b\s+(.+)$", request, re.IGNORECASE)
+    if title_match:
+        new_title = title_match.group(1).strip().rstrip(".!?")
+        if new_title:
+            return f"the title change to {new_title}"
+        return "the title change"
+
+    if any(word in normalized for word in ("create", "new page")):
+        topic_match = re.search(r"(?:about|on|called|titled)\s+(.+)$", request, re.IGNORECASE)
+        if topic_match:
+            topic = topic_match.group(1).strip().rstrip(".!?")
+            if topic:
+                return f"the page request about {topic}"
+        return "the page creation request"
+
+    if any(word in normalized for word in ("delete", "remove")):
+        return "the removal request"
+
+    if any(word in normalized for word in ("add", "update", "edit", "change", "replace", "rewrite")):
+        words = request.split()
+        trimmed = " ".join(words[:10]).strip().rstrip(",")
+        if len(words) > 10:
+            trimmed = f"{trimmed}"
+        if trimmed:
+            return f"the request to {trimmed.lower()}"
+        return "the update request"
+
+    return "this request"
+
+
+async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: bool = False) -> bool:
+    output_lock = _get_output_lock()
+    async with output_lock:
+        if not allow_stale and generation != meeting_state["output_generation"]:
+            return False
+        while True:
+            remaining = meeting_state["last_user_speech_at"] + JARVIS_SPEECH_HOLD_SECONDS - time.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, 0.2))
+            if not allow_stale and generation != meeting_state["output_generation"]:
+                return False
+        return await asyncio.to_thread(speak, text, bot_id)
+
+
+async def _start_next_task_if_idle() -> None:
+    state_lock = _get_state_lock()
+    next_task: Optional[VoiceTask] = None
+    async with state_lock:
+        if meeting_state.get("current_task") is not None:
+            return
+        pending_requests: Deque[VoiceTask] = meeting_state["pending_requests"]
+        while pending_requests and (pending_requests[0].cancel_requested or pending_requests[0].superseded):
+            pending_requests.popleft()
+        _set_current_task(None)
+        if pending_requests:
+            next_task = pending_requests.popleft()
+            _set_current_task(next_task)
+            next_task.runner = asyncio.create_task(_run_voice_task(next_task))
+
+    if next_task is not None:
+        return
+
+
+async def _finish_voice_task(task: VoiceTask) -> None:
+    state_lock = _get_state_lock()
+    async with state_lock:
+        pending = meeting_state.get("pending_clarification")
+        current = meeting_state.get("current_task")
+        if current is not None and current.task_id == task.task_id:
+            _set_current_task(None)
+            if pending and pending.get("task_id") == task.task_id:
+                meeting_state["pending_clarification"] = None
+    await _start_next_task_if_idle()
+
+
+def _mark_mutation_started(task: VoiceTask, _action: str) -> None:
+    task.mutation_started = True
+    current = meeting_state.get("current_task")
+    if current is not None and current.task_id == task.task_id:
+        meeting_state["mutation_started"] = True
+
+
+async def _handle_bare_wake(bot_id: str) -> None:
+    state_lock = _get_state_lock()
+    async with state_lock:
+        current: Optional[VoiceTask] = meeting_state.get("current_task")
+        generation = meeting_state["output_generation"]
+        text = JARVIS_BUSY_ACK if current is not None else JARVIS_WAKE_ACK
+
+    await _speak_guarded(text, bot_id, generation)
+
+
+def _should_speak_final_answer(task: VoiceTask, answer: str) -> bool:
+    normalized = (answer or "").strip().lower()
+    if not normalized:
+        return False
+    if task.intent == "list_pages":
+        return True
+    if normalized.startswith("the requested change did not complete"):
+        return True
+    if "encountered an issue" in normalized or "ran into an error" in normalized:
+        return True
+    if normalized.startswith("i couldn't find"):
+        return True
+    return False
+
+
+async def _execute_editor_task(task: VoiceTask) -> Optional[str]:
     try:
-        answer = await session_agent.handle_query(query)
-        logger.info("Jarvis Agentic: %s", answer)
-        await asyncio.to_thread(speak, answer, bot_id)
+        meeting_state["pending_clarification"] = None
+        _set_task_phase(task, "executing")
+        execution_request = task.execution_request or task.request
+        if execution_request:
+            answer = await session_agent.handle_prepared_query(
+                execution_request,
+                original_query=task.request,
+                mutation_started_callback=lambda action: _mark_mutation_started(task, action),
+            )
+        else:
+            answer = await session_agent.handle_voice_query(
+                task.request,
+                clarification_context=_format_pending_clarification(task),
+                mutation_started_callback=lambda action: _mark_mutation_started(task, action),
+            )
+
+        if task.cancel_requested or task.superseded:
+            return None
+
+        if _looks_like_clarification_prompt(answer):
+            task.question = answer
+            task.clarification_context = _append_clarification_context(
+                task.clarification_context,
+                f"Editor follow-up needed: {answer}",
+            )
+            return answer
+
+        _set_task_phase(task, "speaking")
+        if _should_speak_final_answer(task, answer):
+            await _speak_guarded(answer, task.bot_id, task.output_generation)
+        return None
+    except asyncio.CancelledError:
+        logger.info("Editor task %s cancelled.", task.task_id)
+        return None
     except Exception as e:
-        logger.error("handle_query error: %s", e)
-        await asyncio.to_thread(speak, "Sorry, I ran into an error connecting to my agent brain.", bot_id)
+        logger.error("Editor task error: %s", e)
+        if not task.cancel_requested and not task.superseded:
+            error_ack = await _generate_dynamic_ack("error", task.request)
+            await _speak_guarded(error_ack, task.bot_id, task.output_generation)
+        return None
+
+
+async def _run_voice_task(task: VoiceTask) -> None:
+    first_turn = True
+    try:
+        while not task.cancel_requested:
+            if first_turn:
+                if not task.from_queue:
+                    ack = random.choice(_INSTANT_ACKS)
+                    await _speak_guarded(ack, task.bot_id, task.output_generation)
+                first_turn = False
+
+            _set_task_phase(task, "planning")
+            if task.pre_planned_decision is not None:
+                decision = task.pre_planned_decision
+                task.pre_planned_decision = None
+            else:
+                decision = await session_agent.plan_voice_turn(
+                    task.request,
+                    clarification_context=_format_pending_clarification(task),
+                    has_other_pending_work=_has_other_pending_work(task),
+                    request_label=_build_request_reference(task),
+                    is_queued_followup=task.from_queue,
+                )
+            if task.cancel_requested or task.superseded:
+                return
+
+            task.intent = decision.intent or "edit"
+
+            if decision.needs_clarification:
+                _set_task_phase(task, "clarifying")
+                task.question = decision.clarification_question or "Which page should I work on?"
+                task.clarification_context = _append_clarification_context(
+                    task.clarification_context,
+                    decision.rationale or "",
+                )
+                task.answer_future = asyncio.get_running_loop().create_future()
+                meeting_state["pending_clarification"] = {
+                    "task_id": task.task_id,
+                    "clarification_context": task.clarification_context,
+                    "question": task.question,
+                }
+                await _speak_guarded(task.question, task.bot_id, task.output_generation)
+                try:
+                    answer = await task.answer_future
+                except asyncio.CancelledError:
+                    return
+                finally:
+                    task.answer_future = None
+                if task.cancel_requested:
+                    return
+                _record_clarification_answer(task, answer)
+                await _speak_guarded("Got it.", task.bot_id, task.output_generation)
+                task.question = ""
+                continue
+
+
+            task.execution_request = (decision.execution_request or task.request).strip()
+            editor_follow_up = await _execute_editor_task(task)
+            if task.cancel_requested or task.superseded:
+                return
+            if editor_follow_up:
+                _set_task_phase(task, "clarifying")
+                task.answer_future = asyncio.get_running_loop().create_future()
+                meeting_state["pending_clarification"] = {
+                    "task_id": task.task_id,
+                    "clarification_context": task.clarification_context,
+                    "question": task.question,
+                }
+                await _speak_guarded(task.question, task.bot_id, task.output_generation)
+                try:
+                    answer = await task.answer_future
+                except asyncio.CancelledError:
+                    return
+                finally:
+                    task.answer_future = None
+                if task.cancel_requested:
+                    return
+                _record_clarification_answer(task, answer)
+                await _speak_guarded("Got it.", task.bot_id, task.output_generation)
+                task.question = ""
+                task.execution_request = ""
+                continue
+            return
+    except asyncio.CancelledError:
+        logger.info("Voice task %s cancelled.", task.task_id)
+        return
+    except Exception as e:
+        logger.error("Voice task error: %s", e)
+        if not task.cancel_requested and not task.superseded:
+            error_ack = await _generate_dynamic_ack("error", task.request)
+            await _speak_guarded(error_ack, task.bot_id, task.output_generation)
+    finally:
+        await _finish_voice_task(task)
+
+
+async def _plan_and_maybe_execute(task: VoiceTask) -> None:
+    """Plan immediately. If confident, execute in parallel. If not, queue for serial."""
+    try:
+        ack = random.choice(_INSTANT_ACKS)
+        await _speak_guarded(ack, task.bot_id, task.output_generation)
+
+        decision = await session_agent.plan_voice_turn(
+            task.request,
+            is_queued_followup=True,
+        )
+        if task.cancel_requested or task.superseded:
+            return
+
+        if decision.needs_clarification:
+            logger.info("Parallel task %s needs clarification — falling back to queue.", task.task_id)
+            task.pre_planned_decision = decision
+            task.from_queue = True
+            async with _get_state_lock():
+                meeting_state["pending_requests"].append(task)
+            return
+
+        logger.info("Parallel task %s is confident — executing in parallel.", task.task_id)
+        task.intent = decision.intent or "edit"
+        task.execution_request = (decision.execution_request or task.request).strip()
+        await _execute_editor_task(task)
+    except asyncio.CancelledError:
+        logger.info("Parallel task %s cancelled.", task.task_id)
+    except Exception as e:
+        logger.error("Parallel task %s error: %s", task.task_id, e)
+        if not task.cancel_requested and not task.superseded:
+            error_ack = await _generate_dynamic_ack("error", task.request)
+            await _speak_guarded(error_ack, task.bot_id, task.output_generation)
+    finally:
+        runners = meeting_state.get("parallel_runners", [])
+        meeting_state["parallel_runners"] = [(t, r) for t, r in runners if t.task_id != task.task_id]
+
+
+def _is_status_query(text: str) -> bool:
+    return bool(_STATUS_PATTERN.search(text or ""))
+
+
+async def _handle_status_query(query: str, bot_id: str) -> None:
+    """Answer status/conversational queries instantly using gpt-4o-mini + meeting state."""
+    current = meeting_state.get("current_task")
+    pending = meeting_state.get("pending_requests", deque())
+
+    state_lines = []
+    if current:
+        state_lines.append(f"Currently working on: {current.request} (phase: {current.phase})")
+    else:
+        state_lines.append("Currently idle — not working on anything.")
+
+    queued = [t.request for t in pending if not t.cancel_requested]
+    if queued:
+        state_lines.append(f"Queued tasks: {', '.join(queued)}")
+
+    parallel = [t.request for t, _ in meeting_state.get("parallel_runners", []) if not t.cancel_requested]
+    if parallel:
+        state_lines.append(f"Also running in parallel: {', '.join(parallel)}")
+
+    recent_history = session_agent.get_recent_history_text()
+    context = (
+        f"User asked: {query}\n\n"
+        f"Current state:\n" + "\n".join(state_lines) + "\n\n"
+        f"Recent history:\n{recent_history}"
+    )
+    system = (
+        "You are Jarvis, a voice assistant in a meeting. "
+        "Answer the user's question about your current status briefly and naturally. "
+        "Keep it to 1-2 short sentences. Be conversational."
+    )
+
+    try:
+        response = await asyncio.to_thread(
+            lambda: get_openai_client().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": context},
+                ],
+                max_tokens=60,
+                temperature=0.7,
+            )
+        )
+        answer = (response.choices[0].message.content or "").strip().strip('"\'')
+        if answer:
+            generation = meeting_state["output_generation"]
+            await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+    except Exception as e:
+        logger.warning("Status query failed: %s", e)
+
+
+async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
+    # Intercept status/conversational queries — answer instantly, skip task queue
+    if _is_status_query(spoken_query):
+        await _handle_status_query(spoken_query, bot_id)
+        return
+
+    state_lock = _get_state_lock()
+    ack_context: Optional[str] = None
+    current_request_text: str = ""
+    ack_generation: Optional[int] = None
+    current_to_cancel: Optional[asyncio.Task] = None
+    task_to_start: Optional[VoiceTask] = None
+    should_cancel_now = False
+    should_start_next = False
+
+    async with state_lock:
+        current: Optional[VoiceTask] = meeting_state.get("current_task")
+        pending = meeting_state.get("pending_clarification")
+        if pending and not _is_override_request(spoken_query):
+            target_task = None
+            if current is not None and current.task_id == pending.get("task_id"):
+                target_task = current
+
+            if target_task is not None and target_task.answer_future and not target_task.answer_future.done():
+                target_task.answer_future.set_result(spoken_query)
+                return
+
+        if current is None:
+            new_task = _new_voice_task(spoken_query, bot_id)
+            new_task.output_generation = _next_output_generation()
+            _set_current_task(new_task)
+            task_to_start = new_task
+        elif _is_override_request(spoken_query):
+            if current is not None:
+                current.cancel_requested = True
+                current.superseded = True
+                current_to_cancel = current.runner
+                should_cancel_now = not current.mutation_started and current.runner is not None
+            meeting_state["cancel_requested"] = True
+            if pending:
+                meeting_state["pending_clarification"] = None
+            pending_requests: Deque[VoiceTask] = meeting_state["pending_requests"]
+            while pending_requests:
+                queued = pending_requests.popleft()
+                queued.cancel_requested = True
+                queued.superseded = True
+            for ptask, prunner in meeting_state.get("parallel_runners", []):
+                ptask.cancel_requested = True
+                ptask.superseded = True
+                prunner.cancel()
+            meeting_state["parallel_runners"] = []
+            generation = _next_output_generation()
+            replacement = _new_voice_task(spoken_query, bot_id)
+            replacement.output_generation = generation
+            if current is None:
+                _set_current_task(replacement)
+                task_to_start = replacement
+            else:
+                meeting_state["pending_requests"].appendleft(replacement)
+            ack_context = "switching"
+            current_request_text = current.request if current else ""
+            ack_generation = generation
+        else:
+            parallel_task = _new_voice_task(spoken_query, bot_id)
+            parallel_task.output_generation = _next_output_generation()
+            runner = asyncio.create_task(_plan_and_maybe_execute(parallel_task))
+            meeting_state["parallel_runners"].append((parallel_task, runner))
+
+    if ack_context and ack_generation is not None:
+        ack_text = await _generate_dynamic_ack(ack_context, spoken_query, current_request_text)
+        await _speak_guarded(ack_text, bot_id, ack_generation)
+
+    if should_cancel_now and current_to_cancel is not None:
+        current_to_cancel.cancel()
+        should_start_next = True
+
+    if task_to_start is not None:
+        task_to_start.runner = asyncio.create_task(_run_voice_task(task_to_start))
+
+    if should_start_next:
+        await _start_next_task_if_idle()
 
 
 def extract_wake_and_query(text: str) -> Optional[str]:
@@ -213,6 +882,11 @@ def extract_wake_and_query(text: str) -> Optional[str]:
     if m:
         return m.group(1).strip()
     return None
+
+
+def is_bare_wake_invocation(text: str) -> bool:
+    query = extract_wake_and_query(text)
+    return query is not None and not query
 
 
 def _extract_sentence(data_block: dict) -> str:
@@ -232,6 +906,10 @@ def process_transcript_event(sentence: str, timestamp: float) -> Optional[str]:
             return query
         meeting_state["jarvis_listening"] = True
         return None
+
+    if meeting_state.get("pending_clarification"):
+        meeting_state["jarvis_listening"] = False
+        return sentence
 
     if meeting_state["jarvis_listening"]:
         meeting_state["jarvis_listening"] = False
@@ -259,6 +937,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             logger.info("Transcript %s: %s", participant, sentence)
+            meeting_state["last_user_speech_at"] = time.time()
 
             bot_id = meeting_state.get("bot_id")
             if not bot_id and os.path.exists("bot_id.txt"):
@@ -277,7 +956,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
             query = process_transcript_event(sentence, time.time())
             if query:
-                asyncio.create_task(handle_query(query, bot_id))
+                asyncio.create_task(handle_spoken_request(query, bot_id))
+            elif meeting_state["jarvis_listening"] and is_bare_wake_invocation(sentence):
+                asyncio.create_task(_handle_bare_wake(bot_id))
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
