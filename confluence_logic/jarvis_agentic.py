@@ -140,6 +140,7 @@ meeting_state = {
     "cancel_requested": False,
     "last_user_speech_at": 0.0,
     "parallel_runners": [],
+    "general_history": [],
 }
 
 _openai_client: Optional[OpenAI] = None
@@ -150,6 +151,28 @@ _UNAMBIGUOUS_VERBS = frozenset({
     "create", "list", "delete", "add", "update", "edit", "rename", "remove", "make", "show", "write",
 })
 _REFERENTIAL_TERMS = (" it ", " that ", " this ", " same ", "the one", "the page")
+
+_MAX_GENERAL_HISTORY = 4  # turns
+
+
+def _remember_general_exchange(question: str, answer: str) -> None:
+    """Store a general Q&A exchange in meeting_state for context continuity."""
+    history: list = meeting_state["general_history"]
+    history.append((question.strip(), answer.strip()))
+    if len(history) > _MAX_GENERAL_HISTORY:
+        meeting_state["general_history"] = history[-_MAX_GENERAL_HISTORY:]
+
+
+def _format_general_history() -> str:
+    """Format the general Q&A history as 'User/Assistant' lines."""
+    history: list = meeting_state["general_history"]
+    if not history:
+        return "[none]"
+    lines = []
+    for user_text, assistant_text in history[-_MAX_GENERAL_HISTORY:]:
+        lines.append(f"User: {user_text}")
+        lines.append(f"Assistant: {assistant_text}")
+    return "\n".join(lines)
 
 
 def _is_unambiguous_request(text: str) -> bool:
@@ -915,13 +938,15 @@ async def _handle_general_question(query: str, bot_id: str) -> None:
     If the answer is itself a clarifying question, set up a no-wake-word listening state."""
     generation = meeting_state["output_generation"]
     try:
-        conversation_history = session_agent.get_recent_history_text()
+        conversation_history = _format_general_history()
         await _speak_filler(bot_id, generation)
         answer = await answer_general_question(query, conversation_history)
         if not answer:
             return
 
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        if answer:
+            _remember_general_exchange(query, answer)
 
         # If the LLM's answer is a clarifying question, enter no-wake-word listening mode
         if _looks_like_clarification_prompt(answer):
@@ -959,6 +984,7 @@ async def _handle_general_clarification_answer(answer_text: str, pending: dict) 
         final_answer = await answer_general_question(answer_text, enriched_history)
         if final_answer:
             await _speak_guarded(final_answer, bot_id, generation, allow_stale=True)
+            _remember_general_exchange(answer_text, final_answer)
             # If the follow-up answer is itself a clarifying question, re-arm no-wake-word mode
             if _looks_like_clarification_prompt(final_answer):
                 meeting_state["pending_general_clarification"] = {
