@@ -35,6 +35,7 @@ from .agents.editor_agent import EditorAgent
 from .classifier import classify_intent
 from .audio_cache import get_random_ack_audio
 from .general_responder import answer_general_question
+from .meeting_responder import summarize_meeting, generate_opinion
 
 load_dotenv()
 
@@ -918,6 +919,28 @@ async def _handle_general_clarification_answer(answer_text: str, pending: dict) 
         logger.error("General clarification resolution failed: %s", e)
 
 
+async def _handle_meeting_summary(bot_id: str) -> None:
+    """Summarize the full meeting transcript and speak the result."""
+    generation = meeting_state["output_generation"]
+    try:
+        transcript_log = list(meeting_state["transcript_log"])
+        answer = await summarize_meeting(transcript_log)
+        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+    except Exception as e:
+        logger.error("Meeting summary handling failed: %s", e)
+
+
+async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
+    """Generate and speak a first-person opinion grounded in the meeting transcript."""
+    generation = meeting_state["output_generation"]
+    try:
+        transcript_log = list(meeting_state["transcript_log"])
+        answer = await generate_opinion(transcript_log, query=query)
+        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+    except Exception as e:
+        logger.error("Meeting opinion handling failed: %s", e)
+
+
 async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     # Intercept status/conversational queries — answer instantly, skip task queue
     if _is_status_query(spoken_query):
@@ -929,6 +952,17 @@ async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     if intent == "general":
         logger.info("Classified as general question: %s", spoken_query[:60])
         asyncio.create_task(_handle_general_question(spoken_query, bot_id))
+        return
+
+    # NEW: meeting transcript intents (per D-04 — routed before Confluence pipeline)
+    if intent == "meeting_summary":
+        logger.info("Classified as meeting summary request: %s", spoken_query[:60])
+        asyncio.create_task(_handle_meeting_summary(bot_id))
+        return
+
+    if intent == "meeting_opinion":
+        logger.info("Classified as meeting opinion request: %s", spoken_query[:60])
+        asyncio.create_task(_handle_meeting_opinion(spoken_query, bot_id))
         return
 
     # Check if this is an answer to a pending general clarification
