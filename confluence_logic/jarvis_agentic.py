@@ -141,6 +141,7 @@ meeting_state = {
     "last_user_speech_at": 0.0,
     "parallel_runners": [],
     "general_history": [],
+    "last_jarvis_response": None,
 }
 
 _openai_client: Optional[OpenAI] = None
@@ -175,6 +176,21 @@ def _format_general_history() -> str:
         lines.append(f"User: {user_text}")
         lines.append(f"Assistant: {assistant_text}")
     return "\n".join(lines)
+
+
+def _is_followup(query: str) -> bool:
+    """Return True if the query looks like a follow-up to a prior Jarvis answer.
+
+    Uses word-boundary matching for short ambiguous words like 'it' and 'that'
+    to avoid false positives (e.g., 'iterate' should not match 'it').
+    """
+    lowered = query.lower()
+    # Word-boundary check for short, ambiguous words
+    if re.search(r"\bit\b", lowered) or re.search(r"\bthat\b", lowered):
+        return True
+    # Simple substring check is safe for longer, unambiguous words
+    follow_keywords = ("simpler", "explain", "elaborate", "again", "more", "rephrase", "clarify")
+    return any(kw in lowered for kw in follow_keywords)
 
 
 def _is_unambiguous_request(text: str) -> bool:

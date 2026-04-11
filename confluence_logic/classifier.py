@@ -49,6 +49,7 @@ _SUMMARY_PHRASES = (
 
 _OPINION_TRIGGERS = frozenset({
     "think", "opinion", "recommend", "recommendation", "suggestion", "suggest", "prefer", "choose",
+    "feel", "thoughts",
 })
 _OPINION_PHRASES = (
     "what do you think", "what's your take", "what is your take",
