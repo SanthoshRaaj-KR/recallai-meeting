@@ -157,10 +157,12 @@ _MAX_GENERAL_HISTORY = 4  # turns
 
 def _remember_general_exchange(question: str, answer: str) -> None:
     """Store a general Q&A exchange in meeting_state for context continuity."""
-    history: list = meeting_state["general_history"]
+    # Build a new list to avoid mutating the shared reference mid-read
+    history = list(meeting_state["general_history"])
     history.append((question.strip(), answer.strip()))
     if len(history) > _MAX_GENERAL_HISTORY:
-        meeting_state["general_history"] = history[-_MAX_GENERAL_HISTORY:]
+        history = history[-_MAX_GENERAL_HISTORY:]
+    meeting_state["general_history"] = history
 
 
 def _format_general_history() -> str:
@@ -972,14 +974,7 @@ async def _handle_general_question(query: str, bot_id: str) -> None:
     generation = meeting_state["output_generation"]
     try:
         conversation_history = _format_general_history()
-        # Fire gap filler and actual answer in parallel; gap filler wins the race and plays first.
-        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query))
-        answer_task = asyncio.create_task(answer_general_question(query, conversation_history))
-
-        gap_filler = await gap_filler_task
-        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
-
-        answer = await answer_task
+        answer = await answer_general_question(query, conversation_history)
         if not answer:
             return
 
@@ -1009,7 +1004,9 @@ async def _handle_general_clarification_answer(answer_text: str, pending: dict) 
     generation = meeting_state["output_generation"]
 
     # Clear the clarification state immediately so new transcripts go through normal flow
-    meeting_state["pending_general_clarification"] = None
+    state_lock = _get_state_lock()
+    async with state_lock:
+        meeting_state["pending_general_clarification"] = None
 
     try:
         # Build enriched context: original question + clarification exchange
@@ -1191,7 +1188,10 @@ async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
                 target_task = current
 
             if target_task is not None and target_task.answer_future and not target_task.answer_future.done():
-                target_task.answer_future.set_result(spoken_query)
+                try:
+                    target_task.answer_future.set_result(spoken_query)
+                except asyncio.InvalidStateError:
+                    logger.warning("Clarification future already resolved/cancelled — ignoring answer.")
                 return
 
         if current is None:
@@ -1349,11 +1349,15 @@ async def websocket_endpoint(websocket: WebSocket):
             if not bot_id:
                 continue
 
-            meeting_state["transcript_log"].append({
+            log = meeting_state["transcript_log"]
+            log.append({
                 "participant": participant,
                 "text": sentence,
                 "timestamp": time.time(),
             })
+            # Keep memory bounded — drop oldest entries beyond limit
+            if len(log) > 500:
+                meeting_state["transcript_log"] = log[-500:]
 
             query = process_transcript_event(sentence, time.time())
             if query:

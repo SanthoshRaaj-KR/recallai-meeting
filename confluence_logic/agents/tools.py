@@ -16,10 +16,10 @@ logger = logging.getLogger(__name__)
 
 _store = None
 _connector = None
-_tool_run_state: ContextVar[dict] = ContextVar(
-    "tool_run_state",
-    default={"last_action": None, "success": None, "message": ""},
-)
+def _fresh_tool_state() -> dict:
+    return {"last_action": None, "success": None, "message": "", "html_cache": {}, "version_cache": {}}
+
+_tool_run_state: ContextVar[dict] = ContextVar("tool_run_state")
 _mutation_observer: ContextVar[Optional[Callable[[str], None]]] = ContextVar(
     "mutation_observer",
     default=None,
@@ -41,10 +41,15 @@ _MAX_VERSION_RETRIES = 3
 
 
 def reset_tool_state() -> None:
-    _tool_run_state.set({"last_action": None, "success": None, "message": "", "html_cache": {}, "version_cache": {}})
+    _tool_run_state.set(_fresh_tool_state())
 
 def get_tool_state() -> dict:
-    return _tool_run_state.get()
+    try:
+        return _tool_run_state.get()
+    except LookupError:
+        state = _fresh_tool_state()
+        _tool_run_state.set(state)
+        return state
 
 def set_mutation_observer(observer: Optional[Callable[[str], None]]) -> None:
     _mutation_observer.set(observer)
@@ -264,7 +269,7 @@ def fetch_live_page(page_id: str, heading_string: Optional[str] = None) -> LiveP
         version = metadata.get("version", {}).get("number", 1)
 
         # Cache HTML and version so preview_edit/preview_delete don't re-fetch
-        state = _tool_run_state.get()
+        state = get_tool_state()
         state.setdefault("html_cache", {})[page_id] = html
         state.setdefault("version_cache", {})[page_id] = version
 
@@ -281,7 +286,7 @@ def fetch_live_page(page_id: str, heading_string: Optional[str] = None) -> LiveP
 def preview_edit(page_id: str, heading_string: str, old_block_html: str = "", new_block_html: str = "") -> PreviewResponse:
     """Generates a DOM modified HTML preview applying differencing logic to preview the exact modification visually."""
     try:
-        state = _tool_run_state.get()
+        state = get_tool_state()
         live_html = state.get("html_cache", {}).get(page_id) or get_connector().fetch_page_html(page_id)
         new_document_html = edit_block_in_section(live_html, heading_string, old_block_html, new_block_html)
 
@@ -309,7 +314,7 @@ def preview_delete(
 ) -> PreviewResponse:
     """Generates a preview for a delete operation without changing the existing edit tool behavior."""
     try:
-        state = _tool_run_state.get()
+        state = get_tool_state()
         live_html = state.get("html_cache", {}).get(page_id) or get_connector().fetch_page_html(page_id)
         new_document_html = delete_content_in_section(
             live_html,
