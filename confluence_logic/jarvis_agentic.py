@@ -1248,8 +1248,14 @@ async def websocket_endpoint(websocket: WebSocket):
             if not sentence or BOT_NAME.lower() in participant.lower():
                 continue
 
-            logger.info("Transcript %s: %s", participant, sentence)
             meeting_state["last_user_speech_at"] = time.time()
+
+            # Only dispatch commands on final segments — partial segments arrive mid-sentence
+            if not data_block.get("is_final", True):
+                logger.debug("Partial transcript (skipping dispatch): %s", sentence[:40])
+                continue
+
+            logger.info("Transcript %s: %s", participant, sentence)
 
             bot_id = meeting_state.get("bot_id")
             if not bot_id and os.path.exists("bot_id.txt"):
