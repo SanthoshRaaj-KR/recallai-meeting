@@ -2,3 +2,19 @@ myenv
 .env
 env*.mp3
 *.wav
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Runtime data
+meetings/
+storage/
+bot_id.txt
+
+# Generated audio assets
+confluence_logic/assets/audio/*.mp3
+confluence_logic/__pycache__
+confluence_logic/*/__pycache__
+confluence_logic/*/*/__pycache__
