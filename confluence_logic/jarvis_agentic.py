@@ -59,6 +59,7 @@ JARVIS_TTS_SPEED = float(os.getenv("JARVIS_TTS_SPEED", "1.0"))
 JARVIS_WAKE_ACK = os.getenv("JARVIS_WAKE_ACK", "Yes?").strip()
 JARVIS_BUSY_ACK = os.getenv("JARVIS_BUSY_ACK", "I'm already on it. Give me a moment.").strip()
 JARVIS_SPEECH_HOLD_SECONDS = float(os.getenv("JARVIS_SPEECH_HOLD_SECONDS", "0.8"))
+JARVIS_GENERAL_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_GENERAL_CLARIFICATION_TIMEOUT", "15.0"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -121,6 +122,7 @@ meeting_state = {
     "current_task": None,
     "pending_requests": deque(),
     "pending_clarification": None,
+    "pending_general_clarification": None,  # {"question": str, "original_query": str, "bot_id": str, "expires_at": float}
     "current_task_id": None,
     "current_phase": "idle",
     "current_request": None,
@@ -865,15 +867,55 @@ async def _handle_status_query(query: str, bot_id: str) -> None:
 
 
 async def _handle_general_question(query: str, bot_id: str) -> None:
-    """Answer a general (non-Confluence) question using the LLM and speak the response."""
+    """Answer a general (non-Confluence) question using the LLM and speak the response.
+    If the answer is itself a clarifying question, set up a no-wake-word listening state."""
     generation = meeting_state["output_generation"]
     try:
         conversation_history = session_agent.get_recent_history_text()
         answer = await answer_general_question(query, conversation_history)
-        if answer:
-            await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        if not answer:
+            return
+
+        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+
+        # If the LLM's answer is a clarifying question, enter no-wake-word listening mode
+        if _looks_like_clarification_prompt(answer):
+            meeting_state["pending_general_clarification"] = {
+                "question": answer,
+                "original_query": query,
+                "bot_id": bot_id,
+                "conversation_history": conversation_history,
+                "expires_at": time.time() + JARVIS_GENERAL_CLARIFICATION_TIMEOUT,
+            }
+            logger.info("General clarification mode activated for: %s (timeout: %.0fs)", query[:50], JARVIS_GENERAL_CLARIFICATION_TIMEOUT)
     except Exception as e:
         logger.error("General question handling failed: %s", e)
+
+
+async def _handle_general_clarification_answer(answer_text: str, pending: dict) -> None:
+    """Handle the user's answer to a general-question clarification, then clear the state."""
+    bot_id = pending["bot_id"]
+    original_query = pending["original_query"]
+    conversation_history = pending.get("conversation_history", "")
+    generation = meeting_state["output_generation"]
+
+    # Clear the clarification state immediately so new transcripts go through normal flow
+    meeting_state["pending_general_clarification"] = None
+
+    try:
+        # Build enriched context: original question + clarification exchange
+        enriched_history = conversation_history
+        if enriched_history and enriched_history.strip() != "[none]":
+            enriched_history += f"\nUser: {original_query}\nAssistant: {pending['question']}\nUser: {answer_text}"
+        else:
+            enriched_history = f"User: {original_query}\nAssistant: {pending['question']}\nUser: {answer_text}"
+
+        # Re-ask with full context
+        final_answer = await answer_general_question(answer_text, enriched_history)
+        if final_answer:
+            await _speak_guarded(final_answer, bot_id, generation, allow_stale=True)
+    except Exception as e:
+        logger.error("General clarification resolution failed: %s", e)
 
 
 async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
@@ -887,6 +929,13 @@ async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     if intent == "general":
         logger.info("Classified as general question: %s", spoken_query[:60])
         asyncio.create_task(_handle_general_question(spoken_query, bot_id))
+        return
+
+    # Check if this is an answer to a pending general clarification
+    pending_general = meeting_state.get("pending_general_clarification")
+    if pending_general and time.time() <= pending_general["expires_at"]:
+        logger.info("Routing to general clarification handler: %s", spoken_query[:60])
+        asyncio.create_task(_handle_general_clarification_answer(spoken_query, pending_general))
         return
 
     state_lock = _get_state_lock()
@@ -999,6 +1048,18 @@ def process_transcript_event(sentence: str, timestamp: float) -> Optional[str]:
     if meeting_state.get("pending_clarification"):
         meeting_state["jarvis_listening"] = False
         return sentence
+
+    # Check for pending general question clarification (no wake word needed)
+    pending_general = meeting_state.get("pending_general_clarification")
+    if pending_general:
+        if time.time() > pending_general["expires_at"]:
+            # Timeout expired — clear state, require wake word again
+            logger.info("General clarification timeout expired, clearing state.")
+            meeting_state["pending_general_clarification"] = None
+        else:
+            # User is answering a general clarification — bypass wake word
+            meeting_state["jarvis_listening"] = False
+            return sentence
 
     if meeting_state["jarvis_listening"]:
         meeting_state["jarvis_listening"] = False
