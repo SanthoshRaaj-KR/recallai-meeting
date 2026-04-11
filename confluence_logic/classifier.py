@@ -39,13 +39,43 @@ _CONFLUENCE_NOUNS = (
     "confluence", "workspace", "content",
 )
 
+_SUMMARY_TRIGGERS = frozenset({
+    "summarize", "summary", "recap", "recapping", "missed", "miss",
+})
+_SUMMARY_PHRASES = (
+    "catch me up", "what was said", "what did i miss", "what have i missed",
+    "summarize the meeting", "give me a summary", "what happened so far",
+)
+
+_OPINION_TRIGGERS = frozenset({
+    "think", "opinion", "recommend", "recommendation", "suggestion", "suggest", "prefer", "choose",
+})
+_OPINION_PHRASES = (
+    "what do you think", "what's your take", "what is your take",
+    "how should we proceed", "which option", "what would you do",
+    "what do you recommend", "your thoughts", "your opinion",
+)
+
 
 def _fast_classify(text: str) -> Optional[str]:
-    """Return 'confluence' or 'general' if heuristic is confident, else None for LLM fallback."""
+    """Return intent string if heuristic is confident, else None for LLM fallback."""
     normalized = text.strip().lower()
     words = normalized.split()
     if not words:
         return None
+
+    # Meeting summary heuristics (per D-02)
+    if any(phrase in normalized for phrase in _SUMMARY_PHRASES):
+        return "meeting_summary"
+    if any(word in _SUMMARY_TRIGGERS for word in words):
+        return "meeting_summary"
+
+    # Meeting opinion heuristics (per D-03)
+    if any(phrase in normalized for phrase in _OPINION_PHRASES):
+        return "meeting_opinion"
+    if words[0] in ("what", "how", "which") and any(word in _OPINION_TRIGGERS for word in words):
+        return "meeting_opinion"
+
     # If first word is a confluence verb AND mentions a confluence noun, it's confluence
     if words[0] in _CONFLUENCE_VERBS:
         if any(noun in normalized for noun in _CONFLUENCE_NOUNS):
@@ -62,8 +92,8 @@ def _fast_classify(text: str) -> Optional[str]:
 
 async def classify_intent(text: str) -> str:
     """
-    Classify user text as 'confluence' (edit/create/delete intent) or 'general' (question/conversation).
-    Returns: 'confluence' or 'general'
+    Classify user text into one of four intents: 'confluence', 'general', 'meeting_summary', 'meeting_opinion'.
+    Returns: 'confluence', 'general', 'meeting_summary', or 'meeting_opinion'
     """
     # Try fast heuristic first
     fast = _fast_classify(text)
@@ -74,11 +104,14 @@ async def classify_intent(text: str) -> str:
     # LLM fallback for ambiguous cases
     system_prompt = (
         "You are a classifier. The user is speaking to a voice assistant called Jarvis in a meeting. "
-        "Jarvis can edit, create, delete, and list Confluence wiki pages. "
+        "Jarvis can edit, create, delete, and list Confluence wiki pages, answer general questions, "
+        "summarize the meeting transcript, and give opinions on what was discussed. "
         "Classify the user's message into exactly one category:\n"
         "- 'confluence' if the user wants to create, edit, update, delete, rename, list, or otherwise modify Confluence pages or content\n"
-        "- 'general' if the user is asking a general question, making conversation, or asking something unrelated to Confluence page operations\n\n"
-        "Respond with ONLY the word 'confluence' or 'general'. Nothing else."
+        "- 'general' if the user is asking a general question, making conversation, or asking something unrelated to Confluence or the current meeting\n"
+        "- 'meeting_summary' if the user wants a summary or recap of what was said in the current meeting (e.g., 'summarize the meeting', 'catch me up', 'what did I miss', 'what was said')\n"
+        "- 'meeting_opinion' if the user wants Jarvis's opinion, recommendation, or take on what was discussed (e.g., 'what do you think', 'which option is better', 'how should we proceed', 'what would you recommend')\n\n"
+        "Respond with ONLY one of these four words: 'confluence', 'general', 'meeting_summary', 'meeting_opinion'. Nothing else."
     )
 
     try:
@@ -94,7 +127,7 @@ async def classify_intent(text: str) -> str:
             )
         )
         result = (response.choices[0].message.content or "").strip().lower()
-        if result in ("confluence", "general"):
+        if result in ("confluence", "general", "meeting_summary", "meeting_opinion"):
             logger.info("Classifier LLM: %s -> %s", text[:60], result)
             return result
         logger.warning("Classifier LLM returned unexpected: %s, defaulting to confluence", result)
