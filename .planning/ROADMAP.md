@@ -16,7 +16,7 @@
 
 Plans:
 - [x] 01-01-PLAN.md — Intent classifier module + WAV asset generation script + audio cache
-- [ ] 01-02-PLAN.md — General question responder + pipeline integration (classifier routing, cached acks)
+- [x] 01-02-PLAN.md — General question responder + pipeline integration (classifier routing, cached acks)
 - [ ] 01-03-PLAN.md — Clarification follow-up listening state (no wake word on follow-up)
 
 ---
