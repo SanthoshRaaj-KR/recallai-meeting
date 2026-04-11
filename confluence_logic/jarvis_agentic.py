@@ -448,6 +448,11 @@ def speak_cached_audio(audio_bytes: bytes, bot_id: str) -> bool:
         return False
 
 
+def _estimate_cached_duration(audio_bytes: bytes) -> float:
+    """Estimate MP3 playback duration from byte size (assumes ~32 kbps = 4000 bytes/sec, min 0.3s)."""
+    return max(0.3, len(audio_bytes) / 4000)
+
+
 async def _speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int) -> bool:
     """Like _speak_guarded but sends pre-cached audio bytes instead of synthesizing."""
     output_lock = _get_output_lock()
@@ -461,7 +466,16 @@ async def _speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int
             await asyncio.sleep(min(remaining, 0.2))
             if generation != meeting_state["output_generation"]:
                 return False
-        return await asyncio.to_thread(speak_cached_audio, audio_bytes, bot_id)
+        ok = await asyncio.to_thread(speak_cached_audio, audio_bytes, bot_id)
+        if ok:
+            duration = _estimate_cached_duration(audio_bytes)
+            elapsed = 0.0
+            while elapsed < duration:
+                await asyncio.sleep(0.1)
+                elapsed += 0.1
+                if generation != meeting_state["output_generation"]:
+                    break
+        return ok
 
 
 def _format_pending_clarification(task: Optional[VoiceTask] = None) -> str:
