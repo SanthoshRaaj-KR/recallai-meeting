@@ -26,6 +26,7 @@ def _get_client() -> OpenAI:
 
 MEETING_RESPONDER_MODEL = os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini").strip()
 JARVIS_SUMMARY_MAX_TOKENS = int(os.getenv("JARVIS_SUMMARY_MAX_TOKENS", "400"))
+JARVIS_SUMMARY_BRIEF_MAX_TOKENS = int(os.getenv("JARVIS_SUMMARY_BRIEF_MAX_TOKENS", "150"))
 JARVIS_OPINION_MAX_TOKENS = int(os.getenv("JARVIS_OPINION_MAX_TOKENS", "200"))
 
 _EMPTY_TRANSCRIPT_FALLBACK = "I haven't heard anything in the meeting yet."
@@ -39,12 +40,13 @@ def _format_transcript(transcript_log: List[Dict[str, Any]]) -> str:
     )
 
 
-async def summarize_meeting(transcript_log: List[Dict[str, Any]]) -> str:
+async def summarize_meeting(transcript_log: List[Dict[str, Any]], detail_level: str = "detailed") -> str:
     """
     Generate a spoken-language summary of everything in the meeting transcript.
 
     Args:
         transcript_log: List of dicts with 'participant', 'text', 'timestamp' keys.
+        detail_level: "brief" for a short bullet-style summary, "detailed" (default) for full narrative.
 
     Returns:
         A TTS-friendly summary paragraph, or fallback string if transcript is empty.
@@ -58,14 +60,23 @@ async def summarize_meeting(transcript_log: List[Dict[str, Any]]) -> str:
     if len(transcript_text) > max_chars:
         transcript_text = transcript_text[-max_chars:]
 
-    system_prompt = (
-        "You are Jarvis, an AI assistant attending a live meeting. "
-        "The user has asked you to summarize what was discussed. "
-        "Write a clear, spoken-language summary of the key topics, decisions, and points raised. "
-        "Speak as if delivering the summary aloud — no markdown, no bullet points, no formatting. "
-        "Use natural sentences. Cover all significant content without omitting important details. "
-        "Do not editorialize; just report what was said."
-    )
+    if detail_level == "brief":
+        system_prompt = (
+            "You are Jarvis, an AI assistant attending a live meeting. "
+            "The user wants a brief summary. Give a short, punchy bullet-point style summary of the 3-5 most important points discussed. "
+            "No more than 5 bullet points. Speak naturally — say 'Here are the main points:' then list them conversationally."
+        )
+        max_tokens = JARVIS_SUMMARY_BRIEF_MAX_TOKENS
+    else:
+        system_prompt = (
+            "You are Jarvis, an AI assistant attending a live meeting. "
+            "The user has asked you to summarize what was discussed. "
+            "Write a clear, spoken-language summary of the key topics, decisions, and points raised. "
+            "Speak as if delivering the summary aloud — no markdown, no bullet points, no formatting. "
+            "Use natural sentences. Cover all significant content without omitting important details. "
+            "Do not editorialize; just report what was said."
+        )
+        max_tokens = JARVIS_SUMMARY_MAX_TOKENS
 
     user_prompt = f"Here is the meeting transcript so far:\n\n{transcript_text}\n\nPlease summarize what was discussed."
 
@@ -77,7 +88,7 @@ async def summarize_meeting(transcript_log: List[Dict[str, Any]]) -> str:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_tokens=JARVIS_SUMMARY_MAX_TOKENS,
+                max_tokens=max_tokens,
                 temperature=0.5,
             )
         )
