@@ -990,6 +990,11 @@ async def _handle_general_question(query: str, bot_id: str) -> None:
     generation = meeting_state["output_generation"]
     try:
         conversation_history = _format_general_history()
+        # Cross-handler follow-up: prepend prior meeting response as context
+        prior = meeting_state.get("last_jarvis_response")
+        if prior and _is_followup(query):
+            cross_context = f"User: {prior['query']}\nAssistant: {prior['answer']}"
+            conversation_history = cross_context + "\n" + conversation_history if conversation_history and conversation_history.strip() != "[none]" else cross_context
         answer = await answer_general_question(query, conversation_history)
         if not answer:
             return
@@ -1116,6 +1121,11 @@ async def _handle_meeting_summary(query: str, bot_id: str) -> None:
             await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
 
             answer = await summary_task
+            meeting_state["last_jarvis_response"] = {
+                "intent": "meeting_summary",
+                "query": query,
+                "answer": answer,
+            }
             await _speak_guarded(answer, bot_id, generation, allow_stale=True)
         except Exception as e:
             logger.error("Meeting summary handling failed: %s", e)
@@ -1143,6 +1153,11 @@ async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
         await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
 
         answer = await opinion_task
+        meeting_state["last_jarvis_response"] = {
+            "intent": "meeting_opinion",
+            "query": query,
+            "answer": answer,
+        }
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
     except Exception as e:
         logger.error("Meeting opinion handling failed: %s", e)
