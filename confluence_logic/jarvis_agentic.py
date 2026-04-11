@@ -550,6 +550,12 @@ def _build_request_reference(task: VoiceTask) -> str:
     return "this request"
 
 
+def _estimate_speech_duration(text: str) -> float:
+    """Estimate playback duration in seconds from text word count (2.5 words/sec, min 0.5s)."""
+    words = len((text or "").split())
+    return max(0.5, words / 2.5)
+
+
 async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: bool = False) -> bool:
     output_lock = _get_output_lock()
     async with output_lock:
@@ -562,7 +568,16 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
             await asyncio.sleep(min(remaining, 0.2))
             if not allow_stale and generation != meeting_state["output_generation"]:
                 return False
-        return await asyncio.to_thread(speak, text, bot_id)
+        ok = await asyncio.to_thread(speak, text, bot_id)
+        if ok:
+            duration = _estimate_speech_duration(text)
+            elapsed = 0.0
+            while elapsed < duration:
+                await asyncio.sleep(0.1)
+                elapsed += 0.1
+                if generation != meeting_state["output_generation"]:
+                    break
+        return ok
 
 
 async def _speak_filler(bot_id: str, generation: int) -> None:
