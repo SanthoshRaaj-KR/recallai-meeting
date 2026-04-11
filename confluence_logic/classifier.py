@@ -64,10 +64,22 @@ def _fast_classify(text: str) -> Optional[str]:
     if not words:
         return None
 
-    # Meeting summary heuristics (per D-02)
-    if any(phrase in normalized for phrase in _SUMMARY_PHRASES):
-        return "meeting_summary"
-    if any(word in _SUMMARY_TRIGGERS for word in words):
+    # A Confluence-specific noun in the query means the action targets a page/document,
+    # not just the spoken meeting transcript.
+    has_confluence_target = any(noun in normalized for noun in _CONFLUENCE_NOUNS)
+    has_summary_trigger = (
+        any(phrase in normalized for phrase in _SUMMARY_PHRASES)
+        or any(word in _SUMMARY_TRIGGERS for word in words)
+    )
+
+    # If a summary trigger AND a Confluence target both appear, the user wants Jarvis to
+    # summarize or act on a Confluence document (or create a page with the summary).
+    # Route to confluence so the editor pipeline handles it end-to-end.
+    if has_summary_trigger and has_confluence_target:
+        return "confluence"
+
+    # Pure meeting-summary heuristics — only when there is no Confluence target.
+    if not has_confluence_target and has_summary_trigger:
         return "meeting_summary"
 
     # Meeting opinion heuristics (per D-03)
@@ -107,10 +119,14 @@ async def classify_intent(text: str) -> str:
         "Jarvis can edit, create, delete, and list Confluence wiki pages, answer general questions, "
         "summarize the meeting transcript, and give opinions on what was discussed. "
         "Classify the user's message into exactly one category:\n"
-        "- 'confluence' if the user wants to create, edit, update, delete, rename, list, or otherwise modify Confluence pages or content\n"
+        "- 'confluence' if the user wants to create, edit, update, delete, rename, list, or otherwise act on Confluence pages or content. "
+        "IMPORTANT: also use 'confluence' when the user wants to summarize or do anything with a specific Confluence document, page, or section, "
+        "OR when they want to save/create a page with a meeting summary (e.g., 'summarize the meeting and put it in a new page'). "
+        "Any action that involves a Confluence page or document is 'confluence', even if it includes summarization.\n"
         "- 'general' if the user is asking a general question, making conversation, or asking something unrelated to Confluence or the current meeting\n"
-        "- 'meeting_summary' if the user wants a summary or recap of what was said in the current meeting (e.g., 'summarize the meeting', 'catch me up', 'what did I miss', 'what was said')\n"
-        "- 'meeting_opinion' if the user wants Jarvis's opinion, recommendation, or take on what was discussed (e.g., 'what do you think', 'which option is better', 'how should we proceed', 'what would you recommend')\n\n"
+        "- 'meeting_summary' ONLY if the user wants to hear a spoken summary/recap of the current meeting transcript with NO Confluence action involved "
+        "(e.g., 'catch me up', 'what did I miss', 'summarize the meeting' — with no mention of pages or documents)\n"
+        "- 'meeting_opinion' if the user wants Jarvis's opinion, recommendation, or take on what was discussed (e.g., 'what do you think', 'which option is better', 'how should we proceed')\n\n"
         "Respond with ONLY one of these four words: 'confluence', 'general', 'meeting_summary', 'meeting_opinion'. Nothing else."
     )
 

@@ -22,14 +22,14 @@ class ConfluenceConnector(DocumentFetcher, DocumentPusher):
     def get_page_metadata(self, page_id: str) -> Dict[str, Any]:
         """Fetch metadata including current version of the given page."""
         url = f"{self.base_url}/content/{page_id}"
-        response = requests.get(url, auth=self.auth, headers={"Accept": "application/json"})
+        response = requests.get(url, auth=self.auth, headers={"Accept": "application/json"}, timeout=15)
         response.raise_for_status()
         return response.json()
 
     def fetch_page_html(self, page_id: str) -> str:
         """Get the HTML/Storage format of the associated page."""
         url = f"{self.base_url}/content/{page_id}?expand=body.storage"
-        response = requests.get(url, auth=self.auth, headers={"Accept": "application/json"})
+        response = requests.get(url, auth=self.auth, headers={"Accept": "application/json"}, timeout=15)
         response.raise_for_status()
         data = response.json()
         return data.get("body", {}).get("storage", {}).get("value", "")
@@ -54,6 +54,7 @@ class ConfluenceConnector(DocumentFetcher, DocumentPusher):
                 auth=self.auth,
                 headers={"Accept": "application/json"},
                 params={"cql": cql, "limit": limit, "expand": "space,version"},
+                timeout=15,
             )
             response.raise_for_status()
 
@@ -87,6 +88,7 @@ class ConfluenceConnector(DocumentFetcher, DocumentPusher):
                 "limit": max(1, min(limit, 100)),
                 "expand": "space,version",
             },
+            timeout=15,
         )
         response.raise_for_status()
 
@@ -132,10 +134,11 @@ class ConfluenceConnector(DocumentFetcher, DocumentPusher):
         
         url = f"{self.base_url}/content/{page_id}"
         response = requests.put(
-            url, 
-            auth=self.auth, 
-            json=payload, 
-            headers={"Content-Type": "application/json"}
+            url,
+            auth=self.auth,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=15,
         )
         response.raise_for_status()
         return response.status_code == 200
@@ -162,10 +165,11 @@ class ConfluenceConnector(DocumentFetcher, DocumentPusher):
             
         url = f"{self.base_url}/content"
         response = requests.post(
-            url, 
-            auth=self.auth, 
-            json=payload, 
-            headers={"Content-Type": "application/json"}
+            url,
+            auth=self.auth,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=15,
         )
         try:
             response.raise_for_status()

@@ -623,6 +623,37 @@ async def _speak_filler(bot_id: str, generation: int) -> None:
     await _speak_guarded(phrase, bot_id, generation, allow_stale=True)
 
 
+async def _generate_contextual_gap_filler(query: str) -> str:
+    """Generate a short, contextual acknowledgment sentence for the given user query.
+    Runs in parallel with the actual pipeline so there is no extra delay."""
+    try:
+        response = await asyncio.to_thread(
+            lambda: get_openai_client().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Jarvis, a concise voice assistant in a meeting. "
+                            "Given the user's request, respond with exactly ONE short sentence "
+                            "(10 words or fewer) that acknowledges it and signals you are acting on it. "
+                            "Be specific to what they asked. Do NOT answer the question itself. "
+                            "Examples: 'Sure, let me pull up the meeting summary.', "
+                            "'On it, fetching that for you.', 'Let me check that right now.'"
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                max_tokens=30,
+                temperature=0.7,
+            )
+        )
+        text = (response.choices[0].message.content or "").strip().strip('"\'')
+        return text if text else random.choice(JARVIS_FILLER_PHRASES)
+    except Exception:
+        return random.choice(JARVIS_FILLER_PHRASES)
+
+
 async def _start_next_task_if_idle() -> None:
     state_lock = _get_state_lock()
     next_task: Optional[VoiceTask] = None
@@ -666,9 +697,11 @@ async def _handle_bare_wake(bot_id: str) -> None:
     async with state_lock:
         current: Optional[VoiceTask] = meeting_state.get("current_task")
         generation = meeting_state["output_generation"]
-        text = JARVIS_BUSY_ACK if current is not None else JARVIS_WAKE_ACK
 
-    await _speak_guarded(text, bot_id, generation)
+    if current is not None:
+        # Already busy — let the user know
+        await _speak_guarded(JARVIS_BUSY_ACK, bot_id, generation)
+    # else: silently start listening — no "Yes?" acknowledgment
 
 
 def _should_speak_final_answer(task: VoiceTask, answer: str) -> bool:
@@ -939,8 +972,14 @@ async def _handle_general_question(query: str, bot_id: str) -> None:
     generation = meeting_state["output_generation"]
     try:
         conversation_history = _format_general_history()
-        await _speak_filler(bot_id, generation)
-        answer = await answer_general_question(query, conversation_history)
+        # Fire gap filler and actual answer in parallel; gap filler wins the race and plays first.
+        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query))
+        answer_task = asyncio.create_task(answer_general_question(query, conversation_history))
+
+        gap_filler = await gap_filler_task
+        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
+
+        answer = await answer_task
         if not answer:
             return
 
@@ -1015,9 +1054,15 @@ async def _handle_summary_clarification_answer(answer_text: str, pending: dict) 
         detail_level = "detailed"
 
     try:
-        await _speak_filler(bot_id, generation)
         transcript_log = list(meeting_state["transcript_log"])
-        answer = await summarize_meeting(transcript_log, detail_level=detail_level)
+        # Fire gap filler and actual summary in parallel; gap filler plays first.
+        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(answer_text))
+        summary_task = asyncio.create_task(summarize_meeting(transcript_log, detail_level=detail_level))
+
+        gap_filler = await gap_filler_task
+        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
+
+        answer = await summary_task
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
         # If the summary response is itself a clarifying question, re-arm no-wake-word mode
         if _looks_like_clarification_prompt(answer):
@@ -1049,9 +1094,15 @@ async def _handle_meeting_summary(query: str, bot_id: str) -> None:
     if specified:
         # Type already known — generate directly
         try:
-            await _speak_filler(bot_id, generation)
             transcript_log = list(meeting_state["transcript_log"])
-            answer = await summarize_meeting(transcript_log, detail_level=detail_level)
+            # Fire gap filler and actual summary in parallel; gap filler plays first.
+            gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query))
+            summary_task = asyncio.create_task(summarize_meeting(transcript_log, detail_level=detail_level))
+
+            gap_filler = await gap_filler_task
+            await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
+
+            answer = await summary_task
             await _speak_guarded(answer, bot_id, generation, allow_stale=True)
         except Exception as e:
             logger.error("Meeting summary handling failed: %s", e)
@@ -1070,9 +1121,15 @@ async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
     """Generate and speak a first-person opinion grounded in the meeting transcript."""
     generation = meeting_state["output_generation"]
     try:
-        await _speak_filler(bot_id, generation)
         transcript_log = list(meeting_state["transcript_log"])
-        answer = await generate_opinion(transcript_log, query=query)
+        # Fire gap filler and actual opinion in parallel; gap filler plays first.
+        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query))
+        opinion_task = asyncio.create_task(generate_opinion(transcript_log, query=query))
+
+        gap_filler = await gap_filler_task
+        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
+
+        answer = await opinion_task
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
     except Exception as e:
         logger.error("Meeting opinion handling failed: %s", e)

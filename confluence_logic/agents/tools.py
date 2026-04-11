@@ -1,4 +1,7 @@
+import concurrent.futures
 import difflib
+import threading
+import time
 from contextvars import ContextVar
 from typing import Callable, List, Optional
 from ..db.vector_store import PineconeStore
@@ -34,8 +37,11 @@ def get_connector():
         _connector = ConfluenceConnector()
     return _connector
 
+_MAX_VERSION_RETRIES = 3
+
+
 def reset_tool_state() -> None:
-    _tool_run_state.set({"last_action": None, "success": None, "message": ""})
+    _tool_run_state.set({"last_action": None, "success": None, "message": "", "html_cache": {}, "version_cache": {}})
 
 def get_tool_state() -> dict:
     return _tool_run_state.get()
@@ -58,6 +64,60 @@ def _is_version_conflict(error: Exception) -> bool:
 
 def _similarity_score(query: str, title: str) -> float:
     return difflib.SequenceMatcher(None, (query or "").lower(), (title or "").lower()).ratio()
+
+
+def _reindex_in_background(page_id: str) -> None:
+    """Fire-and-forget: re-index page in a daemon thread so commits return immediately."""
+    def _run():
+        try:
+            from ..ingestion.doc_pipeline import IngestionPipeline
+            IngestionPipeline().process_page(page_id)
+        except Exception as exc:
+            logger.error("Background re-indexing failed for %s: %s", page_id, exc)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _commit_with_retry(
+    page_id: str,
+    apply_fn,
+    expected_version: int,
+    title_override: Optional[str] = None,
+):
+    """Fetch, transform, and push with bounded exponential-backoff retry on version conflicts.
+
+    apply_fn: Callable[[str], str] — receives live HTML, returns new HTML to commit.
+    Returns (success: bool, committed_version: Optional[int]).
+    Raises ValueError after _MAX_VERSION_RETRIES consecutive version conflicts.
+    """
+    connector = get_connector()
+    for attempt in range(_MAX_VERSION_RETRIES):
+        try:
+            live_html = connector.fetch_page_html(page_id)
+            new_html = apply_fn(live_html)
+            success = connector.push_update(
+                page_id, new_html,
+                expected_version=expected_version,
+                title_override=title_override,
+            )
+            return success, (expected_version + 1 if success else None)
+        except ValueError as ve:
+            if not _is_version_conflict(ve):
+                raise
+            if attempt == _MAX_VERSION_RETRIES - 1:
+                logger.error(
+                    "Version conflict: max retries (%d) exceeded for page %s",
+                    _MAX_VERSION_RETRIES, page_id,
+                )
+                raise
+            logger.warning(
+                "Version conflict on attempt %d/%d for page %s, retrying in %.1fs...",
+                attempt + 1, _MAX_VERSION_RETRIES, page_id, 0.5 * (2 ** attempt),
+            )
+            meta = connector.get_page_metadata(page_id)
+            expected_version = meta.get("version", {}).get("number", expected_version)
+            time.sleep(0.5 * (2 ** attempt))
+    return False, None
 
 def _candidate_from_metadata(meta: dict) -> CandidatePage:
     return CandidatePage(
@@ -108,22 +168,42 @@ def list_workspace_pages(limit: int = 100) -> SearchResponse:
 
 @function_tool
 def search_workspace_knowledge(query: str) -> SearchResponse:
-    """Searches live Confluence pages first, then supplements with Pinecone if available."""
+    """Searches live Confluence pages and Pinecone in parallel, then merges results."""
     try:
+        connector = get_connector()
+        store = get_store()
+
+        def _live_search():
+            try:
+                return connector.search_pages(query, limit=8)
+            except Exception as e:
+                logger.error(f"Live Confluence search failed: {e}")
+                return []
+
+        def _recent_pages():
+            try:
+                return connector.list_pages(limit=100)
+            except Exception as e:
+                logger.warning(f"Recent Confluence page listing failed: {e}")
+                return []
+
+        def _pinecone_search():
+            try:
+                return store.search(query, top_k=5)
+            except Exception as e:
+                logger.warning(f"Pinecone search unavailable, continuing with live Confluence results: {e}")
+                return []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            f_live = executor.submit(_live_search)
+            f_recent = executor.submit(_recent_pages)
+            f_pinecone = executor.submit(_pinecone_search)
+            live_results = f_live.result()
+            recent_pages = f_recent.result()
+            pinecone_results = f_pinecone.result()
+
         candidates_by_page: dict[str, CandidatePage] = {}
         scored_candidates: dict[str, float] = {}
-
-        try:
-            live_results = get_connector().search_pages(query, limit=8)
-        except Exception as live_error:
-            logger.error(f"Live Confluence search failed: {live_error}")
-            live_results = []
-
-        try:
-            recent_pages = get_connector().list_pages(limit=100)
-        except Exception as recent_error:
-            logger.warning(f"Recent Confluence page listing failed: {recent_error}")
-            recent_pages = []
 
         for item in live_results + recent_pages:
             page_id = item.get("page_id", "")
@@ -137,12 +217,6 @@ def search_workspace_knowledge(query: str) -> SearchResponse:
             if existing is None or score > scored_candidates.get(page_id, float("-inf")):
                 candidates_by_page[page_id] = candidate
                 scored_candidates[page_id] = score
-
-        try:
-            pinecone_results = get_store().search(query, top_k=5)
-        except Exception as pinecone_error:
-            logger.warning(f"Pinecone search unavailable, continuing with live Confluence results: {pinecone_error}")
-            pinecone_results = []
 
         for match in pinecone_results:
             meta = match.get("metadata", {})
@@ -184,15 +258,21 @@ def search_workspace_knowledge(query: str) -> SearchResponse:
 def fetch_live_page(page_id: str, heading_string: Optional[str] = None) -> LivePageResponse:
     """Fetches the latest live Confluence page parsing out available headings. Provide heading_string to isolate raw section_html."""
     try:
-        html = get_connector().fetch_page_html(page_id)
-        metadata = get_connector().get_page_metadata(page_id)
+        connector = get_connector()
+        html = connector.fetch_page_html(page_id)
+        metadata = connector.get_page_metadata(page_id)
         version = metadata.get("version", {}).get("number", 1)
+
+        # Cache HTML and version so preview_edit/preview_delete don't re-fetch
+        state = _tool_run_state.get()
+        state.setdefault("html_cache", {})[page_id] = html
+        state.setdefault("version_cache", {})[page_id] = version
+
         headings = extract_headings(html)
-        
         section_html = None
         if heading_string:
             section_html = get_section_html(html, heading_string)
-            
+
         return LivePageResponse(page_id=page_id, expected_version=version, available_headings=headings, section_html=section_html, message="Page loaded. Anchor to an available heading.")
     except Exception as e:
         logger.error(f"Fetch live page failed: {e}")
@@ -201,20 +281,21 @@ def fetch_live_page(page_id: str, heading_string: Optional[str] = None) -> LiveP
 def preview_edit(page_id: str, heading_string: str, old_block_html: str = "", new_block_html: str = "") -> PreviewResponse:
     """Generates a DOM modified HTML preview applying differencing logic to preview the exact modification visually."""
     try:
-        live_html = get_connector().fetch_page_html(page_id)
+        state = _tool_run_state.get()
+        live_html = state.get("html_cache", {}).get(page_id) or get_connector().fetch_page_html(page_id)
         new_document_html = edit_block_in_section(live_html, heading_string, old_block_html, new_block_html)
-        
+
         diff_lines = list(difflib.unified_diff(
             live_html.splitlines(keepends=True),
             new_document_html.splitlines(keepends=True),
             fromfile='Current',
             tofile='Preview'
         ))
-        
+
         diff_str = "".join(diff_lines)
         if not diff_str:
             return PreviewResponse(success=False, diff="", message="No visible DOM changes detected.")
-            
+
         return PreviewResponse(success=True, diff=diff_str, message="Preview generated. Please verify diff string before executing commit.")
     except Exception as e:
         return PreviewResponse(success=False, diff="", message=f"Failed DOM manipulation: {str(e)}")
@@ -228,7 +309,8 @@ def preview_delete(
 ) -> PreviewResponse:
     """Generates a preview for a delete operation without changing the existing edit tool behavior."""
     try:
-        live_html = get_connector().fetch_page_html(page_id)
+        state = _tool_run_state.get()
+        live_html = state.get("html_cache", {}).get(page_id) or get_connector().fetch_page_html(page_id)
         new_document_html = delete_content_in_section(
             live_html,
             heading_string,
@@ -255,38 +337,16 @@ def preview_delete(
 def update_page_title(page_id: str, expected_version: int, new_title: str) -> CommitResponse:
     """Updates the title of an existing Confluence page without creating a new page."""
     try:
-        live_html = get_connector().fetch_page_html(page_id)
         _emit_mutation_started("update_title")
-        try:
-            success = get_connector().push_update(
-                page_id,
-                live_html,
-                expected_version=expected_version,
-                title_override=new_title,
-            )
-            committed_version = expected_version + 1 if success else None
-        except ValueError as ve:
-            if not _is_version_conflict(ve):
-                raise
-            logger.error(f"Version Lock conflict during title update: {ve}")
-            refreshed_metadata = get_connector().get_page_metadata(page_id)
-            refreshed_version = refreshed_metadata.get("version", {}).get("number", 1)
-            refreshed_html = get_connector().fetch_page_html(page_id)
-            success = get_connector().push_update(
-                page_id,
-                refreshed_html,
-                expected_version=refreshed_version,
-                title_override=new_title,
-            )
-            committed_version = refreshed_version + 1 if success else None
+        success, committed_version = _commit_with_retry(
+            page_id,
+            apply_fn=lambda html: html,
+            expected_version=expected_version,
+            title_override=new_title,
+        )
 
         if success:
-            try:
-                from ..ingestion.doc_pipeline import IngestionPipeline
-                IngestionPipeline().process_page(page_id)
-            except Exception as pipeline_err:
-                logger.error(f"Post-title-update automatic re-indexing failed for {page_id}: {pipeline_err}")
-
+            _reindex_in_background(page_id)
             message = f"Title updated successfully on page {page_id}"
             _tool_run_state.set({"last_action": "commit", "success": True, "message": message})
             return CommitResponse(success=True, version=committed_version, message=message)
@@ -310,41 +370,19 @@ def commit_delete(
 ) -> CommitResponse:
     """Commits a dedicated delete operation for sections or unique content blocks."""
     try:
-        live_html = get_connector().fetch_page_html(page_id)
-        new_document_html = delete_content_in_section(
-            live_html,
-            heading_string,
-            target_html_or_text=target_html_or_text,
-            delete_entire_section=delete_entire_section,
-        )
-
         _emit_mutation_started("delete")
-        try:
-            success = get_connector().push_update(page_id, new_document_html, expected_version=expected_version)
-            committed_version = expected_version + 1 if success else None
-        except ValueError as ve:
-            if not _is_version_conflict(ve):
-                raise
-            logger.error(f"Version Lock conflict during delete: {ve}")
-            refreshed_metadata = get_connector().get_page_metadata(page_id)
-            refreshed_version = refreshed_metadata.get("version", {}).get("number", 1)
-            refreshed_html = get_connector().fetch_page_html(page_id)
-            refreshed_document_html = delete_content_in_section(
-                refreshed_html,
-                heading_string,
+        success, committed_version = _commit_with_retry(
+            page_id,
+            apply_fn=lambda html: delete_content_in_section(
+                html, heading_string,
                 target_html_or_text=target_html_or_text,
                 delete_entire_section=delete_entire_section,
-            )
-            success = get_connector().push_update(page_id, refreshed_document_html, expected_version=refreshed_version)
-            committed_version = refreshed_version + 1 if success else None
+            ),
+            expected_version=expected_version,
+        )
 
         if success:
-            try:
-                from ..ingestion.doc_pipeline import IngestionPipeline
-                IngestionPipeline().process_page(page_id)
-            except Exception as pipeline_err:
-                logger.error(f"Post-delete automatic re-indexing failed for {page_id}: {pipeline_err}")
-
+            _reindex_in_background(page_id)
             message = f"Delete successful on page {page_id}"
             _tool_run_state.set({"last_action": "commit", "success": True, "message": message})
             return CommitResponse(success=True, version=committed_version, message=message)
@@ -354,7 +392,7 @@ def commit_delete(
         return CommitResponse(success=False, version=None, message=message)
     except ValueError as ve:
         if _is_version_conflict(ve):
-            logger.error(f"Version Lock conflict during delete: {ve}")
+            logger.error(f"Version conflict max retries exceeded during delete for page {page_id}: {ve}")
             message = f"ConflictError: {str(ve)} Please re-fetch_live_page."
         else:
             logger.error(f"Delete target resolution failed: {ve}")
@@ -371,31 +409,15 @@ def commit_delete(
 def commit_document_edit(page_id: str, expected_version: int, heading_string: str, old_block_html: str = "", new_block_html: str = "") -> CommitResponse:
     """Commits a parsed structural sub-section DOM replacement securely using Op-Locking bounds."""
     try:
-        live_html = get_connector().fetch_page_html(page_id)
-        new_document_html = edit_block_in_section(live_html, heading_string, old_block_html, new_block_html)
-
         _emit_mutation_started("edit")
-        try:
-            success = get_connector().push_update(page_id, new_document_html, expected_version=expected_version)
-            committed_version = expected_version + 1 if success else None
-        except ValueError as ve:
-            if not _is_version_conflict(ve):
-                raise
-            logger.error(f"Version Lock conflict: {ve}")
-            refreshed_metadata = get_connector().get_page_metadata(page_id)
-            refreshed_version = refreshed_metadata.get("version", {}).get("number", 1)
-            refreshed_html = get_connector().fetch_page_html(page_id)
-            refreshed_document_html = edit_block_in_section(refreshed_html, heading_string, old_block_html, new_block_html)
-            success = get_connector().push_update(page_id, refreshed_document_html, expected_version=refreshed_version)
-            committed_version = refreshed_version + 1 if success else None
+        success, committed_version = _commit_with_retry(
+            page_id,
+            apply_fn=lambda html: edit_block_in_section(html, heading_string, old_block_html, new_block_html),
+            expected_version=expected_version,
+        )
 
         if success:
-            try:
-                from ..ingestion.doc_pipeline import IngestionPipeline
-                IngestionPipeline().process_page(page_id)
-            except Exception as pipeline_err:
-                logger.error(f"Post-commit automatic re-indexing failed for {page_id}: {pipeline_err}")
-
+            _reindex_in_background(page_id)
             message = f"Commit successful on page {page_id}"
             _tool_run_state.set({"last_action": "commit", "success": True, "message": message})
             return CommitResponse(success=True, version=committed_version, message=message)
@@ -405,7 +427,7 @@ def commit_document_edit(page_id: str, expected_version: int, heading_string: st
         return CommitResponse(success=False, version=None, message=message)
     except ValueError as ve:
         if _is_version_conflict(ve):
-            logger.error(f"Version Lock conflict: {ve}")
+            logger.error(f"Version conflict max retries exceeded for page {page_id}: {ve}")
             message = f"ConflictError: {str(ve)} Please re-fetch_live_page."
         else:
             logger.error(f"Commit edit target resolution failed: {ve}")
@@ -444,11 +466,7 @@ def create_confluence_page(
         
         new_page_id = result.get('id')
         if new_page_id:
-            try:
-                from ..ingestion.doc_pipeline import IngestionPipeline
-                IngestionPipeline().process_page(new_page_id)
-            except Exception as pipe_e:
-                logger.error(f"Post-creation indexing error: {pipe_e}")
+            _reindex_in_background(new_page_id)
 
             message = "Page generation and indexing achieved."
             _tool_run_state.set({"last_action": "create", "success": True, "message": message})

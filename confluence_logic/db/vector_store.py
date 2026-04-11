@@ -19,25 +19,30 @@ class PineconeStore:
         self.openai_client = OpenAI()
 
     def get_page_version(self, page_id: str) -> Optional[int]:
+        """Return the cached version for page_id, or None if not indexed. Raises on Pinecone errors."""
         if not hasattr(self, 'index'):
             return None
         try:
             resp = self.index.fetch(ids=[f"{page_id}_0"])
             if resp and resp.get('vectors') and f"{page_id}_0" in resp['vectors']:
                 return resp['vectors'][f"{page_id}_0"].get("metadata", {}).get("version")
-        except Exception:
-            pass
-        return None
+            return None  # page not in index — not an error
+        except Exception as exc:
+            logger.error("Pinecone get_page_version failed for %s: %s", page_id, exc)
+            raise  # propagate so callers can distinguish "unknown" from "not present"
 
     def clear_stale_sections(self, page_id: str, new_section_count: int):
-        """Silently wipes up to 100 potentially stale sections preventing dead search locks."""
+        """Delete stale section vectors after a page update to keep the index clean."""
         if not hasattr(self, 'index'):
             return
         stale_ids = [f"{page_id}_{i}" for i in range(new_section_count, new_section_count + 100)]
         try:
             self.index.delete(ids=stale_ids)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(
+                "Pinecone stale section cleanup failed for %s (sections %d+): %s",
+                page_id, new_section_count, exc,
+            )
 
     def get_embeddings(self, texts: List[str]) -> List[List[float]]:
         request: Dict[str, Any] = {

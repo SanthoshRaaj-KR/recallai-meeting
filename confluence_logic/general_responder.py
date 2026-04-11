@@ -65,6 +65,41 @@ def _quick_web_search(query: str) -> str:
     return ""
 
 
+def _history_to_messages(conversation_history: str) -> list:
+    """Convert 'User: ...\nAssistant: ...' history string into proper OpenAI message objects.
+
+    Building real alternating user/assistant turns (rather than stuffing history into a
+    single user message) lets the LLM treat prior exchanges as actual conversation context,
+    so follow-up questions correctly reference earlier answers.
+    """
+    messages = []
+    if not conversation_history or conversation_history.strip() == "[none]":
+        return messages
+
+    current_role: Optional[str] = None
+    current_lines: list = []
+
+    for line in conversation_history.splitlines():
+        if line.startswith("User: "):
+            if current_role and current_lines:
+                messages.append({"role": current_role, "content": "\n".join(current_lines).strip()})
+            current_role = "user"
+            current_lines = [line[len("User: "):]]
+        elif line.startswith("Assistant: "):
+            if current_role and current_lines:
+                messages.append({"role": current_role, "content": "\n".join(current_lines).strip()})
+            current_role = "assistant"
+            current_lines = [line[len("Assistant: "):]]
+        else:
+            if current_role:
+                current_lines.append(line)
+
+    if current_role and current_lines:
+        messages.append({"role": current_role, "content": "\n".join(current_lines).strip()})
+
+    return messages
+
+
 async def answer_general_question(
     question: str,
     conversation_history: str = "",
@@ -90,11 +125,8 @@ async def answer_general_question(
 
     messages = [{"role": "system", "content": system_prompt}]
 
-    if conversation_history and conversation_history.strip() != "[none]":
-        messages.append({
-            "role": "user",
-            "content": f"Recent conversation context:\n{conversation_history}\n\nNow answer this question:",
-        })
+    # Inject prior turns as real chat history so the LLM can follow the thread.
+    messages.extend(_history_to_messages(conversation_history))
 
     # Selective web search for questions that need current data
     web_context = ""

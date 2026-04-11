@@ -21,8 +21,12 @@ class IngestionPipeline:
         version = metadata.get("version", {}).get("number", 1)
         title = metadata.get("title", f"Page {page_id}")
         
-        cached_version = self.vector_store.get_page_version(page_id)
-        if cached_version and cached_version == version:
+        try:
+            cached_version = self.vector_store.get_page_version(page_id)
+        except Exception:
+            logger.warning("Could not check cached version for %s; proceeding with re-index.", page_id)
+            cached_version = None  # treat as unknown → re-index to be safe
+        if cached_version is not None and cached_version == version:
             logger.info(f"Skipping embed logic: Page {page_id} matches cached Pinecone version ({version}).")
             return
             

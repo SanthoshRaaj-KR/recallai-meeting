@@ -174,6 +174,16 @@ class EditorAgent:
             lines.append(f"Assistant: {assistant_text}")
         return "\n".join(lines)
 
+    _CLEAR_ACTION_VERBS = frozenset({
+        "create", "list", "show", "delete", "add", "update", "edit",
+        "rename", "remove", "make", "write",
+    })
+    _REFERENTIAL_PHRASES = (
+        " it ", " that ", " this ", " same ",
+        "the one we just", "the page", "created",
+        "write about anything", "something about",
+    )
+
     def _needs_reframing(self, query: str) -> bool:
         normalized = query.strip().lower()
         if not normalized:
@@ -187,22 +197,18 @@ class EditorAgent:
         if normalized in short_followups:
             return True
 
-        if len(normalized.split()) <= 4:
+        padded = f" {normalized} "
+        has_referential = any(phrase in padded for phrase in self._REFERENTIAL_PHRASES)
+
+        # Clear imperative + no referential terms → no reframing needed regardless of length
+        words = normalized.split()
+        if words[0] in self._CLEAR_ACTION_VERBS and not has_referential:
+            return False
+
+        if len(words) <= 4:
             return True
 
-        referential_phrases = [
-            " it ",
-            " that ",
-            " this ",
-            " same ",
-            "the one we just",
-            "the page",
-            "created",
-            "write about anything",
-            "something about",
-        ]
-        padded = f" {normalized} "
-        return any(phrase in padded for phrase in referential_phrases)
+        return has_referential
 
     def _format_resolver_context(self, decision: ResolverDecision) -> str:
         return (
