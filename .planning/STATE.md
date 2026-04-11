@@ -67,6 +67,7 @@ progress:
 | 260411-le0 | Smart time-filler before slow ops and no-wake-word re-arm after clarification follow-up questions | 2026-04-11 | 3c19f1c | [260411-le0-smart-time-filler-and-no-wake-word-after](./quick/260411-le0-smart-time-filler-and-no-wake-word-after/) |
 | 260411-mce | Serialize TTS output to prevent audio overlap — hold output_lock for estimated playback duration after audio POST | 2026-04-11 | 2d00290 | [260411-mce-serialize-tts-output-to-prevent-audio-ov](./quick/260411-mce-serialize-tts-output-to-prevent-audio-ov/) |
 | 260411-mk0 | Only dispatch transcript events when is_final=True to prevent mid-sentence response triggers | 2026-04-11 | e144ef5 | [260411-mk0-only-dispatch-transcript-events-when-is-](./quick/260411-mk0-only-dispatch-transcript-events-when-is-/) |
+| 260411-nai | Fix context bleed from Confluence editor history and add selective DuckDuckGo web search | 2026-04-11 | ddaf91b | [260411-nai-fix-context-bleed-in-general-question-ha](./quick/260411-nai-fix-context-bleed-in-general-question-ha/) |
 
 ### Session
 
