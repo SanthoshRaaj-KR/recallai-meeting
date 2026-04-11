@@ -32,6 +32,9 @@ from gtts import gTTS
 from openai import OpenAI
 
 from .agents.editor_agent import EditorAgent
+from .classifier import classify_intent
+from .audio_cache import get_random_ack_audio
+from .general_responder import answer_general_question
 
 load_dotenv()
 
@@ -132,6 +135,24 @@ _openai_client: Optional[OpenAI] = None
 _WAKE_PATTERN = re.compile(r"(?:hey\s+)?jarvis[,.]?\s*(.*)", re.IGNORECASE)
 _OVERRIDE_PATTERN = re.compile(r"\b(stop|cancel|instead|forget that|never mind|nevermind|wait|change that|changed my mind|changed mind|don't do|dont do|undo)\b", re.IGNORECASE)
 _ADDITIVE_PATTERN = re.compile(r"\b(also|after that|then|next)\b", re.IGNORECASE)
+_UNAMBIGUOUS_VERBS = frozenset({
+    "create", "list", "delete", "add", "update", "edit", "rename", "remove", "make", "show", "write",
+})
+_REFERENTIAL_TERMS = (" it ", " that ", " this ", " same ", "the one", "the page")
+
+
+def _is_unambiguous_request(text: str) -> bool:
+    """Return True for requests clear enough to skip the planning LLM call."""
+    normalized = (text or "").strip().lower()
+    words = normalized.split()
+    if len(words) < 5:
+        return False
+    if words[0] not in _UNAMBIGUOUS_VERBS:
+        return False
+    padded = f" {normalized} "
+    return not any(term in padded for term in _REFERENTIAL_TERMS)
+
+
 _STATUS_PATTERN = re.compile(
     r"\b(what are you|what're you|whatcha|status|working on|doing right now"
     r"|what.*doing|are you busy|how.*going|update me|progress|what.*task"
@@ -400,6 +421,38 @@ def speak(text: str, bot_id: str) -> bool:
         return False
 
 
+def speak_cached_audio(audio_bytes: bytes, bot_id: str) -> bool:
+    """Send pre-cached MP3 audio bytes directly to the Recall bot, skipping TTS synthesis."""
+    try:
+        audio_b64 = base64.b64encode(audio_bytes).decode()
+        resp = requests.post(
+            f"{RECALL_BASE_URL}/bot/{bot_id}/output_audio/",
+            headers={"Authorization": f"Token {RECALL_API_KEY}", "Content-Type": "application/json"},
+            json={"kind": "mp3", "b64_data": audio_b64},
+            timeout=10,
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        logger.error("speak_cached_audio() error: %s", e)
+        return False
+
+
+async def _speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int) -> bool:
+    """Like _speak_guarded but sends pre-cached audio bytes instead of synthesizing."""
+    output_lock = _get_output_lock()
+    async with output_lock:
+        if generation != meeting_state["output_generation"]:
+            return False
+        while True:
+            remaining = meeting_state["last_user_speech_at"] + JARVIS_SPEECH_HOLD_SECONDS - time.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, 0.2))
+            if generation != meeting_state["output_generation"]:
+                return False
+        return await asyncio.to_thread(speak_cached_audio, audio_bytes, bot_id)
+
+
 def _format_pending_clarification(task: Optional[VoiceTask] = None) -> str:
     current_task = task or meeting_state.get("current_task")
     if current_task is None:
@@ -614,14 +667,31 @@ async def _run_voice_task(task: VoiceTask) -> None:
         while not task.cancel_requested:
             if first_turn:
                 if not task.from_queue:
-                    ack = random.choice(_INSTANT_ACKS)
-                    await _speak_guarded(ack, task.bot_id, task.output_generation)
+                    cached = get_random_ack_audio()
+                    if cached:
+                        ack_name, ack_bytes = cached
+                        logger.info("Playing cached ack: %s", ack_name)
+                        await _speak_cached_guarded(ack_bytes, task.bot_id, task.output_generation)
+                    else:
+                        # Fallback to live TTS if no cached audio available
+                        ack = random.choice(_INSTANT_ACKS)
+                        await _speak_guarded(ack, task.bot_id, task.output_generation)
                 first_turn = False
 
             _set_task_phase(task, "planning")
             if task.pre_planned_decision is not None:
                 decision = task.pre_planned_decision
                 task.pre_planned_decision = None
+            elif _is_unambiguous_request(task.request) and not task.clarification_context:
+                # Fast-path: skip planning LLM call for clear, unambiguous requests
+                from .core.schemas import MasterVoiceDecision
+                decision = MasterVoiceDecision(
+                    immediate_reply="",
+                    needs_clarification=False,
+                    execution_request=task.request,
+                    intent="edit",
+                    rationale="Fast-path: unambiguous request.",
+                )
             else:
                 decision = await session_agent.plan_voice_turn(
                     task.request,
@@ -794,10 +864,29 @@ async def _handle_status_query(query: str, bot_id: str) -> None:
         logger.warning("Status query failed: %s", e)
 
 
+async def _handle_general_question(query: str, bot_id: str) -> None:
+    """Answer a general (non-Confluence) question using the LLM and speak the response."""
+    generation = meeting_state["output_generation"]
+    try:
+        conversation_history = session_agent.get_recent_history_text()
+        answer = await answer_general_question(query, conversation_history)
+        if answer:
+            await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+    except Exception as e:
+        logger.error("General question handling failed: %s", e)
+
+
 async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     # Intercept status/conversational queries — answer instantly, skip task queue
     if _is_status_query(spoken_query):
         await _handle_status_query(spoken_query, bot_id)
+        return
+
+    # Classify intent: general questions get answered directly, not queued as tasks
+    intent = await classify_intent(spoken_query)
+    if intent == "general":
+        logger.info("Classified as general question: %s", spoken_query[:60])
+        asyncio.create_task(_handle_general_question(spoken_query, bot_id))
         return
 
     state_lock = _get_state_lock()
