@@ -12,11 +12,11 @@
 
 **Requirements:** CLASSIFY-01, WAV-01, WAV-02, GENERAL-01, CLARIFY-01
 
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 Plans:
 - [x] 01-01-PLAN.md — Intent classifier module + WAV asset generation script + audio cache
 - [x] 01-02-PLAN.md — General question responder + pipeline integration (classifier routing, cached acks)
-- [ ] 01-03-PLAN.md — Clarification follow-up listening state (no wake word on follow-up)
+- [x] 01-03-PLAN.md — Clarification follow-up listening state (no wake word on follow-up)
 
 ---
