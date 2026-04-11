@@ -93,6 +93,13 @@ _INSTANT_ACKS = [
     "Let me check.",
 ]
 
+JARVIS_FILLER_PHRASES = [
+    "Sure! Give me a sec.",
+    "On it!",
+    "Just a moment.",
+    "Let me check that for you.",
+]
+
 
 @dataclass
 class VoiceTask:
@@ -558,6 +565,12 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
         return await asyncio.to_thread(speak, text, bot_id)
 
 
+async def _speak_filler(bot_id: str, generation: int) -> None:
+    """Speak a random filler phrase before a slow operation."""
+    phrase = random.choice(JARVIS_FILLER_PHRASES)
+    await _speak_guarded(phrase, bot_id, generation, allow_stale=True)
+
+
 async def _start_next_task_if_idle() -> None:
     state_lock = _get_state_lock()
     next_task: Optional[VoiceTask] = None
@@ -874,6 +887,7 @@ async def _handle_general_question(query: str, bot_id: str) -> None:
     generation = meeting_state["output_generation"]
     try:
         conversation_history = session_agent.get_recent_history_text()
+        await _speak_filler(bot_id, generation)
         answer = await answer_general_question(query, conversation_history)
         if not answer:
             return
@@ -936,6 +950,7 @@ async def _handle_summary_clarification_answer(answer_text: str, pending: dict) 
         detail_level = "detailed"
 
     try:
+        await _speak_filler(bot_id, generation)
         transcript_log = list(meeting_state["transcript_log"])
         answer = await summarize_meeting(transcript_log, detail_level=detail_level)
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
@@ -959,12 +974,10 @@ async def _handle_meeting_summary(query: str, bot_id: str) -> None:
         detail_level = None
         specified = False
 
-    # Immediately acknowledge (fire before any generation)
-    await _speak_guarded("Sure! Just give me a sec.", bot_id, generation, allow_stale=True)
-
     if specified:
         # Type already known — generate directly
         try:
+            await _speak_filler(bot_id, generation)
             transcript_log = list(meeting_state["transcript_log"])
             answer = await summarize_meeting(transcript_log, detail_level=detail_level)
             await _speak_guarded(answer, bot_id, generation, allow_stale=True)
@@ -972,6 +985,7 @@ async def _handle_meeting_summary(query: str, bot_id: str) -> None:
             logger.error("Meeting summary handling failed: %s", e)
     else:
         # Ask clarifying question and enter listen state
+        await _speak_guarded("Sure!", bot_id, generation, allow_stale=True)
         await _speak_guarded("Do you want a detailed or a brief summary?", bot_id, generation, allow_stale=True)
         meeting_state["pending_summary_clarification"] = {
             "bot_id": bot_id,
@@ -984,6 +998,7 @@ async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
     """Generate and speak a first-person opinion grounded in the meeting transcript."""
     generation = meeting_state["output_generation"]
     try:
+        await _speak_filler(bot_id, generation)
         transcript_log = list(meeting_state["transcript_log"])
         answer = await generate_opinion(transcript_log, query=query)
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
