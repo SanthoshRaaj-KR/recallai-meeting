@@ -930,6 +930,16 @@ async def _handle_general_clarification_answer(answer_text: str, pending: dict) 
         final_answer = await answer_general_question(answer_text, enriched_history)
         if final_answer:
             await _speak_guarded(final_answer, bot_id, generation, allow_stale=True)
+            # If the follow-up answer is itself a clarifying question, re-arm no-wake-word mode
+            if _looks_like_clarification_prompt(final_answer):
+                meeting_state["pending_general_clarification"] = {
+                    "question": final_answer,
+                    "original_query": answer_text,
+                    "bot_id": bot_id,
+                    "conversation_history": enriched_history,
+                    "expires_at": time.time() + JARVIS_GENERAL_CLARIFICATION_TIMEOUT,
+                }
+                logger.info("General clarification re-armed after follow-up question.")
     except Exception as e:
         logger.error("General clarification resolution failed: %s", e)
 
@@ -954,6 +964,13 @@ async def _handle_summary_clarification_answer(answer_text: str, pending: dict) 
         transcript_log = list(meeting_state["transcript_log"])
         answer = await summarize_meeting(transcript_log, detail_level=detail_level)
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        # If the summary response is itself a clarifying question, re-arm no-wake-word mode
+        if _looks_like_clarification_prompt(answer):
+            meeting_state["pending_summary_clarification"] = {
+                "bot_id": bot_id,
+                "expires_at": time.time() + JARVIS_SUMMARY_CLARIFICATION_TIMEOUT,
+            }
+            logger.info("Summary clarification re-armed after follow-up question.")
     except Exception as e:
         logger.error("Summary clarification resolution failed: %s", e)
 
