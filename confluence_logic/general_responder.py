@@ -5,6 +5,8 @@ Uses the LLM to generate a conversational answer, then speaks it via TTS.
 import asyncio
 import logging
 import os
+import re
+import requests as _requests
 from typing import Optional
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -25,6 +27,43 @@ def _get_client() -> OpenAI:
 
 GENERAL_RESPONDER_MODEL = os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini").strip()
 
+# Keywords that signal the answer might be stale from training data
+_FRESHNESS_PATTERNS = re.compile(
+    r"\b(latest|current|available|list all|which models?|what models?|"
+    r"new model|released|recent|right now|today|price|cost|how much|"
+    r"version|api key|tier|quota|limit)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_web_search(question: str) -> bool:
+    """Return True if the question is likely to need live/current data."""
+    return bool(_FRESHNESS_PATTERNS.search(question))
+
+
+def _quick_web_search(query: str) -> str:
+    """
+    Fetch a quick answer snippet from DuckDuckGo Instant Answer API.
+    Returns a short context string, or empty string if nothing useful found.
+    Free, no API key required, returns in <1s.
+    """
+    try:
+        resp = _requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
+            timeout=3,
+        )
+        if resp.status_code != 200:
+            return ""
+        data = resp.json()
+        # Prefer AbstractText (Wikipedia-style summary), then Answer (instant answer)
+        snippet = data.get("AbstractText") or data.get("Answer") or ""
+        if snippet and len(snippet) > 20:
+            return snippet[:600]  # cap at 600 chars
+    except Exception as e:
+        logger.debug("Web search failed (non-fatal): %s", e)
+    return ""
+
 
 async def answer_general_question(
     question: str,
@@ -42,7 +81,6 @@ async def answer_general_question(
     """
     system_prompt = (
         "You are Jarvis, a helpful and friendly AI assistant in a live meeting. "
-        "The user has asked you a general question (not related to editing Confluence pages). "
         "Answer naturally and conversationally, as if speaking out loud in a meeting. "
         "Keep your answer concise — 1 to 3 sentences maximum. "
         "Do not use markdown, bullet points, or formatting. "
@@ -58,7 +96,22 @@ async def answer_general_question(
             "content": f"Recent conversation context:\n{conversation_history}\n\nNow answer this question:",
         })
 
-    messages.append({"role": "user", "content": question})
+    # Selective web search for questions that need current data
+    web_context = ""
+    if _needs_web_search(question):
+        logger.info("Web search triggered for: %s", question[:60])
+        web_context = await asyncio.to_thread(_quick_web_search, question)
+        if web_context:
+            logger.info("Web search returned %d chars", len(web_context))
+
+    user_content = question
+    if web_context:
+        user_content = (
+            f"{question}\n\n"
+            f"[Live web search result — use this for accuracy]:\n{web_context}"
+        )
+
+    messages.append({"role": "user", "content": user_content})
 
     try:
         response = await asyncio.to_thread(
