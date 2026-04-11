@@ -66,8 +66,10 @@ progress:
 | 260411-kvc | Add immediate acknowledgment and brief/detailed clarification flow to meeting summary handler | 2026-04-11 | 32dc63a | [260411-kvc-add-immediate-acknowledgment-and-brief-d](./quick/260411-kvc-add-immediate-acknowledgment-and-brief-d/) |
 | 260411-le0 | Smart time-filler before slow ops and no-wake-word re-arm after clarification follow-up questions | 2026-04-11 | 3c19f1c | [260411-le0-smart-time-filler-and-no-wake-word-after](./quick/260411-le0-smart-time-filler-and-no-wake-word-after/) |
 | 260411-mce | Serialize TTS output to prevent audio overlap — hold output_lock for estimated playback duration after audio POST | 2026-04-11 | 2d00290 | [260411-mce-serialize-tts-output-to-prevent-audio-ov](./quick/260411-mce-serialize-tts-output-to-prevent-audio-ov/) |
+| 260411-mk0 | Only dispatch transcript events when is_final=True to prevent mid-sentence response triggers | 2026-04-11 | e144ef5 | [260411-mk0-only-dispatch-transcript-events-when-is-](./quick/260411-mk0-only-dispatch-transcript-events-when-is-/) |
 
 ### Session
 
-- **Last session:** 2026-04-11T10:15:00Z
+- **Last session:** 2026-04-11T10:45:00Z
+- **Stopped at:** Completed quick task 260411-mk0: Only dispatch transcript events when is_final=True
 - **Stopped at:** Completed quick task 260411-mce: Serialize TTS output to prevent audio overlap
