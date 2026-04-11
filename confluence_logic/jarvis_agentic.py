@@ -124,6 +124,7 @@ meeting_state = {
     "pending_requests": deque(),
     "pending_clarification": None,
     "pending_general_clarification": None,  # {"question": str, "original_query": str, "bot_id": str, "expires_at": float}
+    "pending_summary_clarification": None,  # {"bot_id": str, "expires_at": float}
     "current_task_id": None,
     "current_phase": "idle",
     "current_request": None,
@@ -919,15 +920,64 @@ async def _handle_general_clarification_answer(answer_text: str, pending: dict) 
         logger.error("General clarification resolution failed: %s", e)
 
 
-async def _handle_meeting_summary(bot_id: str) -> None:
-    """Summarize the full meeting transcript and speak the result."""
+JARVIS_SUMMARY_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_SUMMARY_CLARIFICATION_TIMEOUT", "15.0"))
+
+
+async def _handle_summary_clarification_answer(answer_text: str, pending: dict) -> None:
+    """Handle user's brief/detailed response and generate the appropriate summary."""
+    bot_id = pending["bot_id"]
     generation = meeting_state["output_generation"]
+    meeting_state["pending_summary_clarification"] = None
+
+    normalized = answer_text.strip().lower()
+    if any(w in normalized for w in ("brief", "short", "quick", "concise")):
+        detail_level = "brief"
+    else:
+        detail_level = "detailed"
+
     try:
         transcript_log = list(meeting_state["transcript_log"])
-        answer = await summarize_meeting(transcript_log)
+        answer = await summarize_meeting(transcript_log, detail_level=detail_level)
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
     except Exception as e:
-        logger.error("Meeting summary handling failed: %s", e)
+        logger.error("Summary clarification resolution failed: %s", e)
+
+
+async def _handle_meeting_summary(query: str, bot_id: str) -> None:
+    """Speak acknowledgment, optionally ask brief/detailed, then generate summary."""
+    generation = meeting_state["output_generation"]
+    normalized_query = query.strip().lower()
+
+    # Detect detail level from original query
+    if any(w in normalized_query for w in ("brief", "short", "quick", "concise")):
+        detail_level = "brief"
+        specified = True
+    elif any(w in normalized_query for w in ("detailed", "full", "long", "complete", "thorough")):
+        detail_level = "detailed"
+        specified = True
+    else:
+        detail_level = None
+        specified = False
+
+    # Immediately acknowledge (fire before any generation)
+    await _speak_guarded("Sure! Just give me a sec.", bot_id, generation, allow_stale=True)
+
+    if specified:
+        # Type already known — generate directly
+        try:
+            transcript_log = list(meeting_state["transcript_log"])
+            answer = await summarize_meeting(transcript_log, detail_level=detail_level)
+            await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        except Exception as e:
+            logger.error("Meeting summary handling failed: %s", e)
+    else:
+        # Ask clarifying question and enter listen state
+        await _speak_guarded("Do you want a detailed or a brief summary?", bot_id, generation, allow_stale=True)
+        meeting_state["pending_summary_clarification"] = {
+            "bot_id": bot_id,
+            "expires_at": time.time() + JARVIS_SUMMARY_CLARIFICATION_TIMEOUT,
+        }
+        logger.info("Summary clarification mode activated (timeout: %.0fs)", JARVIS_SUMMARY_CLARIFICATION_TIMEOUT)
 
 
 async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
@@ -947,6 +997,13 @@ async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
         await _handle_status_query(spoken_query, bot_id)
         return
 
+    # Check for pending summary clarification (no wake word needed) — before intent classification
+    pending_summary = meeting_state.get("pending_summary_clarification")
+    if pending_summary:
+        logger.info("Routing to summary clarification handler: %s", spoken_query[:60])
+        asyncio.create_task(_handle_summary_clarification_answer(spoken_query, pending_summary))
+        return
+
     # Classify intent: general questions get answered directly, not queued as tasks
     intent = await classify_intent(spoken_query)
     if intent == "general":
@@ -957,7 +1014,7 @@ async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     # NEW: meeting transcript intents (per D-04 — routed before Confluence pipeline)
     if intent == "meeting_summary":
         logger.info("Classified as meeting summary request: %s", spoken_query[:60])
-        asyncio.create_task(_handle_meeting_summary(bot_id))
+        asyncio.create_task(_handle_meeting_summary(spoken_query, bot_id))
         return
 
     if intent == "meeting_opinion":
@@ -1092,6 +1149,16 @@ def process_transcript_event(sentence: str, timestamp: float) -> Optional[str]:
             meeting_state["pending_general_clarification"] = None
         else:
             # User is answering a general clarification — bypass wake word
+            meeting_state["jarvis_listening"] = False
+            return sentence
+
+    # Check for pending summary clarification (no wake word needed)
+    pending_summary = meeting_state.get("pending_summary_clarification")
+    if pending_summary:
+        if time.time() > pending_summary["expires_at"]:
+            logger.info("Summary clarification timeout expired, clearing state.")
+            meeting_state["pending_summary_clarification"] = None
+        else:
             meeting_state["jarvis_listening"] = False
             return sentence
 
