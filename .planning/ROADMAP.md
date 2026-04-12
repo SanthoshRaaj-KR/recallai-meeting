@@ -30,4 +30,12 @@ Plans:
 - [x] 02-01-PLAN.md — New meeting_responder.py module with summarize_meeting() and generate_opinion() handlers
 - [x] 02-02-PLAN.md — Extend classifier with meeting_summary/meeting_opinion intents + route in handle_spoken_request()
 
+### Phase 3: Classifier and Context Intelligence — Topic Tracking, Web Search, and Graph RAG
+
+**Goal:** Fix classifier accuracy for meeting-context questions; track topic shifts so Jarvis doesn't answer stale topics; expand web search to cover weather and real-time queries; implement Graph RAG on meeting transcript for entity-aware context retrieval.
+
+**Depends on:** Phase 2
+
+**Requirements:** CLASSIFY-03, TOPIC-01, WEBSEARCH-01, GRAPHRAG-01
+
 ---
