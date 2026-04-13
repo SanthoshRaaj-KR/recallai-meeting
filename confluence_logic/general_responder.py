@@ -5,7 +5,6 @@ Uses the LLM to generate a conversational answer, then speaks it via TTS.
 import asyncio
 import logging
 import os
-import re
 import requests as _requests
 from typing import Optional
 from openai import OpenAI
@@ -27,18 +26,32 @@ def _get_client() -> OpenAI:
 
 GENERAL_RESPONDER_MODEL = os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini").strip()
 
-# Keywords that signal the answer might be stale from training data
-_FRESHNESS_PATTERNS = re.compile(
-    r"\b(latest|current|available|list all|which models?|what models?|"
-    r"new model|released|recent|right now|today|price|cost|how much|"
-    r"version|api key|tier|quota|limit)\b",
-    re.IGNORECASE,
+_WEB_SEARCH_ROUTER_PROMPT = (
+    "You are a routing classifier. Answer only 'yes' or 'no'.\n"
+    "Does this question require real-time or current-day data to answer accurately?\n"
+    "Answer 'yes' for: weather, sports scores, news headlines, stock prices, "
+    "current events, today's date/time, live data, anything that changes daily.\n"
+    "Answer 'no' for: factual/historical questions, explanations, opinions, "
+    "meeting transcript questions.\n"
+    "Question: {question}"
 )
 
 
-def _needs_web_search(question: str) -> bool:
-    """Return True if the question is likely to need live/current data."""
-    return bool(_FRESHNESS_PATTERNS.search(question))
+async def _needs_web_search(question: str) -> bool:
+    """Return True if the question likely needs live/current data (per D-07, D-08)."""
+    try:
+        response = await asyncio.to_thread(
+            lambda: _get_client().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": _WEB_SEARCH_ROUTER_PROMPT.format(question=question)}],
+                max_tokens=5,
+                temperature=0.0,
+            )
+        )
+        return (response.choices[0].message.content or "").strip().lower().startswith("yes")
+    except Exception as e:
+        logger.debug("Web search router failed (non-fatal): %s", e)
+        return False
 
 
 def _quick_web_search(query: str) -> str:
@@ -130,7 +143,7 @@ async def answer_general_question(
 
     # Selective web search for questions that need current data
     web_context = ""
-    if _needs_web_search(question):
+    if await _needs_web_search(question):
         logger.info("Web search triggered for: %s", question[:60])
         web_context = await asyncio.to_thread(_quick_web_search, question)
         if web_context:
