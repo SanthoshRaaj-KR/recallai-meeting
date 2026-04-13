@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_plan: 1
-status: Executing Phase 02
-stopped_at: Completed 02-02-PLAN.md (classifier routing and jarvis_agentic.py handler wiring)
-last_updated: "2026-04-11T10:15:00Z"
+status: Executing Phase 03
+stopped_at: "Completed 03-01-PLAN.md: Sliding window cap (3 exchanges), LLM web search router, dependency install"
+last_updated: "2026-04-13T08:53:34.075Z"
 progress:
-  total_phases: 2
+  total_phases: 3
   completed_phases: 2
-  total_plans: 5
-  completed_plans: 5
-  percent: 100
+  total_plans: 7
+  completed_plans: 6
+  percent: 86
 ---
 
 # Project State
@@ -21,7 +21,7 @@ progress:
 - **Active Milestone:** Milestone 1 — Jarvis Intelligence Enhancement
 - **Active Phase:** Phase 01 — Intelligent Question Classification and Conversational Response
 - **Current Plan:** 1
-- **Progress:** [██████████] 100%
+- **Progress:** [█████████░] 86%
 
 ## Accumulated Context
 
@@ -46,6 +46,8 @@ progress:
 - [Phase 02]: JARVIS_SUMMARY_MAX_TOKENS defaults to 400, JARVIS_OPINION_MAX_TOKENS to 200 — token caps for meeting summarizer and opinion generator
 - [Phase 02]: MEETING_RESPONDER_MODEL reads JARVIS_GENERAL_MODEL env var — shares model config with general responder
 - [Phase 02]: D-04: meeting_summary/meeting_opinion routing branches placed after general branch but before Confluence pipeline
+- [Phase 03]: _MAX_GENERAL_HISTORY set to 3: stale topic context ages out after 3 Q&A exchanges (TOPIC-01)
+- [Phase 03]: async _needs_web_search uses gpt-4o-mini (max_tokens=5, temperature=0.0) — LLM routing replaces regex, generalizes to weather/sports/news (WEBSEARCH-01)
 
 ### Performance Metrics
 
@@ -59,6 +61,7 @@ progress:
 | Quick 260411-le0 | 5 min | 2 tasks | 1 files |
 | Quick 260411-mce | 3 min | 2 tasks | 1 files |
 | Quick 260411-vfq | 4 min | 2 tasks | 2 files |
+| Phase 03 P01 | 3 min | 2 tasks | 5 files |
 
 ### Quick Tasks Completed
 
@@ -73,5 +76,5 @@ progress:
 
 ### Session
 
-- **Last session:** 2026-04-11T11:15:00Z
-- **Stopped at:** Completed quick task 260411-vfq: Add cross-handler conversation memory
+- **Last session:** 2026-04-13T08:53:34.071Z
+- **Stopped at:** Completed 03-01-PLAN.md: Sliding window cap (3 exchanges), LLM web search router, dependency install

@@ -38,10 +38,10 @@ Plans:
 
 **Requirements:** CLASSIFY-03, TOPIC-01, WEBSEARCH-01, GRAPHRAG-01
 
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
-- [ ] 03-01-PLAN.md — Sliding window cap (3 exchanges), LLM web search router, dependency install
+- [x] 03-01-PLAN.md — Sliding window cap (3 exchanges), LLM web search router, dependency install
 - [ ] 03-02-PLAN.md — Graph RAG module (graph_rag.py) + pipeline wiring (ingest hook, query injection)
 
 ---
