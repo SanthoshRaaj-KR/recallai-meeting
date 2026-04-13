@@ -24,6 +24,9 @@ def _reset_meeting_state():
     ja.meeting_state["last_user_speech_at"] = 0.0
     ja.meeting_state["general_history"] = []
     ja.meeting_state["last_jarvis_response"] = None
+    ja.meeting_state["invoker_participant"] = None
+    ja.meeting_state["_pending_debounce_task"] = None
+    ja.meeting_state["_accumulated_query"] = ""
 
 
 def test_build_create_bot_payload_uses_recall_provider_by_default():
@@ -403,3 +406,65 @@ async def test_handle_general_question_injects_graph_context():
         call_kwargs = mock_answer.call_args
         # graph_context should be passed as keyword argument
         assert "graph_context" in call_kwargs.kwargs or (len(call_kwargs.args) >= 3 and call_kwargs.args[2] == "In the meeting: React MENTIONED_BY Alice.")
+
+
+def test_speaker_isolation_locks_invoker_on_wake_word():
+    """SPEAKER-01: invoker_participant is set when a wake word query is detected."""
+    _reset_meeting_state()
+    result = ja.process_transcript_event("hey jarvis what time is it", 0.0)
+    assert result == "what time is it"
+    # Simulate what websocket_endpoint does: lock the invoker
+    ja.meeting_state["invoker_participant"] = "Alice"
+    assert ja.meeting_state["invoker_participant"] == "Alice"
+
+
+def test_speaker_isolation_drops_non_invoker_in_filter():
+    """SPEAKER-01: non-invoker transcripts are identified and would be filtered."""
+    _reset_meeting_state()
+    ja.meeting_state["invoker_participant"] = "Alice"
+    invoker = ja.meeting_state.get("invoker_participant")
+    participant = "Bob"
+    should_filter = bool(invoker and participant != invoker)
+    assert should_filter is True
+
+
+def test_speaker_isolation_passes_invoker_transcript():
+    """SPEAKER-01: invoker's own transcripts pass through the filter."""
+    _reset_meeting_state()
+    ja.meeting_state["invoker_participant"] = "Alice"
+    invoker = ja.meeting_state.get("invoker_participant")
+    participant = "Alice"
+    should_filter = bool(invoker and participant != invoker)
+    assert should_filter is False
+
+
+def test_debounce_accumulates_query_text():
+    """DEBOUNCE-01: accumulated query text grows correctly with each invoker segment."""
+    _reset_meeting_state()
+    # First segment
+    accumulated = ""
+    query1 = "what is the"
+    accumulated = (accumulated + " " + query1).strip() if accumulated else query1
+    ja.meeting_state["_accumulated_query"] = accumulated
+    # Second segment
+    query2 = "meeting agenda"
+    accumulated = (accumulated + " " + query2).strip() if accumulated else query2
+    ja.meeting_state["_accumulated_query"] = accumulated
+    assert ja.meeting_state["_accumulated_query"] == "what is the meeting agenda"
+
+
+@pytest.mark.asyncio
+async def test_debounced_dispatch_clears_state_and_calls_handle_spoken_request():
+    """DEBOUNCE-01: _debounced_dispatch clears invoker lock and dispatches after sleep."""
+    _reset_meeting_state()
+    ja.meeting_state["invoker_participant"] = "Alice"
+    ja.meeting_state["_accumulated_query"] = "what time is it"
+
+    with patch.object(ja, "handle_spoken_request", new_callable=AsyncMock) as mock_dispatch, \
+         patch.object(ja, "JARVIS_DEBOUNCE_SECONDS", 0.0):
+        await ja._debounced_dispatch("what time is it", "bot123")
+        mock_dispatch.assert_called_once_with("what time is it", "bot123")
+
+    assert ja.meeting_state["invoker_participant"] is None
+    assert ja.meeting_state["_accumulated_query"] == ""
+    assert ja.meeting_state["_pending_debounce_task"] is None

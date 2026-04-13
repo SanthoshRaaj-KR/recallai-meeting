@@ -62,6 +62,7 @@ JARVIS_WAKE_ACK = os.getenv("JARVIS_WAKE_ACK", "Yes?").strip()
 JARVIS_BUSY_ACK = os.getenv("JARVIS_BUSY_ACK", "I'm already on it. Give me a moment.").strip()
 JARVIS_SPEECH_HOLD_SECONDS = float(os.getenv("JARVIS_SPEECH_HOLD_SECONDS", "0.8"))
 JARVIS_GENERAL_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_GENERAL_CLARIFICATION_TIMEOUT", "15.0"))
+JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "1.0"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -143,6 +144,9 @@ meeting_state = {
     "parallel_runners": [],
     "general_history": [],
     "last_jarvis_response": None,
+    "invoker_participant": None,       # D-04: set when wake word is detected; D-03: cleared after dispatch
+    "_pending_debounce_task": None,    # D-09: cancellable asyncio.Task for debounce window
+    "_accumulated_query": "",          # D-07: space-joined query text from invoker segments
 }
 
 _openai_client: Optional[OpenAI] = None
@@ -640,6 +644,18 @@ async def _speak_filler(bot_id: str, generation: int) -> None:
     """Speak a random filler phrase before a slow operation."""
     phrase = random.choice(JARVIS_FILLER_PHRASES)
     await _speak_guarded(phrase, bot_id, generation, allow_stale=True)
+
+
+async def _debounced_dispatch(query: str, bot_id: str) -> None:
+    """Wait JARVIS_DEBOUNCE_SECONDS then dispatch to handle_spoken_request and clear invoker lock.
+
+    Per D-06: cancellable task. Per D-08: clears invoker_participant and _pending_debounce_task after firing.
+    """
+    await asyncio.sleep(JARVIS_DEBOUNCE_SECONDS)
+    meeting_state["invoker_participant"] = None
+    meeting_state["_pending_debounce_task"] = None
+    meeting_state["_accumulated_query"] = ""
+    await handle_spoken_request(query, bot_id)
 
 
 async def _generate_contextual_gap_filler(query: str) -> str:
@@ -1403,11 +1419,30 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception:
                 pass  # Non-fatal — graph is optional
 
-            query = process_transcript_event(sentence, time.time())
-            if query:
-                asyncio.create_task(handle_spoken_request(query, bot_id))
-            elif meeting_state["jarvis_listening"] and is_bare_wake_invocation(sentence):
-                asyncio.create_task(_handle_bare_wake(bot_id))
+            # Speaker isolation: skip non-invoker transcripts during active debounce window (D-02)
+            invoker = meeting_state.get("invoker_participant")
+            if invoker and participant != invoker:
+                logger.debug(
+                    "Ignoring transcript from %s — active invoker is %s", participant, invoker
+                )
+            else:
+                query = process_transcript_event(sentence, time.time())
+                if query:
+                    # Lock invoker on wake word detection (D-01) and accumulate query text (D-07)
+                    meeting_state["invoker_participant"] = participant
+                    accumulated = meeting_state.get("_accumulated_query", "")
+                    accumulated = (accumulated + " " + query).strip() if accumulated else query
+                    meeting_state["_accumulated_query"] = accumulated
+                    # Cancel existing debounce task and schedule new one (D-05, D-06)
+                    pending = meeting_state.get("_pending_debounce_task")
+                    if pending and not pending.done():
+                        pending.cancel()
+                    task = asyncio.create_task(_debounced_dispatch(accumulated, bot_id))
+                    meeting_state["_pending_debounce_task"] = task
+                elif meeting_state["jarvis_listening"] and is_bare_wake_invocation(sentence):
+                    # Lock invoker for bare wake so only their follow-up is accepted (D-01)
+                    meeting_state["invoker_participant"] = participant
+                    asyncio.create_task(_handle_bare_wake(bot_id))
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
