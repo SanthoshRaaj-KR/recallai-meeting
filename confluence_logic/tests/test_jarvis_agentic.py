@@ -468,3 +468,35 @@ async def test_debounced_dispatch_clears_state_and_calls_handle_spoken_request()
     assert ja.meeting_state["invoker_participant"] is None
     assert ja.meeting_state["_accumulated_query"] == ""
     assert ja.meeting_state["_pending_debounce_task"] is None
+
+
+@pytest.mark.asyncio
+async def test_handle_general_question_speaks_filler_before_answer():
+    """FILLER-02: contextual gap filler is spoken before the LLM answer is generated."""
+    _reset_meeting_state()
+    call_order = []
+
+    async def mock_filler(q):
+        call_order.append("filler_generated")
+        return "Let me check that for you."
+
+    async def mock_speak(text, bot_id, generation, allow_stale=False):
+        call_order.append(f"spoke:{text[:20]}")
+        return True
+
+    async def mock_answer(q, history, graph_context="", force_web_search=False):
+        call_order.append("answer_generated")
+        return "The answer is 42."
+
+    with patch.object(ja, "_generate_contextual_gap_filler", side_effect=mock_filler), \
+         patch.object(ja, "_speak_guarded", side_effect=mock_speak), \
+         patch.object(ja, "answer_general_question", side_effect=mock_answer), \
+         patch.object(ja, "graph_rag") as mock_graph, \
+         patch.object(ja, "_looks_like_clarification_prompt", return_value=False):
+        mock_graph.query_context = AsyncMock(return_value="")
+        await ja._handle_general_question("what time is it", "bot123")
+
+    assert "filler_generated" in call_order, "filler was never generated"
+    assert "answer_generated" in call_order, "answer was never generated"
+    assert call_order.index("filler_generated") < call_order.index("answer_generated"), \
+        f"Expected filler before answer, got: {call_order}"
