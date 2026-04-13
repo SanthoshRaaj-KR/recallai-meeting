@@ -378,3 +378,28 @@ def test_format_general_history_empty():
     _reset_meeting_state()
     ja.meeting_state["general_history"] = []
     assert ja._format_general_history() == "[none]"
+
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_handle_general_question_injects_graph_context():
+    """CLASSIFY-03: _handle_general_question calls graph_rag.query_context and passes result to answer_general_question."""
+    _reset_meeting_state()
+    ja.meeting_state["general_history"] = []
+    ja.meeting_state["output_generation"] = 0
+    ja.meeting_state["last_jarvis_response"] = None
+
+    with patch("confluence_logic.jarvis_agentic.answer_general_question", new_callable=AsyncMock) as mock_answer, \
+         patch("confluence_logic.jarvis_agentic.graph_rag") as mock_graph, \
+         patch("confluence_logic.jarvis_agentic._speak_guarded", new_callable=AsyncMock), \
+         patch("confluence_logic.jarvis_agentic._looks_like_clarification_prompt", return_value=False):
+        mock_graph.query_context = AsyncMock(return_value="In the meeting: React MENTIONED_BY Alice.")
+        mock_answer.return_value = "Alice suggested React."
+        await ja._handle_general_question("what did Alice suggest", "bot123")
+        mock_graph.query_context.assert_called_once_with("what did Alice suggest")
+        mock_answer.assert_called_once()
+        call_kwargs = mock_answer.call_args
+        # graph_context should be passed as keyword argument
+        assert "graph_context" in call_kwargs.kwargs or (len(call_kwargs.args) >= 3 and call_kwargs.args[2] == "In the meeting: React MENTIONED_BY Alice.")

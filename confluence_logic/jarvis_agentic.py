@@ -36,6 +36,7 @@ from .classifier import classify_intent
 from .audio_cache import get_random_ack_audio
 from .general_responder import answer_general_question
 from .meeting_responder import summarize_meeting, generate_opinion
+from confluence_logic import graph_rag
 
 load_dotenv()
 
@@ -995,7 +996,13 @@ async def _handle_general_question(query: str, bot_id: str) -> None:
         if prior and _is_followup(query):
             cross_context = f"User: {prior['query']}\nAssistant: {prior['answer']}"
             conversation_history = cross_context + "\n" + conversation_history if conversation_history and conversation_history.strip() != "[none]" else cross_context
-        answer = await answer_general_question(query, conversation_history)
+        # Inject meeting context from graph (per D-01, D-02)
+        graph_context = ""
+        try:
+            graph_context = await graph_rag.query_context(query)
+        except Exception:
+            pass  # Non-fatal — graph is optional
+        answer = await answer_general_question(query, conversation_history, graph_context=graph_context)
         if not answer:
             return
 
@@ -1389,6 +1396,12 @@ async def websocket_endpoint(websocket: WebSocket):
             # Keep memory bounded — drop oldest entries beyond limit
             if len(log) > 500:
                 meeting_state["transcript_log"] = log[-500:]
+
+            # Real-time graph ingestion (fire-and-forget, per D-13)
+            try:
+                asyncio.create_task(graph_rag.ingest_transcript_entry(log[-1]))
+            except Exception:
+                pass  # Non-fatal — graph is optional
 
             query = process_transcript_event(sentence, time.time())
             if query:

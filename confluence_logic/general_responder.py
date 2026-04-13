@@ -116,6 +116,7 @@ def _history_to_messages(conversation_history: str) -> list:
 async def answer_general_question(
     question: str,
     conversation_history: str = "",
+    graph_context: str = "",
 ) -> str:
     """
     Generate a conversational answer to a general (non-Confluence) question.
@@ -135,6 +136,12 @@ async def answer_general_question(
         "Do not mention Confluence or page editing unless the user asks about it. "
         "Speak in a warm, professional tone."
     )
+
+    if graph_context:
+        system_prompt += (
+            "\n\nMeeting context (from the current conversation):\n"
+            + graph_context
+        )
 
     messages = [{"role": "system", "content": system_prompt}]
 
