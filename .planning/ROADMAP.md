@@ -44,4 +44,12 @@ Plans:
 - [x] 03-01-PLAN.md — Sliding window cap (3 exchanges), LLM web search router, dependency install
 - [x] 03-02-PLAN.md — Graph RAG module (graph_rag.py) + pipeline wiring (ingest hook, query injection)
 
+### Phase 4: Speaker Isolation, Speech Debounce, and General Question Filler Audio
+
+**Goal:** Filter multi-speaker transcript overlap so only the Jarvis-invoker's speech enters the pipeline; add a 1-second speech-completion debounce before processing; play filler WAV audio during general question LLM response generation to eliminate the awkward silence gap.
+
+**Depends on:** Phase 3
+
+**Requirements:** SPEAKER-01, DEBOUNCE-01, FILLER-02
+
 ---
