@@ -153,7 +153,7 @@ _UNAMBIGUOUS_VERBS = frozenset({
 })
 _REFERENTIAL_TERMS = (" it ", " that ", " this ", " same ", "the one", "the page")
 
-_MAX_GENERAL_HISTORY = 4  # turns
+_MAX_GENERAL_HISTORY = 3  # turns
 
 
 def _remember_general_exchange(question: str, answer: str) -> None:

@@ -22,6 +22,8 @@ def _reset_meeting_state():
     ja.meeting_state["mutation_started"] = False
     ja.meeting_state["cancel_requested"] = False
     ja.meeting_state["last_user_speech_at"] = 0.0
+    ja.meeting_state["general_history"] = []
+    ja.meeting_state["last_jarvis_response"] = None
 
 
 def test_build_create_bot_payload_uses_recall_provider_by_default():
@@ -341,3 +343,38 @@ def test_handle_bare_wake_uses_busy_ack_when_task_active():
         mock_speak.assert_called_once_with(ja.JARVIS_BUSY_ACK, "bot-123")
 
     asyncio.run(run_test())
+
+
+def test_format_general_history_returns_at_most_3_exchanges():
+    """TOPIC-01: sliding window caps at 3 exchanges."""
+    _reset_meeting_state()
+    ja.meeting_state["general_history"] = [
+        ("q1", "a1"), ("q2", "a2"), ("q3", "a3"), ("q4", "a4"), ("q5", "a5"),
+    ]
+    result = ja._format_general_history()
+    # Should contain only last 3 exchanges (q3/a3, q4/a4, q5/a5)
+    assert "q3" in result
+    assert "q4" in result
+    assert "q5" in result
+    assert "q1" not in result
+    assert "q2" not in result
+    # Count lines: 3 exchanges * 2 lines each = 6 lines
+    assert len(result.strip().splitlines()) == 6
+
+
+def test_remember_general_exchange_caps_at_3():
+    """TOPIC-01: _remember_general_exchange discards oldest beyond 3."""
+    _reset_meeting_state()
+    ja.meeting_state["general_history"] = []
+    for i in range(5):
+        ja._remember_general_exchange(f"q{i}", f"a{i}")
+    assert len(ja.meeting_state["general_history"]) == 3
+    assert ja.meeting_state["general_history"][0] == ("q2", "a2")
+    assert ja.meeting_state["general_history"][-1] == ("q4", "a4")
+
+
+def test_format_general_history_empty():
+    """Edge case: empty history returns [none]."""
+    _reset_meeting_state()
+    ja.meeting_state["general_history"] = []
+    assert ja._format_general_history() == "[none]"
