@@ -1001,7 +1001,7 @@ async def _handle_status_query(query: str, bot_id: str) -> None:
         logger.warning("Status query failed: %s", e)
 
 
-async def _handle_general_question(query: str, bot_id: str) -> None:
+async def _handle_general_question(query: str, bot_id: str, force_web_search: bool = False) -> None:
     """Answer a general (non-Confluence) question using the LLM and speak the response.
     If the answer is itself a clarifying question, set up a no-wake-word listening state."""
     generation = meeting_state["output_generation"]
@@ -1018,7 +1018,10 @@ async def _handle_general_question(query: str, bot_id: str) -> None:
             graph_context = await graph_rag.query_context(query)
         except Exception:
             pass  # Non-fatal — graph is optional
-        answer = await answer_general_question(query, conversation_history, graph_context=graph_context)
+        # Speak contextual filler immediately while LLM generates the answer (FILLER-02, D-10)
+        filler = await _generate_contextual_gap_filler(query)
+        await _speak_guarded(filler, bot_id, generation, allow_stale=True)
+        answer = await answer_general_question(query, conversation_history, graph_context=graph_context, force_web_search=force_web_search)
         if not answer:
             return
 
@@ -1204,6 +1207,11 @@ async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     if intent == "general":
         logger.info("Classified as general question: %s", spoken_query[:60])
         asyncio.create_task(_handle_general_question(spoken_query, bot_id))
+        return
+
+    if intent == "web_search":
+        logger.info("Classified as web search request: %s", spoken_query[:60])
+        asyncio.create_task(_handle_general_question(spoken_query, bot_id, force_web_search=True))
         return
 
     # NEW: meeting transcript intents (per D-04 — routed before Confluence pipeline)
