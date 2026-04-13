@@ -52,4 +52,10 @@ Plans:
 
 **Requirements:** SPEAKER-01, DEBOUNCE-01, FILLER-02
 
+**Plans:** 1/2 plans executed
+
+Plans:
+- [x] 04-01-PLAN.md — Speaker isolation (invoker lock) + speech debounce (cancellable 1s window) in websocket_endpoint
+- [ ] 04-02-PLAN.md — Contextual gap filler audio before LLM answer in _handle_general_question
+
 ---
