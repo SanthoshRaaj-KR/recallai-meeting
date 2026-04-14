@@ -80,12 +80,12 @@ Plans:
 
 **Depends on:** Phase 5
 
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans complete
 
 Plans:
 - [x] 06-01-PLAN.md — Meeting context for Confluence edits + delete confirmation safety gate
 - [x] 06-02-PLAN.md — Tavily web search upgrade + garbled query recovery
 - [x] 06-03-PLAN.md — Fuzzy wake word aliases + confidence signaling
-- [ ] 06-04-PLAN.md — Action items extraction + participant speaker queries
+- [x] 06-04-PLAN.md — Action items extraction + participant speaker queries
 
 ---

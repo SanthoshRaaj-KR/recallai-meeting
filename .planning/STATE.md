@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 current_plan: 1
 status: Executing Phase 06
-stopped_at: "Completed 06-01-PLAN.md: meeting context injection and delete confirmation gate"
-last_updated: "2026-04-14T10:27:12.648Z"
+stopped_at: "Completed 06-04-PLAN.md: action items extraction and speaker query"
+last_updated: "2026-04-14T10:31:50.924Z"
 progress:
   total_phases: 6
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 15
-  completed_plans: 14
-  percent: 93
+  completed_plans: 15
+  percent: 100
 ---
 
 # Project State
@@ -21,7 +21,7 @@ progress:
 - **Active Milestone:** Milestone 1 — Jarvis Intelligence Enhancement
 - **Active Phase:** Phase 01 — Intelligent Question Classification and Conversational Response
 - **Current Plan:** 1
-- **Progress:** [█████████░] 93%
+- **Progress:** [██████████] 100%
 
 ## Accumulated Context
 
@@ -65,6 +65,8 @@ progress:
 - [Phase 06]: CONFIDENCE-01: Post-processing 'Based on what I found, ' prefix for force_web_search=True answers; JARVIS_CONFIDENCE_SIGNAL_ENABLED env var gates feature
 - [Phase 06]: MEETCTX-01: _build_meeting_context_for_edit takes last 10 transcript entries capped at 2000 chars; meeting_context kwarg propagated top-down through _execute_editor_task to editor agent methods
 - [Phase 06]: DELGATE-01: Delete confirmation gate fires after task.intent='delete' detection, before _execute_editor_task; JARVIS_DELETE_CONFIRM_ENABLED (default true) and JARVIS_DELETE_CONFIRM_TIMEOUT (default 10.0s) env vars for runtime control
+- [Phase 06]: ACTIONITEMS-01: JARVIS_ACTION_ITEMS_MAX_TOKENS defaults to 300, JARVIS_SPEAKER_QUERY_MAX_TOKENS to 250 — token caps for action item extraction and speaker summarization
+- [Phase 06]: SPEAKERQ-01: Fuzzy participant name matching uses substring containment; _extract_speaker_name uses regex patterns for 'what did X say' style queries
 
 ### Performance Metrics
 
@@ -86,6 +88,7 @@ progress:
 | Phase 06 P02 | 6 min | 2 tasks | 2 files |
 | Phase 06 P03 | 2 min | 2 tasks | 1 files |
 | Phase 06 P01 | 8 min | 2 tasks | 2 files |
+| Phase 06 P04 | 8 min | 2 tasks | 3 files |
 
 ### Quick Tasks Completed
 
@@ -100,5 +103,5 @@ progress:
 
 ### Session
 
-- **Last session:** 2026-04-14T10:27:12.644Z
-- **Stopped at:** Completed 06-01-PLAN.md: meeting context injection and delete confirmation gate
+- **Last session:** 2026-04-14T10:31:50.920Z
+- **Stopped at:** Completed 06-04-PLAN.md: action items extraction and speaker query
