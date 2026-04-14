@@ -35,7 +35,7 @@ class EditorAgent:
                 "- TABLES: When creating or editing tables, ALWAYS use Confluence storage format classes: <table class=\"confluenceTable\"><tbody><tr><th class=\"confluenceTh\">...</th></tr><tr><td class=\"confluenceTd\">...</td></tr></tbody></table>. Plain markdown/HTML tables will not render properly.\n"
                 "- ALMOST NEVER return 'NEEDS_CLARIFICATION'. You are a worker agent; do NOT ask questions directly. If search returns zero results, return 'ERROR: Could not find target page.' Prefer best-guess execution over failing.\n"
                 "- NEVER claim success unless the most recent create/commit tool returned success=true. If a tool fails or conflicts completely, you MUST return 'ERROR: The update failed. <reason>' instead of failing silently.\n"
-                "If the edit succeeds, return a short internal completion note without extra conversational padding."
+                "You may receive recent meeting context before the user request. Use it to understand references like 'what we just discussed', 'the decision we made', etc. Do NOT quote or repeat meeting context verbatim unless asked.\n"                "If the edit succeeds, return a short internal completion note without extra conversational padding."
             ),
             tools=[search_workspace_knowledge, fetch_live_page, preview_edit, commit_document_edit, update_page_title, list_workspace_pages],
         )
@@ -288,6 +288,7 @@ class EditorAgent:
         self,
         query: str,
         clarification_context: str = "",
+        meeting_context: str = "",
         mutation_started_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         try:
@@ -295,10 +296,15 @@ class EditorAgent:
             if not normalized_query:
                 return "I need a clearer request before I can help."
 
+            if meeting_context:
+                enriched_input = f"[Recent meeting discussion for context]\n{meeting_context}\n\n[User request]\n{normalized_query}"
+            else:
+                enriched_input = normalized_query
+
             recent_history = self._format_recent_history()
             sections = [
                 f"Recent conversation history:\n{recent_history}",
-                f"Original user request:\n{normalized_query}",
+                f"Original user request:\n{enriched_input}",
             ]
             if clarification_context.strip():
                 sections.extend(
@@ -375,6 +381,7 @@ class EditorAgent:
         self,
         prepared_query: str,
         original_query: Optional[str] = None,
+        meeting_context: str = "",
         mutation_started_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         try:
@@ -393,10 +400,14 @@ class EditorAgent:
                 return answer
 
             memory_query = (original_query or normalized_prepared).strip()
+            if meeting_context:
+                enriched_prepared = f"[Recent meeting discussion for context]\n{meeting_context}\n\n[User request]\n{normalized_prepared}"
+            else:
+                enriched_prepared = normalized_prepared
             recent_history = self._format_recent_history()
             enriched_query = (
                 f"Recent conversation history:\n{recent_history}\n\n"
-                f"Prepared request from spoken master:\n{normalized_prepared}"
+                f"Prepared request from spoken master:\n{enriched_prepared}"
             )
             return await self._run_editor(
                 memory_query,
