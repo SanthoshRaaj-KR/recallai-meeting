@@ -476,7 +476,7 @@ async def test_handle_general_question_speaks_filler_before_answer():
     _reset_meeting_state()
     call_order = []
 
-    async def mock_filler(q):
+    async def mock_filler(q, invoker_name=None):
         call_order.append("filler_generated")
         return "Let me check that for you."
 
@@ -484,7 +484,7 @@ async def test_handle_general_question_speaks_filler_before_answer():
         call_order.append(f"spoke:{text[:20]}")
         return True
 
-    async def mock_answer(q, history, graph_context="", force_web_search=False):
+    async def mock_answer(q, history, graph_context="", force_web_search=False, speech_rewrite_enabled=False, multiturn_reference=False):
         call_order.append("answer_generated")
         return "The answer is 42."
 
