@@ -25,6 +25,7 @@ def _get_client() -> OpenAI:
 
 
 GENERAL_RESPONDER_MODEL = os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini").strip()
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 
 _WEB_SEARCH_ROUTER_PROMPT = (
     "You are a routing classifier. Answer only 'yes' or 'no'.\n"
@@ -56,26 +57,41 @@ async def _needs_web_search(question: str) -> bool:
 
 def _quick_web_search(query: str) -> str:
     """
-    Fetch a quick answer snippet from DuckDuckGo Instant Answer API.
-    Returns a short context string, or empty string if nothing useful found.
-    Free, no API key required, returns in <1s.
+    Fetch search results from Tavily API.
+    Returns a context string with top result snippets, or empty string on failure.
+    Requires TAVILY_API_KEY env var.
     """
+    if not TAVILY_API_KEY:
+        logger.debug("Tavily API key not set, skipping web search")
+        return ""
     try:
-        resp = _requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
-            timeout=3,
+        resp = _requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 3,
+                "include_answer": True,
+            },
+            timeout=5,
         )
         if resp.status_code != 200:
+            logger.debug("Tavily search failed with status %d", resp.status_code)
             return ""
         data = resp.json()
-        # Prefer AbstractText (Wikipedia-style summary), then Answer (instant answer)
-        snippet = data.get("AbstractText") or data.get("Answer") or ""
-        if snippet and len(snippet) > 20:
-            return snippet[:600]  # cap at 600 chars
+        # Prefer the AI-generated answer if available
+        answer = data.get("answer", "")
+        if answer and len(answer) > 20:
+            return answer[:800]
+        # Fallback to concatenated result snippets
+        results = data.get("results", [])
+        snippets = [r.get("content", "") for r in results[:3] if r.get("content")]
+        combined = " ".join(snippets)
+        return combined[:800] if combined else ""
     except Exception as e:
-        logger.debug("Web search failed (non-fatal): %s", e)
-    return ""
+        logger.debug("Tavily web search failed (non-fatal): %s", e)
+        return ""
 
 
 def _history_to_messages(conversation_history: str) -> list:
@@ -119,6 +135,7 @@ async def answer_general_question(
     graph_context: str = "",
     speech_rewrite_enabled: bool = False,
     multiturn_reference: bool = False,
+    force_web_search: bool = False,
 ) -> str:
     """
     Generate a conversational answer to a general (non-Confluence) question.
@@ -167,7 +184,7 @@ async def answer_general_question(
 
     # Selective web search for questions that need current data
     web_context = ""
-    if await _needs_web_search(question):
+    if force_web_search or await _needs_web_search(question):
         logger.info("Web search triggered for: %s", question[:60])
         web_context = await asyncio.to_thread(_quick_web_search, question)
         if web_context:
