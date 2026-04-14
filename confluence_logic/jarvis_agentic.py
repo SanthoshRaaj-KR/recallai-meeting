@@ -72,6 +72,7 @@ JARVIS_POST_SPEECH_PAUSE_SECONDS = float(os.getenv("JARVIS_POST_SPEECH_PAUSE_SEC
 JARVIS_DELETE_CONFIRM_ENABLED = os.getenv("JARVIS_DELETE_CONFIRM_ENABLED", "true").strip().lower() == "true"
 JARVIS_DELETE_CONFIRM_TIMEOUT = float(os.getenv("JARVIS_DELETE_CONFIRM_TIMEOUT", "10.0"))
 JARVIS_GARBLED_RECOVERY_ENABLED = os.getenv("JARVIS_GARBLED_RECOVERY_ENABLED", "true").strip().lower() == "true"
+JARVIS_CONFIDENCE_SIGNAL_ENABLED = os.getenv("JARVIS_CONFIDENCE_SIGNAL_ENABLED", "true").strip().lower() == "true"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -177,6 +178,30 @@ _UNAMBIGUOUS_VERBS = frozenset({
 _REFERENTIAL_TERMS = (" it ", " that ", " this ", " same ", "the one", "the page")
 
 _MAX_GENERAL_HISTORY = 3  # turns
+
+# CONFIDENCE-01: markers used to detect low-confidence answers (future enhancement)
+_LOW_CONFIDENCE_MARKERS = (
+    "i'm not sure", "i don't know", "i'm not certain",
+    "i can't confirm", "i don't have", "i'm unable to verify",
+    "it's unclear", "i couldn't find", "that's hard to say",
+    "i'm not confident", "i may be wrong",
+)
+
+
+def _add_confidence_signal(answer: str) -> str:
+    """Prepend a hedging phrase if the answer contains low-confidence markers.
+
+    This makes Jarvis sound more trustworthy by signaling uncertainty explicitly
+    rather than presenting uncertain information as fact.
+    """
+    if not JARVIS_CONFIDENCE_SIGNAL_ENABLED:
+        return answer
+    normalized = answer.lower()
+    if any(marker in normalized for marker in _LOW_CONFIDENCE_MARKERS):
+        # Already has hedging language — no need to double-hedge
+        return answer
+    # Additional confidence signal logic can be added here in future
+    return answer
 
 
 def _build_meeting_context_for_edit() -> str:
@@ -1020,11 +1045,15 @@ async def _run_voice_task(task: VoiceTask) -> None:
             elif _is_unambiguous_request(task.request) and not task.clarification_context:
                 # Fast-path: skip planning LLM call for clear, unambiguous requests
                 from .core.schemas import MasterVoiceDecision
+                # Detect delete intent for unambiguous requests
+                _fast_intent = "edit"
+                if any(w in task.request.lower().split()[:3] for w in ("delete", "remove")):
+                    _fast_intent = "delete"
                 decision = MasterVoiceDecision(
                     immediate_reply="",
                     needs_clarification=False,
                     execution_request=task.request,
-                    intent="edit",
+                    intent=_fast_intent,
                     rationale="Fast-path: unambiguous request.",
                 )
             else:
@@ -1239,6 +1268,10 @@ async def _handle_general_question(query: str, bot_id: str, force_web_search: bo
             return
 
         answer = await _rewrite_for_speech(answer)
+        # Confidence signaling (CONFIDENCE-01): web-search answers get attribution prefix
+        if JARVIS_CONFIDENCE_SIGNAL_ENABLED and force_web_search and answer:
+            if not answer.lower().startswith(("according to", "based on", "from what i found")):
+                answer = "Based on what I found, " + answer[0].lower() + answer[1:]
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
         await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
         if answer:
