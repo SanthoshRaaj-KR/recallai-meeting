@@ -35,7 +35,7 @@ from .agents.editor_agent import EditorAgent
 from .classifier import classify_intent
 from .audio_cache import get_random_ack_audio
 from .general_responder import answer_general_question
-from .meeting_responder import summarize_meeting, generate_opinion
+from .meeting_responder import summarize_meeting, generate_opinion, extract_action_items, summarize_speaker
 from confluence_logic import graph_rag
 
 load_dotenv()
@@ -1449,6 +1449,65 @@ async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
         logger.error("Meeting opinion handling failed: %s", e)
 
 
+def _extract_speaker_name(query: str) -> str:
+    """Extract the speaker name from a speaker query like 'what did Alice say'."""
+    patterns = [
+        r"what (?:did|has|does) (\w+(?:\s+\w+)?) (?:say|said|mention|think|contribute|talk)",
+        r"what (\w+(?:\s+\w+)?) (?:said|mentioned|talked|contributed)",
+        r"summarize (?:what )?(\w+(?:\s+\w+)?) (?:said|mentioned)",
+        r"tell me what (\w+(?:\s+\w+)?) (?:said|mentioned|talked)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, query, re.IGNORECASE)
+        if m:
+            name = m.group(1).strip()
+            # Filter out common non-name words
+            if name.lower() not in ("i", "we", "they", "he", "she", "you", "everyone", "somebody", "someone"):
+                return name
+    return ""
+
+
+async def _handle_action_items(query: str, bot_id: str) -> None:
+    """Extract and speak action items from the meeting transcript."""
+    generation = meeting_state["output_generation"]
+    try:
+        transcript_log = list(meeting_state["transcript_log"])
+        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name()))
+        action_task = asyncio.create_task(extract_action_items(transcript_log))
+        gap_filler = await gap_filler_task
+        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
+        answer = await action_task
+        answer = await _rewrite_for_speech(answer)
+        meeting_state["last_jarvis_response"] = {"intent": "action_items", "query": query, "answer": answer}
+        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
+    except Exception as e:
+        logger.error("Action items handling failed: %s", e)
+
+
+async def _handle_speaker_query(query: str, bot_id: str) -> None:
+    """Summarize what a specific speaker said in the meeting."""
+    generation = meeting_state["output_generation"]
+    try:
+        transcript_log = list(meeting_state["transcript_log"])
+        # Extract speaker name from query (best effort)
+        speaker_name = _extract_speaker_name(query)
+        if not speaker_name:
+            await _speak_guarded("I'm not sure which participant you're asking about. Could you say their name again?", bot_id, generation, allow_stale=True)
+            return
+        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name()))
+        speaker_task = asyncio.create_task(summarize_speaker(transcript_log, speaker_name))
+        gap_filler = await gap_filler_task
+        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
+        answer = await speaker_task
+        answer = await _rewrite_for_speech(answer)
+        meeting_state["last_jarvis_response"] = {"intent": "speaker_query", "query": query, "answer": answer}
+        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
+    except Exception as e:
+        logger.error("Speaker query handling failed: %s", e)
+
+
 async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     # Intercept status/conversational queries — answer instantly, skip task queue
     if _is_status_query(spoken_query):
@@ -1490,6 +1549,16 @@ async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     if intent == "meeting_opinion":
         logger.info("Classified as meeting opinion request: %s", spoken_query[:60])
         asyncio.create_task(_handle_meeting_opinion(spoken_query, bot_id))
+        return
+
+    if intent == "action_items":
+        logger.info("Classified as action items request: %s", spoken_query[:60])
+        asyncio.create_task(_handle_action_items(spoken_query, bot_id))
+        return
+
+    if intent == "speaker_query":
+        logger.info("Classified as speaker query: %s", spoken_query[:60])
+        asyncio.create_task(_handle_speaker_query(spoken_query, bot_id))
         return
 
     # Check if this is an answer to a pending general clarification

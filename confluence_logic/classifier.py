@@ -57,6 +57,21 @@ _OPINION_PHRASES = (
     "what do you recommend", "your thoughts", "your opinion",
 )
 
+_ACTION_ITEMS_TRIGGERS = frozenset({
+    "action", "actions", "todos", "todo", "tasks", "commitments", "assignments",
+})
+_ACTION_ITEMS_PHRASES = (
+    "action items", "action points", "what are the action", "to-do list",
+    "what do we need to do", "what needs to be done", "who's doing what",
+    "what are the next steps", "next steps",
+)
+
+_SPEAKER_QUERY_PHRASES = (
+    "what did .+ say", "what has .+ said", "what .+ said",
+    "what did .+ mention", "what .+ talked about", "what .+ contributed",
+    "summarize what .+ said",
+)
+
 
 def _fast_classify(text: str) -> Optional[str]:
     """Return intent string if heuristic is confident, else None for LLM fallback."""
@@ -83,6 +98,16 @@ def _fast_classify(text: str) -> Optional[str]:
     if not has_confluence_target and has_summary_trigger:
         return "meeting_summary"
 
+    # Action items heuristic
+    if any(phrase in normalized for phrase in _ACTION_ITEMS_PHRASES):
+        return "action_items"
+    if words[0] in ("what", "list", "give") and any(word in _ACTION_ITEMS_TRIGGERS for word in words):
+        return "action_items"
+
+    # Speaker query heuristic (regex-based — "what did X say")
+    if re.search(r"what (?:did|has|does) \w+ (?:say|said|mention|think|contribute)", normalized):
+        return "speaker_query"
+
     # Meeting opinion heuristics (per D-03)
     if any(phrase in normalized for phrase in _OPINION_PHRASES):
         return "meeting_opinion"
@@ -105,8 +130,9 @@ def _fast_classify(text: str) -> Optional[str]:
 
 async def classify_intent(text: str) -> str:
     """
-    Classify user text into one of four intents: 'confluence', 'general', 'meeting_summary', 'meeting_opinion'.
-    Returns: 'confluence', 'general', 'meeting_summary', or 'meeting_opinion'
+    Classify user text into one of six intents:
+    'confluence', 'general', 'meeting_summary', 'meeting_opinion', 'action_items', 'speaker_query'.
+    Returns one of the six intent strings.
     """
     # Try fast heuristic first
     fast = _fast_classify(text)
@@ -118,7 +144,8 @@ async def classify_intent(text: str) -> str:
     system_prompt = (
         "You are a classifier. The user is speaking to a voice assistant called Jarvis in a meeting. "
         "Jarvis can edit, create, delete, and list Confluence wiki pages, answer general questions, "
-        "summarize the meeting transcript, and give opinions on what was discussed. "
+        "summarize the meeting transcript, give opinions on what was discussed, extract action items, "
+        "and summarize what specific participants said. "
         "Classify the user's message into exactly one category:\n"
         "- 'confluence' if the user wants to create, edit, update, delete, rename, list, or otherwise act on Confluence pages or content. "
         "IMPORTANT: also use 'confluence' when the user wants to summarize or do anything with a specific Confluence document, page, or section, "
@@ -127,8 +154,10 @@ async def classify_intent(text: str) -> str:
         "- 'general' if the user is asking a general question, making conversation, or asking something unrelated to Confluence or the current meeting\n"
         "- 'meeting_summary' ONLY if the user wants to hear a spoken summary/recap of the current meeting transcript with NO Confluence action involved "
         "(e.g., 'catch me up', 'what did I miss', 'summarize the meeting' — with no mention of pages or documents)\n"
-        "- 'meeting_opinion' if the user wants Jarvis's opinion, recommendation, or take on what was discussed (e.g., 'what do you think', 'which option is better', 'how should we proceed')\n\n"
-        "Respond with ONLY one of these four words: 'confluence', 'general', 'meeting_summary', 'meeting_opinion'. Nothing else."
+        "- 'meeting_opinion' if the user wants Jarvis's opinion, recommendation, or take on what was discussed (e.g., 'what do you think', 'which option is better', 'how should we proceed')\n"
+        "- 'action_items' if the user wants to know the action items, tasks, commitments, or next steps from the meeting\n"
+        "- 'speaker_query' if the user wants to know what a specific person said, contributed, or mentioned in the meeting\n\n"
+        "Respond with ONLY one of these six words: 'confluence', 'general', 'meeting_summary', 'meeting_opinion', 'action_items', 'speaker_query'. Nothing else."
     )
 
     try:
@@ -144,7 +173,7 @@ async def classify_intent(text: str) -> str:
             )
         )
         result = (response.choices[0].message.content or "").strip().lower()
-        if result in ("confluence", "general", "meeting_summary", "meeting_opinion"):
+        if result in ("confluence", "general", "meeting_summary", "meeting_opinion", "action_items", "speaker_query"):
             logger.info("Classifier LLM: %s -> %s", text[:60], result)
             return result
         logger.warning("Classifier LLM returned unexpected: %s, defaulting to confluence", result)
