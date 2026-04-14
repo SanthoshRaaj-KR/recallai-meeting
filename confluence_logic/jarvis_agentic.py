@@ -69,6 +69,9 @@ JARVIS_MICRO_ACK_TEXT = os.getenv("JARVIS_MICRO_ACK_TEXT", "Mhm.").strip()
 JARVIS_YIELD_PHRASE = os.getenv("JARVIS_YIELD_PHRASE", "Of course \u2014 ").strip()
 JARVIS_INTERRUPT_RECOVERY_ENABLED = os.getenv("JARVIS_INTERRUPT_RECOVERY_ENABLED", "true").strip().lower() == "true"
 JARVIS_POST_SPEECH_PAUSE_SECONDS = float(os.getenv("JARVIS_POST_SPEECH_PAUSE_SECONDS", "0.7"))
+JARVIS_DELETE_CONFIRM_ENABLED = os.getenv("JARVIS_DELETE_CONFIRM_ENABLED", "true").strip().lower() == "true"
+JARVIS_DELETE_CONFIRM_TIMEOUT = float(os.getenv("JARVIS_DELETE_CONFIRM_TIMEOUT", "10.0"))
+JARVIS_GARBLED_RECOVERY_ENABLED = os.getenv("JARVIS_GARBLED_RECOVERY_ENABLED", "true").strip().lower() == "true"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -156,7 +159,16 @@ meeting_state = {
 }
 
 _openai_client: Optional[OpenAI] = None
-_WAKE_PATTERN = re.compile(r"(?:hey\s+)?jarvis[,.]?\s*(.*)", re.IGNORECASE)
+# WAKEALIAS-01: expanded wake word aliases with phonetic near-misses
+_WAKE_ALIASES = r"(?:jarvis|jarvas|jervis|jarvus|jarves|jarvi|jarv)"
+_CUSTOM_WAKE_ALIASES = os.getenv("JARVIS_WAKE_ALIASES", "").strip()
+if _CUSTOM_WAKE_ALIASES:
+    # User can add pipe-separated custom aliases, e.g., "jarvy|javis|jarviss"
+    _WAKE_ALIASES = rf"(?:jarvis|jarvas|jervis|jarvus|jarves|jarvi|jarv|{_CUSTOM_WAKE_ALIASES})"
+_WAKE_PATTERN = re.compile(
+    rf"(?:(?:hey|yo|ok|hi)\s+)?{_WAKE_ALIASES}[,.\s!?]*\s*(.*)",
+    re.IGNORECASE,
+)
 _OVERRIDE_PATTERN = re.compile(r"\b(stop|cancel|instead|forget that|never mind|nevermind|wait|change that|changed my mind|changed mind|don't do|dont do|undo)\b", re.IGNORECASE)
 _ADDITIVE_PATTERN = re.compile(r"\b(also|after that|then|next)\b", re.IGNORECASE)
 _UNAMBIGUOUS_VERBS = frozenset({
@@ -165,6 +177,19 @@ _UNAMBIGUOUS_VERBS = frozenset({
 _REFERENTIAL_TERMS = (" it ", " that ", " this ", " same ", "the one", "the page")
 
 _MAX_GENERAL_HISTORY = 3  # turns
+
+
+def _build_meeting_context_for_edit() -> str:
+    """Return the last 10 transcript entries formatted as 'Speaker: text' lines, capped at 2000 chars."""
+    transcript_log: list = meeting_state.get("transcript_log", [])
+    if not transcript_log:
+        return ""
+    recent = transcript_log[-10:]
+    lines = [f"{entry.get('speaker', 'Unknown')}: {entry.get('text', '')}" for entry in recent]
+    context = "\n".join(lines)
+    if len(context) > 2000:
+        context = context[-2000:]
+    return context
 
 
 def _remember_general_exchange(question: str, answer: str) -> None:
@@ -202,6 +227,37 @@ def _is_followup(query: str) -> bool:
     # Simple substring check is safe for longer, unambiguous words
     follow_keywords = ("simpler", "explain", "elaborate", "again", "more", "rephrase", "clarify")
     return any(kw in lowered for kw in follow_keywords)
+
+
+def _is_garbled_query(text: str) -> bool:
+    """Detect likely garbled/unintelligible transcription noise.
+
+    Heuristics:
+    - Very short (1-2 chars) after stripping
+    - Mostly non-alphabetic characters
+    - No recognizable English words (all tokens < 2 chars)
+    - Excessive repetition of single characters
+    """
+    if not JARVIS_GARBLED_RECOVERY_ENABLED:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return True
+    # Too short to be meaningful (single char or two chars)
+    if len(stripped) <= 2:
+        return True
+    # Ratio of alphabetic characters is very low
+    alpha_count = sum(1 for c in stripped if c.isalpha())
+    if len(stripped) > 3 and alpha_count / len(stripped) < 0.4:
+        return True
+    # All "words" are single characters (e.g., "a b c d")
+    words = stripped.split()
+    if len(words) >= 3 and all(len(w) <= 1 for w in words):
+        return True
+    # Excessive character repetition (e.g., "aaaaaa", "uh uh uh uh")
+    if len(set(stripped.lower().replace(" ", ""))) <= 2 and len(stripped) > 4:
+        return True
+    return False
 
 
 def _is_unambiguous_request(text: str) -> bool:
@@ -695,6 +751,12 @@ async def _debounced_dispatch(query: str, bot_id: str) -> None:
     meeting_state["invoker_participant"] = None
     meeting_state["_pending_debounce_task"] = None
     meeting_state["_accumulated_query"] = ""
+    # Skip garbled queries early (before classification cost)
+    if _is_garbled_query(query):
+        logger.info("Garbled query detected in debounce, asking to repeat: %s", repr(query[:40]))
+        generation = meeting_state["output_generation"]
+        await _speak_guarded("Sorry, I didn't catch that. Could you say that again?", bot_id, generation, allow_stale=True)
+        return
     await handle_spoken_request(query, bot_id)
 
 
@@ -863,17 +925,20 @@ async def _execute_editor_task(task: VoiceTask) -> Optional[str]:
     try:
         meeting_state["pending_clarification"] = None
         _set_task_phase(task, "executing")
+        meeting_context = _build_meeting_context_for_edit()
         execution_request = task.execution_request or task.request
         if execution_request:
             answer = await session_agent.handle_prepared_query(
                 execution_request,
                 original_query=task.request,
+                meeting_context=meeting_context,
                 mutation_started_callback=lambda action: _mark_mutation_started(task, action),
             )
         else:
             answer = await session_agent.handle_voice_query(
                 task.request,
                 clarification_context=_format_pending_clarification(task),
+                meeting_context=meeting_context,
                 mutation_started_callback=lambda action: _mark_mutation_started(task, action),
             )
 
@@ -1321,6 +1386,13 @@ async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     # Intercept status/conversational queries — answer instantly, skip task queue
     if _is_status_query(spoken_query):
         await _handle_status_query(spoken_query, bot_id)
+        return
+
+    # Garbled query recovery (GARBLED-01)
+    if _is_garbled_query(spoken_query):
+        logger.info("Garbled query detected, asking to repeat: %s", repr(spoken_query[:40]))
+        generation = meeting_state["output_generation"]
+        await _speak_guarded("Sorry, I didn't catch that. Could you say that again?", bot_id, generation, allow_stale=True)
         return
 
     # Check for pending summary clarification (no wake word needed) — before intent classification
