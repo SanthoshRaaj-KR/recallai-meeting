@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 current_plan: 1
 status: Executing Phase 06
-stopped_at: "Completed 06-02-PLAN.md: Tavily web search and garbled query recovery"
-last_updated: "2026-04-14T09:51:39.911Z"
+stopped_at: "Completed 06-03-PLAN.md: fuzzy wake word aliases and confidence signaling"
+last_updated: "2026-04-14T09:52:40.872Z"
 progress:
   total_phases: 6
   completed_phases: 5
   total_plans: 15
-  completed_plans: 12
-  percent: 91
+  completed_plans: 13
+  percent: 87
 ---
 
 # Project State
@@ -21,7 +21,7 @@ progress:
 - **Active Milestone:** Milestone 1 — Jarvis Intelligence Enhancement
 - **Active Phase:** Phase 01 — Intelligent Question Classification and Conversational Response
 - **Current Plan:** 1
-- **Progress:** [█████████░] 91%
+- **Progress:** [█████████░] 87%
 
 ## Accumulated Context
 
@@ -61,6 +61,8 @@ progress:
 - [Phase 05]: MULTITURN-01: multiturn_reference param appended to system_prompt when conversation history exists in _handle_general_question
 - [Phase 06]: TAVILY-01: Tavily replaces DuckDuckGo — provides AI-synthesized answers; DuckDuckGo returns empty for specific queries
 - [Phase 06]: GARBLED-01: Heuristic-only garbled detection (no LLM) for zero-cost early exit before classification
+- [Phase 06]: WAKEALIAS-01: _WAKE_ALIASES replaces hardcoded 'jarvis' in _WAKE_PATTERN — phonetic variants jarvas/jervis/jarvus/jarves/jarvi/jarv plus prefixes hey/yo/ok/hi; JARVIS_WAKE_ALIASES env var for custom aliases
+- [Phase 06]: CONFIDENCE-01: Post-processing 'Based on what I found, ' prefix for force_web_search=True answers; JARVIS_CONFIDENCE_SIGNAL_ENABLED env var gates feature
 
 ### Performance Metrics
 
@@ -80,6 +82,7 @@ progress:
 | Phase 04 P02 | 5 min | 2 tasks | 2 files |
 | Phase 05 P01 | 10 min | 2 tasks | 2 files |
 | Phase 06 P02 | 6 min | 2 tasks | 2 files |
+| Phase 06 P03 | 2 min | 2 tasks | 1 files |
 
 ### Quick Tasks Completed
 
@@ -94,5 +97,5 @@ progress:
 
 ### Session
 
-- **Last session:** 2026-04-14T09:51:39.907Z
-- **Stopped at:** Completed 06-02-PLAN.md: Tavily web search and garbled query recovery
+- **Last session:** 2026-04-14T09:52:40.869Z
+- **Stopped at:** Completed 06-03-PLAN.md: fuzzy wake word aliases and confidence signaling
