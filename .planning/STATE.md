@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_plan: Not started
-status: Milestone complete
-stopped_at: "Completed 05-01-PLAN.md: speech rewriter, name-aware fillers, multi-turn referencing"
-last_updated: "2026-04-14T05:21:14.798Z"
+current_plan: 1
+status: Executing Phase 06
+stopped_at: "Completed 06-02-PLAN.md: Tavily web search and garbled query recovery"
+last_updated: "2026-04-14T09:51:39.911Z"
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 5
-  total_plans: 11
-  completed_plans: 11
+  total_plans: 15
+  completed_plans: 12
   percent: 91
 ---
 
@@ -20,7 +20,7 @@ progress:
 
 - **Active Milestone:** Milestone 1 — Jarvis Intelligence Enhancement
 - **Active Phase:** Phase 01 — Intelligent Question Classification and Conversational Response
-- **Current Plan:** Not started
+- **Current Plan:** 1
 - **Progress:** [█████████░] 91%
 
 ## Accumulated Context
@@ -30,6 +30,7 @@ progress:
 - Initial roadmap created for Milestone 1: Jarvis Intelligence Enhancement
 - Phase 1 added: Intelligent Question Classification and Conversational Response
 - Phase 2 added: Meeting transcript access with summarization and opinion generation
+- Phase 6 added: Pipeline intelligence and safety improvements (meeting context for Confluence edits, delete confirmation gate, action items extraction, participant speaker queries, confidence signaling, fuzzy wake word aliases, Tavily web search upgrade, garbled query recovery)
 - Phase 5 added: Human-likeness improvements: response length rewriter for verbal delivery, name-aware fillers using invoker_participant, micro-ack on wake detection, interruption recovery phrase, multi-turn referencing in prompts, conversational pacing after delivery
 
 ### Decisions Made
@@ -58,6 +59,8 @@ progress:
 - [Phase 05]: REWRITE-01: _rewrite_for_speech uses gpt-4o-mini (max_tokens=120, temperature=0.5) — condenses >80 char answers to 2-3 spoken sentences with elaboration offer
 - [Phase 05]: NAME-01: _get_clean_invoker_name rejects UUIDs/emails/single-chars/all-caps-acronyms — returns first token of invoker_participant
 - [Phase 05]: MULTITURN-01: multiturn_reference param appended to system_prompt when conversation history exists in _handle_general_question
+- [Phase 06]: TAVILY-01: Tavily replaces DuckDuckGo — provides AI-synthesized answers; DuckDuckGo returns empty for specific queries
+- [Phase 06]: GARBLED-01: Heuristic-only garbled detection (no LLM) for zero-cost early exit before classification
 
 ### Performance Metrics
 
@@ -76,6 +79,7 @@ progress:
 | Phase 04 P01 | 8 min | 2 tasks | 2 files |
 | Phase 04 P02 | 5 min | 2 tasks | 2 files |
 | Phase 05 P01 | 10 min | 2 tasks | 2 files |
+| Phase 06 P02 | 6 min | 2 tasks | 2 files |
 
 ### Quick Tasks Completed
 
@@ -90,5 +94,5 @@ progress:
 
 ### Session
 
-- **Last session:** 2026-04-14T05:03:35.656Z
-- **Stopped at:** Completed 05-01-PLAN.md: speech rewriter, name-aware fillers, multi-turn referencing
+- **Last session:** 2026-04-14T09:51:39.907Z
+- **Stopped at:** Completed 06-02-PLAN.md: Tavily web search and garbled query recovery
