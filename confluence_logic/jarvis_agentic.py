@@ -679,6 +679,13 @@ def _get_clean_invoker_name() -> str:
 async def _generate_contextual_gap_filler(query: str, invoker_name: str = "") -> str:
     """Generate a short, contextual acknowledgment sentence for the given user query.
     Runs in parallel with the actual pipeline so there is no extra delay."""
+    name_instruction = ""
+    if invoker_name:
+        name_instruction = (
+            f" The person asking is named {invoker_name}. "
+            f"Naturally include their name in your acknowledgment "
+            f"(e.g., 'Sure {invoker_name}, let me check that.' or 'On it, {invoker_name}.')."
+        )
     try:
         response = await asyncio.to_thread(
             lambda: get_openai_client().chat.completions.create(
@@ -693,12 +700,7 @@ async def _generate_contextual_gap_filler(query: str, invoker_name: str = "") ->
                             "Be specific to what they asked. Do NOT answer the question itself. "
                             "Examples: 'Sure, let me pull up the meeting summary.', "
                             "'On it, fetching that for you.', 'Let me check that right now.'"
-                        ) + (
-                            f" The person asking is named {invoker_name}. "
-                            f"Naturally include their name in your acknowledgment "
-                            f"(e.g., 'Sure {invoker_name}, let me check that.' or 'On it, {invoker_name}.')."
-                            if invoker_name else ""
-                        ),
+                        ) + name_instruction,
                     },
                     {"role": "user", "content": query},
                 ],
