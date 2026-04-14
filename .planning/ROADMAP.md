@@ -66,10 +66,10 @@ Plans:
 
 **Requirements:** REWRITE-01, NAME-01, MULTITURN-01, MICROACK-01, INTERRUPT-01, PACING-01
 
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
-- [ ] 05-01-PLAN.md — Response length rewriter + name-aware fillers + multi-turn referencing (LLM prompt changes)
+- [x] 05-01-PLAN.md — Response length rewriter + name-aware fillers + multi-turn referencing (LLM prompt changes)
 - [ ] 05-02-PLAN.md — Micro-ack on wake detection + interruption recovery + post-speech pacing hold (timing/audio)
 
 ---

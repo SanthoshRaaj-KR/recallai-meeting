@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_plan: Not started
-status: Milestone complete
-stopped_at: "Completed 04-02-PLAN.md: general question filler audio"
-last_updated: "2026-04-13T15:20:05.848Z"
+current_plan: 1
+status: Executing Phase 05
+stopped_at: "Completed 05-01-PLAN.md: speech rewriter, name-aware fillers, multi-turn referencing"
+last_updated: "2026-04-14T05:03:35.660Z"
 progress:
-  total_phases: 4
+  total_phases: 5
   completed_phases: 4
-  total_plans: 9
-  completed_plans: 9
-  percent: 100
+  total_plans: 11
+  completed_plans: 10
+  percent: 91
 ---
 
 # Project State
@@ -20,8 +20,8 @@ progress:
 
 - **Active Milestone:** Milestone 1 — Jarvis Intelligence Enhancement
 - **Active Phase:** Phase 01 — Intelligent Question Classification and Conversational Response
-- **Current Plan:** Not started
-- **Progress:** [██████████] 100%
+- **Current Plan:** 1
+- **Progress:** [█████████░] 91%
 
 ## Accumulated Context
 
@@ -30,6 +30,7 @@ progress:
 - Initial roadmap created for Milestone 1: Jarvis Intelligence Enhancement
 - Phase 1 added: Intelligent Question Classification and Conversational Response
 - Phase 2 added: Meeting transcript access with summarization and opinion generation
+- Phase 5 added: Human-likeness improvements: response length rewriter for verbal delivery, name-aware fillers using invoker_participant, micro-ack on wake detection, interruption recovery phrase, multi-turn referencing in prompts, conversational pacing after delivery
 
 ### Decisions Made
 
@@ -54,6 +55,9 @@ progress:
 - [Phase 04]: _debounced_dispatch uses asyncio.sleep + cancel-and-restart pattern with accumulated text growing across segments
 - [Phase 04]: Filler awaited directly (not via create_task) in _handle_general_question — no concurrent work to overlap, filler IS the gap
 - [Phase 04]: force_web_search parameter added to _handle_general_question enabling web_search intent routing
+- [Phase 05]: REWRITE-01: _rewrite_for_speech uses gpt-4o-mini (max_tokens=120, temperature=0.5) — condenses >80 char answers to 2-3 spoken sentences with elaboration offer
+- [Phase 05]: NAME-01: _get_clean_invoker_name rejects UUIDs/emails/single-chars/all-caps-acronyms — returns first token of invoker_participant
+- [Phase 05]: MULTITURN-01: multiturn_reference param appended to system_prompt when conversation history exists in _handle_general_question
 
 ### Performance Metrics
 
@@ -71,6 +75,7 @@ progress:
 | Phase 03 P02 | 8 min | 2 tasks | 5 files |
 | Phase 04 P01 | 8 min | 2 tasks | 2 files |
 | Phase 04 P02 | 5 min | 2 tasks | 2 files |
+| Phase 05 P01 | 10 min | 2 tasks | 2 files |
 
 ### Quick Tasks Completed
 
@@ -85,5 +90,5 @@ progress:
 
 ### Session
 
-- **Last session:** 2026-04-13T15:15:21.501Z
-- **Stopped at:** Completed 04-02-PLAN.md: general question filler audio
+- **Last session:** 2026-04-14T05:03:35.656Z
+- **Stopped at:** Completed 05-01-PLAN.md: speech rewriter, name-aware fillers, multi-turn referencing
