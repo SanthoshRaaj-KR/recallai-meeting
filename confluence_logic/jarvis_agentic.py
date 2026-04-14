@@ -1141,6 +1141,7 @@ async def _handle_general_question(query: str, bot_id: str, force_web_search: bo
 
         answer = await _rewrite_for_speech(answer)
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
         if answer:
             _remember_general_exchange(query, answer)
 
@@ -1187,6 +1188,7 @@ async def _handle_general_clarification_answer(answer_text: str, pending: dict) 
         if final_answer:
             final_answer = await _rewrite_for_speech(final_answer)
             await _speak_guarded(final_answer, bot_id, generation, allow_stale=True)
+            await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
             _remember_general_exchange(answer_text, final_answer)
             # If the follow-up answer is itself a clarifying question, re-arm no-wake-word mode
             if _looks_like_clarification_prompt(final_answer):
@@ -1229,6 +1231,7 @@ async def _handle_summary_clarification_answer(answer_text: str, pending: dict) 
         answer = await summary_task
         answer = await _rewrite_for_speech(answer)
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
         # If the summary response is itself a clarifying question, re-arm no-wake-word mode
         if _looks_like_clarification_prompt(answer):
             meeting_state["pending_summary_clarification"] = {
@@ -1275,6 +1278,7 @@ async def _handle_meeting_summary(query: str, bot_id: str) -> None:
                 "answer": answer,
             }
             await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+            await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
         except Exception as e:
             logger.error("Meeting summary handling failed: %s", e)
     else:
@@ -1308,6 +1312,7 @@ async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
             "answer": answer,
         }
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
     except Exception as e:
         logger.error("Meeting opinion handling failed: %s", e)
 
