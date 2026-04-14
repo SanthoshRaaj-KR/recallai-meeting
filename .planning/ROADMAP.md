@@ -58,4 +58,18 @@ Plans:
 - [x] 04-01-PLAN.md — Speaker isolation (invoker lock) + speech debounce (cancellable 1s window) in websocket_endpoint
 - [x] 04-02-PLAN.md — Contextual gap filler audio before LLM answer in _handle_general_question
 
+### Phase 5: Human-likeness improvements: response length rewriter for verbal delivery, name-aware fillers using invoker_participant, micro-ack on wake detection, interruption recovery phrase, multi-turn referencing in prompts, conversational pacing after delivery
+
+**Goal:** Make Jarvis sound and behave like a human colleague by condensing LLM answers for verbal delivery, addressing participants by name, emitting immediate micro-acknowledgments on wake detection, recovering gracefully from interruptions, referencing prior conversation naturally, and holding conversational pauses after speaking.
+
+**Depends on:** Phase 4
+
+**Requirements:** REWRITE-01, NAME-01, MULTITURN-01, MICROACK-01, INTERRUPT-01, PACING-01
+
+**Plans:** 2 plans
+
+Plans:
+- [ ] 05-01-PLAN.md — Response length rewriter + name-aware fillers + multi-turn referencing (LLM prompt changes)
+- [ ] 05-02-PLAN.md — Micro-ack on wake detection + interruption recovery + post-speech pacing hold (timing/audio)
+
 ---
