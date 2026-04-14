@@ -117,6 +117,8 @@ async def answer_general_question(
     question: str,
     conversation_history: str = "",
     graph_context: str = "",
+    speech_rewrite_enabled: bool = False,
+    multiturn_reference: bool = False,
 ) -> str:
     """
     Generate a conversational answer to a general (non-Confluence) question.
@@ -124,18 +126,33 @@ async def answer_general_question(
     Args:
         question: The user's question text.
         conversation_history: Recent conversation context (formatted as "User: ...\nAssistant: ...").
+        speech_rewrite_enabled: When True, relax the conciseness constraint since _rewrite_for_speech
+            will handle final condensing downstream (avoids double-condensing).
+        multiturn_reference: When True, append multi-turn referencing instructions.
 
     Returns:
         A natural language answer string suitable for TTS playback.
     """
+    conciseness_instruction = (
+        "Keep it reasonably concise. "
+        if speech_rewrite_enabled
+        else "Keep your answer concise — 1 to 3 sentences maximum. "
+    )
     system_prompt = (
         "You are Jarvis, a helpful and friendly AI assistant in a live meeting. "
         "Answer naturally and conversationally, as if speaking out loud in a meeting. "
-        "Keep your answer concise — 1 to 3 sentences maximum. "
-        "Do not use markdown, bullet points, or formatting. "
+        + conciseness_instruction
+        + "Do not use markdown, bullet points, or formatting. "
         "Do not mention Confluence or page editing unless the user asks about it. "
         "Speak in a warm, professional tone."
     )
+
+    if multiturn_reference:
+        system_prompt += (
+            "\n\nYou are in a multi-turn conversation. When your answer relates to something discussed earlier, "
+            "naturally reference it (e.g., 'As I mentioned...', 'Building on what we discussed...', "
+            "'Going back to your earlier question...'). Only do this when genuinely relevant — do not force it."
+        )
 
     if graph_context:
         system_prompt += (

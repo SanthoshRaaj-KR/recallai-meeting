@@ -63,6 +63,7 @@ JARVIS_BUSY_ACK = os.getenv("JARVIS_BUSY_ACK", "I'm already on it. Give me a mom
 JARVIS_SPEECH_HOLD_SECONDS = float(os.getenv("JARVIS_SPEECH_HOLD_SECONDS", "0.8"))
 JARVIS_GENERAL_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_GENERAL_CLARIFICATION_TIMEOUT", "15.0"))
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "1.0"))
+JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "true").strip().lower() == "true"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -658,7 +659,24 @@ async def _debounced_dispatch(query: str, bot_id: str) -> None:
     await handle_spoken_request(query, bot_id)
 
 
-async def _generate_contextual_gap_filler(query: str) -> str:
+def _get_clean_invoker_name() -> str:
+    """Return the invoker's first name if it looks like a real human name, else empty string."""
+    raw = meeting_state.get("invoker_participant") or ""
+    raw = raw.strip()
+    if not raw:
+        return ""
+    # Reject UUIDs, email-like strings, or single-char names
+    if "@" in raw or len(raw) < 2 or re.match(r'^[0-9a-f-]{8,}$', raw, re.IGNORECASE):
+        return ""
+    # Use first name only (split on space, take first token)
+    first = raw.split()[0]
+    # Reject if it looks like a number or all-caps acronym > 3 chars
+    if first.isdigit() or (first.isupper() and len(first) > 3):
+        return ""
+    return first
+
+
+async def _generate_contextual_gap_filler(query: str, invoker_name: str = "") -> str:
     """Generate a short, contextual acknowledgment sentence for the given user query.
     Runs in parallel with the actual pipeline so there is no extra delay."""
     try:
@@ -675,6 +693,11 @@ async def _generate_contextual_gap_filler(query: str) -> str:
                             "Be specific to what they asked. Do NOT answer the question itself. "
                             "Examples: 'Sure, let me pull up the meeting summary.', "
                             "'On it, fetching that for you.', 'Let me check that right now.'"
+                        ) + (
+                            f" The person asking is named {invoker_name}. "
+                            f"Naturally include their name in your acknowledgment "
+                            f"(e.g., 'Sure {invoker_name}, let me check that.' or 'On it, {invoker_name}.')."
+                            if invoker_name else ""
                         ),
                     },
                     {"role": "user", "content": query},
@@ -687,6 +710,47 @@ async def _generate_contextual_gap_filler(query: str) -> str:
         return text if text else random.choice(JARVIS_FILLER_PHRASES)
     except Exception:
         return random.choice(JARVIS_FILLER_PHRASES)
+
+
+async def _rewrite_for_speech(text: str) -> str:
+    """Condense a long LLM answer to 2-3 spoken sentences for verbal delivery.
+
+    Short answers (<= 80 chars) are returned unchanged.
+    On error, the original text is returned unchanged.
+    """
+    if not JARVIS_SPEECH_REWRITE_ENABLED or len(text) <= 80:
+        return text
+    try:
+        response = await asyncio.to_thread(
+            lambda: get_openai_client().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a speech editor. Rewrite the following text for spoken delivery in a meeting.\n"
+                            "Rules:\n"
+                            "- Maximum 2-3 sentences\n"
+                            "- End with a brief offer to elaborate (e.g., \"Want me to go into more detail?\" or \"I can elaborate if you'd like.\")\n"
+                            "- Keep the core answer intact — do not lose factual content\n"
+                            "- No markdown, no bullet points, no formatting\n"
+                            "- Speak naturally as if talking aloud"
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                max_tokens=120,
+                temperature=0.5,
+            )
+        )
+        result = (response.choices[0].message.content or "").strip()
+        if not result:
+            return text
+        logger.info("Speech rewrite: %d -> %d chars", len(text), len(result))
+        return result
+    except Exception as e:
+        logger.debug("Speech rewrite failed (non-fatal): %s", e)
+        return text
 
 
 async def _start_next_task_if_idle() -> None:
@@ -1018,13 +1082,23 @@ async def _handle_general_question(query: str, bot_id: str, force_web_search: bo
             graph_context = await graph_rag.query_context(query)
         except Exception:
             pass  # Non-fatal — graph is optional
+        # Determine multi-turn referencing
+        use_multiturn_ref = bool(conversation_history and conversation_history.strip() != "[none]")
         # Speak contextual filler immediately while LLM generates the answer (FILLER-02, D-10)
-        filler = await _generate_contextual_gap_filler(query)
+        filler = await _generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name())
         await _speak_guarded(filler, bot_id, generation, allow_stale=True)
-        answer = await answer_general_question(query, conversation_history, graph_context=graph_context, force_web_search=force_web_search)
+        answer = await answer_general_question(
+            query,
+            conversation_history,
+            graph_context=graph_context,
+            force_web_search=force_web_search,
+            speech_rewrite_enabled=JARVIS_SPEECH_REWRITE_ENABLED,
+            multiturn_reference=use_multiturn_ref,
+        )
         if not answer:
             return
 
+        answer = await _rewrite_for_speech(answer)
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
         if answer:
             _remember_general_exchange(query, answer)
@@ -1064,8 +1138,13 @@ async def _handle_general_clarification_answer(answer_text: str, pending: dict) 
             enriched_history = f"User: {original_query}\nAssistant: {pending['question']}\nUser: {answer_text}"
 
         # Re-ask with full context
-        final_answer = await answer_general_question(answer_text, enriched_history)
+        final_answer = await answer_general_question(
+            answer_text,
+            enriched_history,
+            speech_rewrite_enabled=JARVIS_SPEECH_REWRITE_ENABLED,
+        )
         if final_answer:
+            final_answer = await _rewrite_for_speech(final_answer)
             await _speak_guarded(final_answer, bot_id, generation, allow_stale=True)
             _remember_general_exchange(answer_text, final_answer)
             # If the follow-up answer is itself a clarifying question, re-arm no-wake-word mode
@@ -1100,13 +1179,14 @@ async def _handle_summary_clarification_answer(answer_text: str, pending: dict) 
     try:
         transcript_log = list(meeting_state["transcript_log"])
         # Fire gap filler and actual summary in parallel; gap filler plays first.
-        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(answer_text))
+        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(answer_text, invoker_name=_get_clean_invoker_name()))
         summary_task = asyncio.create_task(summarize_meeting(transcript_log, detail_level=detail_level))
 
         gap_filler = await gap_filler_task
         await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
 
         answer = await summary_task
+        answer = await _rewrite_for_speech(answer)
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
         # If the summary response is itself a clarifying question, re-arm no-wake-word mode
         if _looks_like_clarification_prompt(answer):
@@ -1140,13 +1220,14 @@ async def _handle_meeting_summary(query: str, bot_id: str) -> None:
         try:
             transcript_log = list(meeting_state["transcript_log"])
             # Fire gap filler and actual summary in parallel; gap filler plays first.
-            gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query))
+            gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name()))
             summary_task = asyncio.create_task(summarize_meeting(transcript_log, detail_level=detail_level))
 
             gap_filler = await gap_filler_task
             await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
 
             answer = await summary_task
+            answer = await _rewrite_for_speech(answer)
             meeting_state["last_jarvis_response"] = {
                 "intent": "meeting_summary",
                 "query": query,
@@ -1172,13 +1253,14 @@ async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
     try:
         transcript_log = list(meeting_state["transcript_log"])
         # Fire gap filler and actual opinion in parallel; gap filler plays first.
-        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query))
+        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name()))
         opinion_task = asyncio.create_task(generate_opinion(transcript_log, query=query))
 
         gap_filler = await gap_filler_task
         await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
 
         answer = await opinion_task
+        answer = await _rewrite_for_speech(answer)
         meeting_state["last_jarvis_response"] = {
             "intent": "meeting_opinion",
             "query": query,
