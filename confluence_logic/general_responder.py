@@ -62,7 +62,7 @@ def _quick_web_search(query: str) -> str:
     Requires TAVILY_API_KEY env var.
     """
     if not TAVILY_API_KEY:
-        logger.debug("Tavily API key not set, skipping web search")
+        logger.debug("tavily: API key not set, skipping web search")
         return ""
     try:
         resp = _requests.post(
@@ -77,7 +77,7 @@ def _quick_web_search(query: str) -> str:
             timeout=5,
         )
         if resp.status_code != 200:
-            logger.debug("Tavily search failed with status %d", resp.status_code)
+            logger.debug("tavily: search failed with status %d", resp.status_code)
             return ""
         data = resp.json()
         # Prefer the AI-generated answer if available
@@ -90,7 +90,7 @@ def _quick_web_search(query: str) -> str:
         combined = " ".join(snippets)
         return combined[:800] if combined else ""
     except Exception as e:
-        logger.debug("Tavily web search failed (non-fatal): %s", e)
+        logger.debug("tavily: web search failed (non-fatal): %s", e)
         return ""
 
 

@@ -192,6 +192,34 @@ def _build_meeting_context_for_edit() -> str:
     return context
 
 
+async def _confirm_delete_gate(task: VoiceTask) -> bool:
+    """Ask the user to confirm a delete operation. Returns True if confirmed, False if denied/timeout."""
+    if not JARVIS_DELETE_CONFIRM_ENABLED:
+        return True
+    generation = task.output_generation
+    await _speak_guarded("Are you sure you want to delete that? Say yes to confirm.", task.bot_id, generation)
+    task.answer_future = asyncio.get_running_loop().create_future()
+    meeting_state["pending_clarification"] = {
+        "task_id": task.task_id,
+        "clarification_context": "Delete confirmation pending",
+        "question": "Are you sure you want to delete that?",
+    }
+    try:
+        answer = await asyncio.wait_for(task.answer_future, timeout=JARVIS_DELETE_CONFIRM_TIMEOUT)
+    except asyncio.TimeoutError:
+        await _speak_guarded("No confirmation received. Cancelling the delete.", task.bot_id, generation)
+        meeting_state["pending_clarification"] = None
+        return False
+    finally:
+        task.answer_future = None
+    meeting_state["pending_clarification"] = None
+    normalized = (answer or "").strip().lower()
+    if normalized in ("yes", "yeah", "yep", "sure", "confirm", "do it", "go ahead", "yes please"):
+        return True
+    await _speak_guarded("Got it, I won't delete that.", task.bot_id, generation)
+    return False
+
+
 def _remember_general_exchange(question: str, answer: str) -> None:
     """Store a general Q&A exchange in meeting_state for context continuity."""
     # Build a new list to avoid mutating the shared reference mid-read
@@ -1011,6 +1039,12 @@ async def _run_voice_task(task: VoiceTask) -> None:
                 return
 
             task.intent = decision.intent or "edit"
+
+            # Delete confirmation gate (DELGATE-01)
+            if task.intent == "delete" and JARVIS_DELETE_CONFIRM_ENABLED:
+                confirmed = await _confirm_delete_gate(task)
+                if not confirmed or task.cancel_requested:
+                    return
 
             if decision.needs_clarification:
                 _set_task_phase(task, "clarifying")
