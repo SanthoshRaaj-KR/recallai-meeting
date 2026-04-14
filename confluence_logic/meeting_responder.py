@@ -28,6 +28,8 @@ MEETING_RESPONDER_MODEL = os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini").strip
 JARVIS_SUMMARY_MAX_TOKENS = int(os.getenv("JARVIS_SUMMARY_MAX_TOKENS", "400"))
 JARVIS_SUMMARY_BRIEF_MAX_TOKENS = int(os.getenv("JARVIS_SUMMARY_BRIEF_MAX_TOKENS", "150"))
 JARVIS_OPINION_MAX_TOKENS = int(os.getenv("JARVIS_OPINION_MAX_TOKENS", "200"))
+JARVIS_ACTION_ITEMS_MAX_TOKENS = int(os.getenv("JARVIS_ACTION_ITEMS_MAX_TOKENS", "300"))
+JARVIS_SPEAKER_QUERY_MAX_TOKENS = int(os.getenv("JARVIS_SPEAKER_QUERY_MAX_TOKENS", "250"))
 
 _EMPTY_TRANSCRIPT_FALLBACK = "I haven't heard anything in the meeting yet."
 
@@ -156,3 +158,102 @@ async def generate_opinion(transcript_log: List[Dict[str, Any]], query: str = ""
     except Exception as e:
         logger.error("Meeting opinion generator failed: %s", e)
         return "Sorry, I couldn't form an opinion right now."
+
+
+async def extract_action_items(transcript_log: List[Dict[str, Any]]) -> str:
+    """
+    Extract action items, decisions, and commitments from the meeting transcript.
+    Returns a spoken-language list of action items suitable for TTS.
+    """
+    if not transcript_log:
+        return "I haven't heard anything in the meeting yet, so there are no action items."
+
+    transcript_text = _format_transcript(transcript_log)
+    max_chars = 8000
+    if len(transcript_text) > max_chars:
+        transcript_text = transcript_text[-max_chars:]
+
+    system_prompt = (
+        "You are Jarvis, an AI assistant in a live meeting. "
+        "Extract all action items, decisions, and commitments from this transcript. "
+        "For each action item, note WHO is responsible (if mentioned) and WHAT they need to do. "
+        "Present them as a spoken list — say 'Here are the action items:' then list them naturally. "
+        "If no clear action items exist, say so honestly. "
+        "Speak naturally — no markdown, no bullet points, no formatting. "
+        "Number them verbally (e.g., 'First, ...', 'Second, ...', 'Third, ...')."
+    )
+
+    try:
+        response = await asyncio.to_thread(
+            lambda: _get_client().chat.completions.create(
+                model=MEETING_RESPONDER_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Meeting transcript:\n{transcript_text}"},
+                ],
+                max_tokens=JARVIS_ACTION_ITEMS_MAX_TOKENS,
+                temperature=0.3,
+            )
+        )
+        answer = (response.choices[0].message.content or "").strip()
+        return answer or "I couldn't identify any clear action items from the discussion so far."
+    except Exception as e:
+        logger.error("Action items extraction failed: %s", e)
+        return "Sorry, I had trouble extracting action items right now."
+
+
+async def summarize_speaker(transcript_log: List[Dict[str, Any]], speaker_name: str) -> str:
+    """
+    Summarize what a specific participant said in the meeting.
+    Uses fuzzy matching on speaker_name against transcript participant names.
+    """
+    if not transcript_log:
+        return "I haven't heard anything in the meeting yet."
+
+    # Fuzzy match speaker name against participants
+    speaker_lower = speaker_name.lower().strip()
+    participants = set(entry["participant"] for entry in transcript_log)
+    matched_participant = None
+    for p in participants:
+        if speaker_lower in p.lower() or p.lower() in speaker_lower:
+            matched_participant = p
+            break
+
+    if not matched_participant:
+        available = ", ".join(sorted(participants))
+        return f"I don't see anyone named {speaker_name} in the transcript. The participants I've heard are: {available}."
+
+    # Filter transcript to only this speaker's entries
+    speaker_entries = [e for e in transcript_log if e["participant"] == matched_participant]
+    if not speaker_entries:
+        return f"{matched_participant} hasn't said anything yet."
+
+    speaker_text = "\n".join(e["text"] for e in speaker_entries)
+    max_chars = 4000
+    if len(speaker_text) > max_chars:
+        speaker_text = speaker_text[-max_chars:]
+
+    system_prompt = (
+        f"You are Jarvis, an AI assistant in a live meeting. "
+        f"Summarize what {matched_participant} has said and contributed to the discussion. "
+        "Cover their key points, opinions, and any decisions or commitments they made. "
+        "Speak naturally — no markdown, no bullet points. Keep it concise (3-5 sentences max)."
+    )
+
+    try:
+        response = await asyncio.to_thread(
+            lambda: _get_client().chat.completions.create(
+                model=MEETING_RESPONDER_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"{matched_participant}'s contributions:\n{speaker_text}"},
+                ],
+                max_tokens=JARVIS_SPEAKER_QUERY_MAX_TOKENS,
+                temperature=0.4,
+            )
+        )
+        answer = (response.choices[0].message.content or "").strip()
+        return answer or f"I couldn't summarize {matched_participant}'s contributions right now."
+    except Exception as e:
+        logger.error("Speaker summarization failed: %s", e)
+        return f"Sorry, I had trouble summarizing what {matched_participant} said."
