@@ -64,6 +64,11 @@ JARVIS_SPEECH_HOLD_SECONDS = float(os.getenv("JARVIS_SPEECH_HOLD_SECONDS", "0.8"
 JARVIS_GENERAL_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_GENERAL_CLARIFICATION_TIMEOUT", "15.0"))
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "1.0"))
 JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "true").strip().lower() == "true"
+JARVIS_MICRO_ACK_ENABLED = os.getenv("JARVIS_MICRO_ACK_ENABLED", "true").strip().lower() == "true"
+JARVIS_MICRO_ACK_TEXT = os.getenv("JARVIS_MICRO_ACK_TEXT", "Mhm.").strip()
+JARVIS_YIELD_PHRASE = os.getenv("JARVIS_YIELD_PHRASE", "Of course \u2014 ").strip()
+JARVIS_INTERRUPT_RECOVERY_ENABLED = os.getenv("JARVIS_INTERRUPT_RECOVERY_ENABLED", "true").strip().lower() == "true"
+JARVIS_POST_SPEECH_PAUSE_SECONDS = float(os.getenv("JARVIS_POST_SPEECH_PAUSE_SECONDS", "0.7"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -645,6 +650,40 @@ async def _speak_filler(bot_id: str, generation: int) -> None:
     """Speak a random filler phrase before a slow operation."""
     phrase = random.choice(JARVIS_FILLER_PHRASES)
     await _speak_guarded(phrase, bot_id, generation, allow_stale=True)
+
+
+async def _emit_micro_ack(bot_id: str) -> None:
+    """Emit an ultra-short acknowledgment to fill dead air on wake detection.
+    Runs outside output_lock — this is a best-effort signal, not serialized speech."""
+    if not JARVIS_MICRO_ACK_ENABLED:
+        return
+    try:
+        # Try cached audio first (faster, no TTS call)
+        cached = get_random_ack_audio()
+        if cached:
+            _, ack_bytes = cached
+            # Use raw speak_cached_audio, not guarded — micro-ack doesn't need serialization
+            await asyncio.to_thread(speak_cached_audio, ack_bytes, bot_id)
+        else:
+            await asyncio.to_thread(speak, JARVIS_MICRO_ACK_TEXT, bot_id)
+        logger.debug("Micro-ack emitted for bot %s", bot_id)
+    except Exception as e:
+        logger.debug("Micro-ack failed (non-fatal): %s", e)
+
+
+async def _handle_interruption(bot_id: str) -> None:
+    """Cancel current TTS and emit a yield phrase when user speaks mid-speech."""
+    if not JARVIS_INTERRUPT_RECOVERY_ENABLED:
+        return
+    try:
+        # Bump generation to cancel any in-flight _speak_guarded waits
+        _next_output_generation()
+        # Speak yield phrase with new generation (allow_stale=True so it always plays)
+        gen = meeting_state["output_generation"]
+        await _speak_guarded(JARVIS_YIELD_PHRASE, bot_id, gen, allow_stale=True)
+        logger.info("Interruption recovery: yield phrase emitted")
+    except Exception as e:
+        logger.debug("Interruption recovery failed (non-fatal): %s", e)
 
 
 async def _debounced_dispatch(query: str, bot_id: str) -> None:
@@ -1525,6 +1564,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     accumulated = meeting_state.get("_accumulated_query", "")
                     accumulated = (accumulated + " " + query).strip() if accumulated else query
                     meeting_state["_accumulated_query"] = accumulated
+                    # MICROACK-01: immediate acknowledgment on first wake detection
+                    if not meeting_state.get("_pending_debounce_task") or meeting_state["_pending_debounce_task"].done():
+                        asyncio.create_task(_emit_micro_ack(bot_id))
+                    # INTERRUPT-01: if TTS is currently playing (output_lock held), emit yield phrase
+                    output_lock = _get_output_lock()
+                    if output_lock.locked():
+                        asyncio.create_task(_handle_interruption(bot_id))
                     # Cancel existing debounce task and schedule new one (D-05, D-06)
                     pending = meeting_state.get("_pending_debounce_task")
                     if pending and not pending.done():
@@ -1534,6 +1580,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif meeting_state["jarvis_listening"] and is_bare_wake_invocation(sentence):
                     # Lock invoker for bare wake so only their follow-up is accepted (D-01)
                     meeting_state["invoker_participant"] = participant
+                    asyncio.create_task(_emit_micro_ack(bot_id))
                     asyncio.create_task(_handle_bare_wake(bot_id))
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
