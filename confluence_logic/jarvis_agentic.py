@@ -210,7 +210,7 @@ def _build_meeting_context_for_edit() -> str:
     if not transcript_log:
         return ""
     recent = transcript_log[-10:]
-    lines = [f"{entry.get('speaker', 'Unknown')}: {entry.get('text', '')}" for entry in recent]
+    lines = [f"{entry.get('participant', 'Unknown')}: {entry.get('text', '')}" for entry in recent]
     context = "\n".join(lines)
     if len(context) > 2000:
         context = context[-2000:]
