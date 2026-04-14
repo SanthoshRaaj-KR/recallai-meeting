@@ -72,4 +72,20 @@ Plans:
 - [x] 05-01-PLAN.md — Response length rewriter + name-aware fillers + multi-turn referencing (LLM prompt changes)
 - [ ] 05-02-PLAN.md — Micro-ack on wake detection + interruption recovery + post-speech pacing hold (timing/audio)
 
+### Phase 6: Pipeline intelligence and safety improvements
+
+**Goal:** Harden the Jarvis pipeline with meeting-aware Confluence edits, delete safety gates, action items extraction, speaker queries, confidence signaling, fuzzy wake word matching, upgraded web search via Tavily, and garbled query recovery.
+
+**Requirements:** MEETCTX-01, DELGATE-01, TAVILY-01, GARBLED-01, WAKEALIAS-01, CONFIDENCE-01, ACTIONITEMS-01, SPEAKERQ-01
+
+**Depends on:** Phase 5
+
+**Plans:** 4 plans
+
+Plans:
+- [ ] 06-01-PLAN.md — Meeting context for Confluence edits + delete confirmation safety gate
+- [ ] 06-02-PLAN.md — Tavily web search upgrade + garbled query recovery
+- [ ] 06-03-PLAN.md — Fuzzy wake word aliases + confidence signaling
+- [ ] 06-04-PLAN.md — Action items extraction + participant speaker queries
+
 ---
