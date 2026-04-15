@@ -18,3 +18,5 @@ confluence_logic/assets/audio/*.mp3
 __pycache__/
 *.py[cod]
 *$py.class
+.planning/
+
