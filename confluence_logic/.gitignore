@@ -1,0 +1,7 @@
+.planning
+__pycache__
+agents/__pycache__
+connectors/__pycache__
+core/__pycache__
+db/__pycache__
+utils/__pycache__
