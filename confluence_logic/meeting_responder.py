@@ -3,6 +3,7 @@ Meeting transcript responder for Jarvis voice assistant.
 Provides LLM-powered summarization and opinion generation from meeting transcript logs.
 """
 import asyncio
+import difflib
 import logging
 import os
 from typing import Optional, List, Dict, Any
@@ -42,13 +43,13 @@ def _format_transcript(transcript_log: List[Dict[str, Any]]) -> str:
     )
 
 
-async def summarize_meeting(transcript_log: List[Dict[str, Any]], detail_level: str = "detailed") -> str:
+async def summarize_meeting(transcript_log: List[Dict[str, Any]], detail_level: str = "brief") -> str:
     """
     Generate a spoken-language summary of everything in the meeting transcript.
 
     Args:
         transcript_log: List of dicts with 'participant', 'text', 'timestamp' keys.
-        detail_level: "brief" for a short bullet-style summary, "detailed" (default) for full narrative.
+        detail_level: "brief" (default) for a spoken-list summary, "detailed" for full narrative.
 
     Returns:
         A TTS-friendly summary paragraph, or fallback string if transcript is empty.
@@ -65,8 +66,9 @@ async def summarize_meeting(transcript_log: List[Dict[str, Any]], detail_level: 
     if detail_level == "brief":
         system_prompt = (
             "You are Jarvis, an AI assistant attending a live meeting. "
-            "The user wants a brief summary. Give a short, punchy bullet-point style summary of the 3-5 most important points discussed. "
-            "No more than 5 bullet points. Speak naturally — say 'Here are the main points:' then list them conversationally."
+            "The user wants a brief summary. Give a short spoken-style summary of the 3-5 most important points discussed. "
+            "Say 'Here are the main points:' then present each point using 'First,' 'Second,' 'Third,' etc. "
+            "No markdown, no bullet points, no dashes, no formatting — speak in natural sentences only."
         )
         max_tokens = JARVIS_SUMMARY_BRIEF_MAX_TOKENS
     else:
@@ -127,8 +129,9 @@ async def generate_opinion(transcript_log: List[Dict[str, Any]], query: str = ""
         "You are Jarvis, an AI assistant attending a live meeting. "
         "The user wants your opinion or recommendation based on what was discussed. "
         "Deliver a confident, direct, first-person opinion. Pick a side — do not hedge with 'it depends' alone. "
+        "Do not use phrases like 'might', 'could potentially', or 'it depends' without committing to a clear recommendation. "
         "Always open with a short grounding phrase such as 'Based on what I heard,' or 'From the discussion so far,' or 'Given what the team discussed,' — then immediately give your opinion. "
-        "Reference specific points or trade-offs you heard to justify your view. "
+        "Reference specific points, numbers, costs, or percentages from the transcript to justify your view — quote exact figures when they are relevant. "
         "Speak naturally as if talking aloud in the meeting. "
         "No markdown, no bullet points, no formatting. 2 to 4 sentences maximum."
     )
@@ -210,14 +213,31 @@ async def summarize_speaker(transcript_log: List[Dict[str, Any]], speaker_name: 
     if not transcript_log:
         return "I haven't heard anything in the meeting yet."
 
-    # Fuzzy match speaker name against participants
+    # Fuzzy match speaker name against participants.
+    # Strategy: compare against full name AND each individual name token (handles
+    # first-name-only queries like "Anjali" matching "Anjali Singh").
     speaker_lower = speaker_name.lower().strip()
     participants = set(entry["participant"] for entry in transcript_log)
     matched_participant = None
+    best_ratio = 0.0
     for p in participants:
-        if speaker_lower in p.lower() or p.lower() in speaker_lower:
+        p_lower = p.lower()
+        # Full-name similarity
+        ratio = difflib.SequenceMatcher(None, speaker_lower, p_lower).ratio()
+        # Also check against each individual token (first name, last name)
+        for token in p_lower.split():
+            token_ratio = difflib.SequenceMatcher(None, speaker_lower, token).ratio()
+            if token_ratio > ratio:
+                ratio = token_ratio
+        if ratio >= 0.70 and ratio > best_ratio:
+            best_ratio = ratio
             matched_participant = p
-            break
+    # Substring containment fallback for exact first-name queries (e.g. "Anjali" in "Anjali Singh")
+    if not matched_participant:
+        for p in participants:
+            if speaker_lower in p.lower() or p.lower() in speaker_lower:
+                matched_participant = p
+                break
 
     if not matched_participant:
         available = ", ".join(sorted(participants))

@@ -175,6 +175,10 @@ async def answer_general_question(
         system_prompt += (
             "\n\nMeeting context (from the current conversation):\n"
             + graph_context
+            + "\n\nIf the question relates to something in the meeting context above, "
+            "explicitly tie your answer to what was discussed — for example, say "
+            "'which is exactly what the team is working on' or 'as was mentioned earlier in this meeting'. "
+            "Do not answer generically if the meeting context is directly relevant."
         )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -184,7 +188,8 @@ async def answer_general_question(
 
     # Selective web search for questions that need current data
     web_context = ""
-    if force_web_search or await _needs_web_search(question):
+    needs_live_data = force_web_search or await _needs_web_search(question)
+    if needs_live_data:
         logger.info("Web search triggered for: %s", question[:60])
         web_context = await asyncio.to_thread(_quick_web_search, question)
         if web_context:
@@ -194,7 +199,17 @@ async def answer_general_question(
     if web_context:
         user_content = (
             f"{question}\n\n"
-            f"[Live web search result — use this for accuracy]:\n{web_context}"
+            f"[Live web search result — use this if it clearly matches the question; "
+            f"if the results seem to be about a different entity or topic, note that openly]:\n{web_context}"
+        )
+    elif needs_live_data:
+        # Web search was warranted but returned nothing (e.g. no API key).
+        # Inject a hedge to prevent the LLM from hallucinating stale/invented live data.
+        user_content = (
+            f"{question}\n\n"
+            f"[Note: a live web search was attempted but no results are available. "
+            f"Do NOT invent or guess current scores, prices, or live data. "
+            f"If you cannot answer without live data, say so clearly and suggest where the user can check.]"
         )
 
     messages.append({"role": "user", "content": user_content})

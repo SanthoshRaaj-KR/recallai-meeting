@@ -27,13 +27,15 @@ from typing import Deque, Optional
 import requests
 import uvicorn
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from gtts import gTTS
 from openai import OpenAI
 
 from .agents.editor_agent import EditorAgent
 from .classifier import classify_intent
-from .audio_cache import get_random_ack_audio
+from .audio_cache import get_random_ack_audio, get_random_filler_audio
 from .general_responder import answer_general_question
 from .meeting_responder import summarize_meeting, generate_opinion, extract_action_items, summarize_speaker
 from confluence_logic import graph_rag
@@ -55,15 +57,16 @@ RECALL_TRANSCRIPT_PROVIDER = os.getenv("RECALL_TRANSCRIPT_PROVIDER", "recallai_s
 ASSEMBLY_API = (os.getenv("ASSEMBLY_API") or "").strip()
 
 JARVIS_TTS_PROVIDER = os.getenv("JARVIS_TTS_PROVIDER", "openai").strip().lower()
-JARVIS_TTS_MODEL = os.getenv("JARVIS_TTS_MODEL", "gpt-4o-mini-tts").strip()
+JARVIS_TTS_MODEL = os.getenv("JARVIS_TTS_MODEL", "tts-1").strip()
 JARVIS_TTS_VOICE = os.getenv("JARVIS_TTS_VOICE", "echo").strip()
 JARVIS_TTS_SPEED = float(os.getenv("JARVIS_TTS_SPEED", "1.0"))
 JARVIS_WAKE_ACK = os.getenv("JARVIS_WAKE_ACK", "Yes?").strip()
 JARVIS_BUSY_ACK = os.getenv("JARVIS_BUSY_ACK", "I'm already on it. Give me a moment.").strip()
 JARVIS_SPEECH_HOLD_SECONDS = float(os.getenv("JARVIS_SPEECH_HOLD_SECONDS", "0.8"))
 JARVIS_GENERAL_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_GENERAL_CLARIFICATION_TIMEOUT", "15.0"))
+JARVIS_LISTENING_TIMEOUT = float(os.getenv("JARVIS_LISTENING_TIMEOUT", "10.0"))
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "1.0"))
-JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "true").strip().lower() == "true"
+JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "false").strip().lower() == "true"
 JARVIS_MICRO_ACK_ENABLED = os.getenv("JARVIS_MICRO_ACK_ENABLED", "true").strip().lower() == "true"
 JARVIS_MICRO_ACK_TEXT = os.getenv("JARVIS_MICRO_ACK_TEXT", "Mhm.").strip()
 JARVIS_YIELD_PHRASE = os.getenv("JARVIS_YIELD_PHRASE", "Of course \u2014 ").strip()
@@ -77,7 +80,24 @@ JARVIS_CONFIDENCE_SIGNAL_ENABLED = os.getenv("JARVIS_CONFIDENCE_SIGNAL_ENABLED",
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if MEETING_URL:
+        bot_id = create_bot(MEETING_URL)
+        if bot_id:
+            meeting_state["bot_id"] = bot_id
+            meeting_state["is_active"] = True
+            with open("bot_id.txt", "w") as f:
+                f.write(bot_id)
+            logger.info("Bot joined meeting: %s", bot_id)
+        else:
+            logger.error("Failed to create bot on startup")
+    else:
+        logger.warning("MEETING_URL not set — bot will not join a meeting automatically")
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 session_agent = EditorAgent(model=JARVIS_AGENT_MODEL)
 logger.info("Jarvis meeting agent using model: %s", JARVIS_AGENT_MODEL)
 logger.info("Jarvis transcript provider: %s", RECALL_TRANSCRIPT_PROVIDER)
@@ -106,10 +126,26 @@ _INSTANT_ACKS = [
 ]
 
 JARVIS_FILLER_PHRASES = [
-    "Sure! Give me a sec.",
-    "On it!",
-    "Just a moment.",
-    "Let me check that for you.",
+    "Sure, let me retrieve that information for you now.",
+    "Of course — pulling that together right away.",
+    "Certainly, let me look into that for you.",
+    "Let me bring up the relevant details — one moment.",
+    "Understood — accessing that right away.",
+    "Give me just a moment to work through this.",
+    "Allow me a brief moment — I am on it.",
+    "Bear with me for just a second while I process that.",
+    "One moment — let me work through the details.",
+    "Let me gather what you need — this will be brief.",
+    "Let me review the discussion and come right back.",
+    "I will scan through the conversation — just a moment.",
+    "Let me go through the relevant context for you.",
+    "Reviewing that now — I will be with you shortly.",
+    "Noted — let me take care of that for you now.",
+    "Right, let me get to that immediately.",
+    "I will have that ready for you in just a moment.",
+    "Sure — let me circle back on this right away.",
+    "Let me verify that and report back shortly.",
+    "I am checking on that now — please hold a moment.",
 ]
 
 
@@ -139,6 +175,7 @@ meeting_state = {
     "transcript_log": [],
     "is_active": False,
     "jarvis_listening": False,
+    "jarvis_listening_at": 0.0,
     "current_task": None,
     "pending_requests": deque(),
     "pending_clarification": None,
@@ -546,22 +583,29 @@ def synthesize_speech(text: str) -> bytes:
         gTTS(text, lang=LANGUAGE_CODE).write_to_fp(buffer)
         return buffer.getvalue()
 
-    response = get_openai_client().audio.speech.create(
+    if JARVIS_TTS_PROVIDER == "edge_tts":
+        try:
+            import edge_tts as _edge_tts
+            voice = JARVIS_TTS_VOICE if JARVIS_TTS_VOICE else "en-US-GuyNeural"
+            communicate = _edge_tts.Communicate(text, voice)
+            chunks = []
+            async def _collect():
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        chunks.append(chunk["data"])
+            asyncio.run(_collect())
+            return b"".join(chunks)
+        except ImportError:
+            logger.warning("edge_tts not installed, falling back to OpenAI TTS. Run: pip install edge-tts")
+
+    with get_openai_client().audio.speech.with_streaming_response.create(
         model=JARVIS_TTS_MODEL,
         voice=JARVIS_TTS_VOICE,
         input=text,
         response_format="mp3",
         speed=JARVIS_TTS_SPEED,
-    )
-
-    if hasattr(response, "read"):
+    ) as response:
         return response.read()
-    if hasattr(response, "content"):
-        return response.content
-    if hasattr(response, "iter_bytes"):
-        return b"".join(response.iter_bytes())
-
-    raise TypeError("Unexpected OpenAI TTS response type.")
 
 
 def speak(text: str, bot_id: str) -> bool:
@@ -731,7 +775,20 @@ def _estimate_speech_duration(text: str) -> float:
     return max(0.5, words / 2.5)
 
 
-async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: bool = False) -> bool:
+def _split_into_sentences(text: str) -> list:
+    """Split text into sentences for pipelined TTS delivery."""
+    parts = re.split(r'(?<=[.!?])\s+', (text or "").strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: bool = False,
+                         _preloaded_first: Optional[bytes] = None) -> bool:
+    """Speak text with sentence-level pipelined TTS: synthesizes the next sentence while
+    the current one is playing, reducing perceived latency.
+
+    _preloaded_first: caller-supplied audio bytes for sentences[0], skipping TTS synthesis
+    for the first sentence (eliminates dead-time when pre-synthesis was started earlier).
+    """
     output_lock = _get_output_lock()
     async with output_lock:
         if not allow_stale and generation != meeting_state["output_generation"]:
@@ -743,22 +800,74 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
             await asyncio.sleep(min(remaining, 0.2))
             if not allow_stale and generation != meeting_state["output_generation"]:
                 return False
-        ok = await asyncio.to_thread(speak, text, bot_id)
-        if ok:
-            duration = _estimate_speech_duration(text)
+
+        sentences = _split_into_sentences(text)
+        if not sentences:
+            return False
+
+        # Use pre-loaded audio if caller already synthesized sentence[0], else synthesize now
+        audio = _preloaded_first if _preloaded_first is not None else await asyncio.to_thread(synthesize_speech, sentences[0])
+
+        for i, sentence_text in enumerate(sentences):
+            if not allow_stale and generation != meeting_state["output_generation"]:
+                return False
+
+            # Kick off synthesis of the next sentence in parallel with playback
+            next_task = None
+            if i + 1 < len(sentences):
+                next_task = asyncio.create_task(
+                    asyncio.to_thread(synthesize_speech, sentences[i + 1])
+                )
+
+            # Play current sentence
+            ok = await asyncio.to_thread(speak_cached_audio, audio, bot_id)
+            if not ok:
+                if next_task:
+                    next_task.cancel()
+                return False
+
+            # Use word-count estimate — byte-size estimate over-estimates at OpenAI TTS bitrates
+            duration = _estimate_speech_duration(sentence_text)
             elapsed = 0.0
             while elapsed < duration:
                 await asyncio.sleep(0.1)
                 elapsed += 0.1
                 if generation != meeting_state["output_generation"]:
-                    break
-        return ok
+                    if next_task:
+                        next_task.cancel()
+                    return True
+
+            # Retrieve pre-synthesized next sentence (should be ready by now)
+            if next_task:
+                audio = await next_task
+
+        return True
 
 
 async def _speak_filler(bot_id: str, generation: int) -> None:
     """Speak a random filler phrase before a slow operation."""
     phrase = random.choice(JARVIS_FILLER_PHRASES)
     await _speak_guarded(phrase, bot_id, generation, allow_stale=True)
+
+
+async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
+    """Bridge the gap between wake and answer with a pre-generated filler audio clip.
+
+    Fast path: plays a random pre-generated MP3 from assets/audio/gap_filler_*.mp3
+    (zero TTS latency — audio is already in memory).
+
+    Fallback: calls the LLM to generate a contextual phrase, then speaks it via TTS.
+    This fallback fires only when the audio cache hasn't been populated yet (e.g. the
+    generate_wav_assets script hasn't been run).
+    """
+    cached = get_random_filler_audio()
+    if cached:
+        _, audio_bytes = cached
+        await _speak_cached_guarded(audio_bytes, bot_id, generation)
+        return
+    # Cache miss — fall back to LLM-generated contextual filler
+    filler = await _generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name())
+    await _speak_guarded(filler, bot_id, generation, allow_stale=True)
 
 
 async def _emit_micro_ack(bot_id: str) -> None:
@@ -954,9 +1063,12 @@ async def _handle_bare_wake(bot_id: str) -> None:
         generation = meeting_state["output_generation"]
 
     if current is not None:
-        # Already busy — let the user know
+        # Already busy — let the user know and clear listening state
+        meeting_state["jarvis_listening"] = False
         await _speak_guarded(JARVIS_BUSY_ACK, bot_id, generation)
-    # else: silently start listening — no "Yes?" acknowledgment
+    else:
+        # Speak "Yes" to signal readiness — user can now ask without repeating the wake word
+        await _speak_guarded(JARVIS_WAKE_ACK, bot_id, generation)
 
 
 def _should_speak_final_answer(task: VoiceTask, answer: str) -> bool:
@@ -1253,18 +1365,21 @@ async def _handle_general_question(query: str, bot_id: str, force_web_search: bo
             pass  # Non-fatal — graph is optional
         # Determine multi-turn referencing
         use_multiturn_ref = bool(conversation_history and conversation_history.strip() != "[none]")
-        # Speak contextual filler immediately while LLM generates the answer (FILLER-02, D-10)
-        filler = await _generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name())
-        await _speak_guarded(filler, bot_id, generation, allow_stale=True)
-        answer = await answer_general_question(
+        # Run LLM and gap filler concurrently
+        answer_task = asyncio.create_task(answer_general_question(
             query,
             conversation_history,
             graph_context=graph_context,
             force_web_search=force_web_search,
             speech_rewrite_enabled=JARVIS_SPEECH_REWRITE_ENABLED,
             multiturn_reference=use_multiturn_ref,
-        )
+        ))
+        gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
+
+        # When LLM answer arrives, immediately pre-synthesize sentence[0] while gap filler still plays
+        answer = await answer_task
         if not answer:
+            gap_filler_task.cancel()
             return
 
         answer = await _rewrite_for_speech(answer)
@@ -1272,7 +1387,17 @@ async def _handle_general_question(query: str, bot_id: str, force_web_search: bo
         if JARVIS_CONFIDENCE_SIGNAL_ENABLED and force_web_search and answer:
             if not answer.lower().startswith(("according to", "based on", "from what i found")):
                 answer = "Based on what I found, " + answer[0].lower() + answer[1:]
-        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+
+        # Pre-synthesize first sentence in parallel with remaining gap filler playback
+        first_sentences = _split_into_sentences(answer)
+        presyn_task = (
+            asyncio.create_task(asyncio.to_thread(synthesize_speech, first_sentences[0]))
+            if first_sentences else None
+        )
+        await gap_filler_task  # ensure gap filler finishes before answer starts
+        first_audio = await presyn_task if presyn_task else None
+
+        await _speak_guarded(answer, bot_id, generation, allow_stale=True, _preloaded_first=first_audio)
         await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
         if answer:
             _remember_general_exchange(query, answer)
@@ -1353,13 +1478,9 @@ async def _handle_summary_clarification_answer(answer_text: str, pending: dict) 
 
     try:
         transcript_log = list(meeting_state["transcript_log"])
-        # Fire gap filler and actual summary in parallel; gap filler plays first.
-        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(answer_text, invoker_name=_get_clean_invoker_name()))
+        # Start answer task first so it runs while the filler plays.
         summary_task = asyncio.create_task(summarize_meeting(transcript_log, detail_level=detail_level))
-
-        gap_filler = await gap_filler_task
-        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
-
+        await _speak_gap_filler(answer_text, bot_id, generation)
         answer = await summary_task
         answer = await _rewrite_for_speech(answer)
         await _speak_guarded(answer, bot_id, generation, allow_stale=True)
@@ -1395,13 +1516,8 @@ async def _handle_meeting_summary(query: str, bot_id: str) -> None:
         # Type already known — generate directly
         try:
             transcript_log = list(meeting_state["transcript_log"])
-            # Fire gap filler and actual summary in parallel; gap filler plays first.
-            gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name()))
             summary_task = asyncio.create_task(summarize_meeting(transcript_log, detail_level=detail_level))
-
-            gap_filler = await gap_filler_task
-            await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
-
+            await _speak_gap_filler(query, bot_id, generation)
             answer = await summary_task
             answer = await _rewrite_for_speech(answer)
             meeting_state["last_jarvis_response"] = {
@@ -1414,14 +1530,23 @@ async def _handle_meeting_summary(query: str, bot_id: str) -> None:
         except Exception as e:
             logger.error("Meeting summary handling failed: %s", e)
     else:
-        # Ask clarifying question and enter listen state
-        await _speak_guarded("Sure!", bot_id, generation, allow_stale=True)
-        await _speak_guarded("Do you want a detailed or a brief summary?", bot_id, generation, allow_stale=True)
-        meeting_state["pending_summary_clarification"] = {
-            "bot_id": bot_id,
-            "expires_at": time.time() + JARVIS_SUMMARY_CLARIFICATION_TIMEOUT,
-        }
-        logger.info("Summary clarification mode activated (timeout: %.0fs)", JARVIS_SUMMARY_CLARIFICATION_TIMEOUT)
+        # Default to brief summary; no clarifying question needed
+        detail_level = "brief"
+        try:
+            transcript_log = list(meeting_state["transcript_log"])
+            summary_task = asyncio.create_task(summarize_meeting(transcript_log, detail_level=detail_level))
+            await _speak_gap_filler(query, bot_id, generation)
+            answer = await summary_task
+            answer = await _rewrite_for_speech(answer)
+            meeting_state["last_jarvis_response"] = {
+                "intent": "meeting_summary",
+                "query": query,
+                "answer": answer,
+            }
+            await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+            await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
+        except Exception as e:
+            logger.error("Meeting summary handling failed: %s", e)
 
 
 async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
@@ -1429,13 +1554,8 @@ async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
     generation = meeting_state["output_generation"]
     try:
         transcript_log = list(meeting_state["transcript_log"])
-        # Fire gap filler and actual opinion in parallel; gap filler plays first.
-        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name()))
         opinion_task = asyncio.create_task(generate_opinion(transcript_log, query=query))
-
-        gap_filler = await gap_filler_task
-        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
-
+        await _speak_gap_filler(query, bot_id, generation)
         answer = await opinion_task
         answer = await _rewrite_for_speech(answer)
         meeting_state["last_jarvis_response"] = {
@@ -1449,8 +1569,25 @@ async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
         logger.error("Meeting opinion handling failed: %s", e)
 
 
+def _normalize_split_verbs(text: str) -> str:
+    """Collapse common STT word-split verbs before regex matching."""
+    _SPLIT_VERB_PATTERNS = [
+        (re.compile(r'\bcon\s+tribute\b', re.IGNORECASE), "contribute"),
+        (re.compile(r'\bmen\s+tion\b', re.IGNORECASE), "mention"),
+        (re.compile(r'\bsug\s+gest\b', re.IGNORECASE), "suggest"),
+        (re.compile(r'\bpre\s+sent\b', re.IGNORECASE), "present"),
+        (re.compile(r'\bdis\s+cuss\b', re.IGNORECASE), "discuss"),
+        (re.compile(r'\bex\s+plain\b', re.IGNORECASE), "explain"),
+        (re.compile(r'\bde\s+scribe\b', re.IGNORECASE), "describe"),
+    ]
+    for pattern, replacement in _SPLIT_VERB_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _extract_speaker_name(query: str) -> str:
     """Extract the speaker name from a speaker query like 'what did Alice say'."""
+    query = _normalize_split_verbs(query)
     patterns = [
         r"what (?:did|has|does) (\w+(?:\s+\w+)?) (?:say|said|mention|think|contribute|talk)",
         r"what (\w+(?:\s+\w+)?) (?:said|mentioned|talked|contributed)",
@@ -1472,10 +1609,8 @@ async def _handle_action_items(query: str, bot_id: str) -> None:
     generation = meeting_state["output_generation"]
     try:
         transcript_log = list(meeting_state["transcript_log"])
-        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name()))
         action_task = asyncio.create_task(extract_action_items(transcript_log))
-        gap_filler = await gap_filler_task
-        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
+        await _speak_gap_filler(query, bot_id, generation)
         answer = await action_task
         answer = await _rewrite_for_speech(answer)
         meeting_state["last_jarvis_response"] = {"intent": "action_items", "query": query, "answer": answer}
@@ -1495,10 +1630,8 @@ async def _handle_speaker_query(query: str, bot_id: str) -> None:
         if not speaker_name:
             await _speak_guarded("I'm not sure which participant you're asking about. Could you say their name again?", bot_id, generation, allow_stale=True)
             return
-        gap_filler_task = asyncio.create_task(_generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name()))
         speaker_task = asyncio.create_task(summarize_speaker(transcript_log, speaker_name))
-        gap_filler = await gap_filler_task
-        await _speak_guarded(gap_filler, bot_id, generation, allow_stale=True)
+        await _speak_gap_filler(query, bot_id, generation)
         answer = await speaker_task
         answer = await _rewrite_for_speech(answer)
         meeting_state["last_jarvis_response"] = {"intent": "speaker_query", "query": query, "answer": answer}
@@ -1676,6 +1809,7 @@ def process_transcript_event(sentence: str, timestamp: float) -> Optional[str]:
             meeting_state["jarvis_listening"] = False
             return query
         meeting_state["jarvis_listening"] = True
+        meeting_state["jarvis_listening_at"] = timestamp
         return None
 
     if meeting_state.get("pending_clarification"):
@@ -1706,6 +1840,7 @@ def process_transcript_event(sentence: str, timestamp: float) -> Optional[str]:
 
     if meeting_state["jarvis_listening"]:
         meeting_state["jarvis_listening"] = False
+        meeting_state["_query_from_listening"] = True
         return sentence or None
     return None
 
@@ -1729,7 +1864,11 @@ async def websocket_endpoint(websocket: WebSocket):
             if not sentence or BOT_NAME.lower() in participant.lower():
                 continue
 
-            meeting_state["last_user_speech_at"] = time.time()
+            # Only count speech from the active invoker toward the hold timer.
+            # Background speakers should not block Jarvis from answering.
+            invoker_at_arrival = meeting_state.get("invoker_participant")
+            if not invoker_at_arrival or participant == invoker_at_arrival:
+                meeting_state["last_user_speech_at"] = time.time()
 
             # Only dispatch commands on final segments — partial segments arrive mid-sentence
             if not data_block.get("is_final", True):
@@ -1778,7 +1917,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     accumulated = (accumulated + " " + query).strip() if accumulated else query
                     meeting_state["_accumulated_query"] = accumulated
                     # MICROACK-01: immediate acknowledgment on first wake detection
-                    if not meeting_state.get("_pending_debounce_task") or meeting_state["_pending_debounce_task"].done():
+                    # Skip if query came from listening mode — "Yes?" already served as ack
+                    _from_listening = meeting_state.pop("_query_from_listening", False)
+                    if not _from_listening and (not meeting_state.get("_pending_debounce_task") or meeting_state["_pending_debounce_task"].done()):
                         asyncio.create_task(_emit_micro_ack(bot_id))
                     # INTERRUPT-01: if TTS is currently playing (output_lock held), emit yield phrase
                     output_lock = _get_output_lock()
@@ -1793,7 +1934,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif meeting_state["jarvis_listening"] and is_bare_wake_invocation(sentence):
                     # Lock invoker for bare wake so only their follow-up is accepted (D-01)
                     meeting_state["invoker_participant"] = participant
-                    asyncio.create_task(_emit_micro_ack(bot_id))
                     asyncio.create_task(_handle_bare_wake(bot_id))
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")

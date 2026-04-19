@@ -62,6 +62,28 @@ def get_random_ack_audio() -> Optional[Tuple[str, bytes]]:
     return (key, _cache[key])
 
 
+def get_random_filler_audio() -> Optional[Tuple[str, bytes]]:
+    """
+    Return a random pre-generated gap filler audio clip (gap_filler_*.mp3).
+    These are longer phrases (8-14 words) designed to bridge processing time
+    while the LLM generates the actual answer.
+
+    Returns None if no gap filler files are cached — callers should fall back
+    to the LLM-generated contextual filler in that case.
+    Lazily loads the cache on first call.
+    """
+    global _cache_loaded
+    if not _cache_loaded:
+        load_audio_cache()
+
+    filler_keys = [k for k in _cache if k.startswith("gap_filler_")]
+    if not filler_keys:
+        return None
+
+    key = random.choice(filler_keys)
+    return (key, _cache[key])
+
+
 def get_cache_size() -> int:
     """Return the number of cached audio files."""
     if not _cache_loaded:

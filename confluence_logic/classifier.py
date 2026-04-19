@@ -104,12 +104,16 @@ def _fast_classify(text: str) -> Optional[str]:
     if words[0] in ("what", "list", "give") and any(word in _ACTION_ITEMS_TRIGGERS for word in words):
         return "action_items"
 
-    # Speaker query heuristic (regex-based — "what did X say")
-    if re.search(r"what (?:did|has|does) \w+ (?:say|said|mention|think|contribute)", normalized):
+    # Speaker query heuristic — handles split-verb STT artifacts like "con tribute"
+    _normalized_for_speaker = re.sub(r'\bcon\s+tribute\b', 'contribute', normalized)
+    if re.search(r"what (?:did|has|does) \w+ (?:say|said|mention|think|contribute|talk)", _normalized_for_speaker):
         return "speaker_query"
 
     # Meeting opinion heuristics (per D-03)
     if any(phrase in normalized for phrase in _OPINION_PHRASES):
+        return "meeting_opinion"
+    # "how should we handle/approach/deal/proceed" → meeting opinion, not generic general
+    if re.search(r"\bhow (?:should|do|can) (?:we|i) (?:handle|approach|deal with|proceed|address)\b", normalized):
         return "meeting_opinion"
     if words[0] in ("what", "how", "which") and any(word in _OPINION_TRIGGERS for word in words):
         return "meeting_opinion"
