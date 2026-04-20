@@ -664,8 +664,41 @@ def speak_cached_audio(audio_bytes: bytes, bot_id: str) -> bool:
 
 
 def _estimate_cached_duration(audio_bytes: bytes) -> float:
-    """Estimate MP3 playback duration from byte size (assumes ~32 kbps = 4000 bytes/sec, min 0.3s)."""
-    return max(0.3, len(audio_bytes) / 4000)
+    """Estimate MP3 playback duration by parsing the actual bitrate from the first frame header.
+
+    The pre-generated gap filler files are 224 kbps (28000 bytes/sec).
+    The old hard-coded formula assumed 32 kbps (4000 bytes/sec), causing a 7× overestimate
+    that held output_lock for ~15 s instead of ~2 s.
+    """
+    _BITRATES = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0]
+    _SAMPLERATES = [44100, 48000, 32000, 0]
+    data = audio_bytes
+    # Skip ID3v2 tag so we land on the first MP3 frame sync
+    offset = 0
+    if data[:3] == b"ID3" and len(data) >= 10:
+        sz = (
+            (data[6] & 0x7F) << 21
+            | (data[7] & 0x7F) << 14
+            | (data[8] & 0x7F) << 7
+            | (data[9] & 0x7F)
+        )
+        offset = 10 + sz
+    pos = offset
+    while pos + 4 < len(data):
+        b = data[pos : pos + 4]
+        if b[0] == 0xFF and (b[1] & 0xE0) == 0xE0:
+            layer = (b[1] >> 1) & 0x3        # 01 = MPEG Layer III (MP3)
+            bi = (b[2] >> 4) & 0xF
+            si = (b[2] >> 2) & 0x3
+            if layer == 1 and 0 < bi < 15 and si < 3:
+                bitrate = _BITRATES[bi] * 1000  # bits/sec
+                samplerate = _SAMPLERATES[si]
+                if bitrate > 0 and samplerate > 0:
+                    bytes_per_sec = bitrate / 8
+                    return max(0.3, (len(data) - offset) / bytes_per_sec)
+        pos += 1
+    # Fallback: assume 224 kbps (matches all current gap filler assets)
+    return max(0.3, len(audio_bytes) / 28000)
 
 
 async def _speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int) -> bool:
@@ -971,23 +1004,33 @@ async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
     await _speak_guarded(filler, bot_id, generation, allow_stale=True)
 
 
+_MICRO_ACK_MAX_SECONDS = 1.2  # cached clips longer than this are gap-fillers, not acks
+
+
 async def _emit_micro_ack(bot_id: str) -> None:
     """Emit an ultra-short acknowledgment to fill dead air on wake detection.
 
-    Respects the output_lock binary semaphore — if audio is already playing,
-    skip the ack rather than overlap with it.
+    Guards:
+    - Skips if the output_lock is already held (avoid overlap with a playing answer).
+    - Skips if the best cached clip is a long gap-filler phrase (>1.2 s); those are
+      reserved for handler gap-fill use only.  Without dedicated short ack files the
+      TTS micro-ack text is used as fallback so users don't hear two long fillers.
     """
     if not JARVIS_MICRO_ACK_ENABLED:
         return
     output_lock = _get_output_lock()
     if output_lock.locked():
-        # Another answer is currently playing — skip the ack to avoid overlap
         logger.debug("Micro-ack skipped — output_lock held")
         return
     try:
         cached = get_random_ack_audio()
         if cached:
             _, ack_bytes = cached
+            if _estimate_cached_duration(ack_bytes) > _MICRO_ACK_MAX_SECONDS:
+                # All cached files are long gap-fillers; the handler will play one shortly.
+                # Suppress the micro-ack so the user doesn't hear two filler phrases.
+                logger.debug("Micro-ack skipped — cached audio too long (gap-filler only cache)")
+                return
             await asyncio.to_thread(speak_cached_audio, ack_bytes, bot_id)
         else:
             await asyncio.to_thread(speak, JARVIS_MICRO_ACK_TEXT, bot_id)
