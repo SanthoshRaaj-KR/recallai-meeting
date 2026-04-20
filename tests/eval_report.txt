@@ -1,0 +1,288 @@
+==============================================================================================================
+  JARVIS COMPREHENSIVE PIPELINE EVALUATION REPORT
+==============================================================================================================
+  Transcript: 110 entries  |  5 speakers  |  ~32 minutes
+  Test cases: 21  (10 detailed, 11 vague)
+  Mode: QUALITY-ONLY (mocked TTS)
+
+┌─ [01] [DET] Can you give me a full summary of everything that was discussed in this meeting?
+│   Intent:   ✓ expected=meeting_summary    got=meeting_summary
+│   Latency:  LLM=10197ms  TTS(s0)=0ms  TTFW=10197ms
+│   Answer:   In today's meeting, the team discussed several key topics and priorities. First, there was a [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (33%)
+│   Expects:  Should cover Razorpay / payment race condition, dashboard redesign, churn model, [...]
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [02] [VAG] Catch me up
+│   Intent:   ✓ expected=meeting_summary    got=meeting_summary
+│   Latency:  LLM=6427ms  TTS(s0)=0ms  TTFW=6427ms
+│   Answer:   Here are the main points: First, the team discussed the need for audit logging, particularly [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Expects:  Should mention main topics: payment fix, dashboard, churn model, K8s, Q3 priorities
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [03] [VAG] Give me a brief summary
+│   Intent:   ✓ expected=meeting_summary    got=meeting_summary
+│   Latency:  LLM=3901ms  TTS(s0)=0ms  TTFW=3901ms
+│   Answer:   Here are the main points: First, the team discussed the need for audit logging, especially for [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Expects:  Short 3-5 point summary covering major themes
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [04] [VAG] What did we talk about so far?
+│   Intent:   ✓ expected=meeting_summary    got=meeting_summary
+│   Latency:  LLM=3970ms  TTS(s0)=0ms  TTFW=3970ms
+│   Answer:   Here are the main points: First, the team decided to include audit logging in Sprint 15, which [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Expects:  Should list key discussion themes
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [05] [DET] What are the action items and who owns each one?
+│   Intent:   ✓ expected=action_items       got=action_items
+│   Latency:  LLM=4113ms  TTS(s0)=0ms  TTFW=4113ms
+│   Answer:   Here are the action items: First, Rohan Gupta will run through who has access to production [...]
+│   Score:    [●●●] 3/3  — OK
+│   Expects:  Should list: Rohan payment dedup fix, Rohan access review, Deepa runbook, Vikram vendor [...]
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [06] [VAG] What do we need to do next?
+│   Intent:   ✓ expected=action_items       got=action_items
+│   Latency:  LLM=4350ms  TTS(s0)=0ms  TTFW=4350ms
+│   Answer:   Here are the action items: First, Rohan Gupta will run through who has access to production [...]
+│   Score:    [●●●] 3/3  — OK
+│   Expects:  Should mention Sprint 15 tasks, SOC 2 items, escalations
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [07] [VAG] List the todos from this meeting
+│   Intent:   ✓ expected=action_items       got=action_items
+│   Latency:  LLM=3438ms  TTS(s0)=0ms  TTFW=3438ms
+│   Answer:   Here are the action items: First, Rohan Gupta will run through who has access to production [...]
+│   Score:    [●●●] 3/3  — OK
+│   Expects:  Should list key action items from the meeting
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [08] [DET] What did Rohan say about the database migration?
+│   Intent:   ✓ expected=speaker_query      got=speaker_query
+│   Latency:  LLM=3919ms  TTS(s0)=0ms  TTFW=3919ms
+│   Answer:   Rohan Gupta provided several key updates and insights during the discussion. He identified and [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (20%)
+│   Expects:  Should mention dual-write strategy, 70 percent complete, two-week timeline, maintenance window
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [09] [VAG] What did Deepa say?
+│   Intent:   ✓ expected=speaker_query      got=speaker_query
+│   Latency:  LLM=4503ms  TTS(s0)=0ms  TTFW=4503ms
+│   Answer:   Deepa Krishnan joined the meeting late but quickly caught up on the discussion, particularly [...]
+│   Score:    [●●○] 2/3  — Partial keyword coverage (40%)
+│   Expects:  Should cover churn model (68% precision), recommendation engine, SOC 2 compliance gaps
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [10] [DET] What did Vikrum con tribute to the meeting?
+│   Intent:   ✓ expected=speaker_query      got=speaker_query
+│   Latency:  LLM=3935ms  TTS(s0)=0ms  TTFW=3935ms
+│   Answer:   Vikram Nair provided a detailed update on several infrastructure improvements, highlighting [...]
+│   Score:    [●●●] 3/3  — OK
+│   Expects:  Should match Vikram and cover search performance, K8s migration, Python 2 services, observability
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [11] [VAG] What did Sneha mention?
+│   Intent:   ✓ expected=speaker_query      got=speaker_query
+│   Latency:  LLM=5468ms  TTS(s0)=0ms  TTFW=5468ms
+│   Answer:   Sneha Rao mentioned that she would be a few minutes late to the meeting but highlighted the [...]
+│   Score:    [●●●] 3/3  — OK
+│   Expects:  Should mention dashboard redesign, funnel confusion, 15% engagement drop, A/B test plan
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [12] [DET] What do you think about deferring the mobile app to Q4? Is that the right call?
+│   Intent:   ✓ expected=meeting_opinion    got=meeting_opinion
+│   Latency:  LLM=3538ms  TTS(s0)=0ms  TTFW=3538ms
+│   Answer:   Given what the team discussed, deferring the mobile app to Q4 is absolutely the right call. [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (38%)
+│   Expects:  Should reference activation rate 48 percent, web experience first, mobile vs web tradeoff
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [13] [DET] Should we go with the hybrid recommendation approach?
+│   Intent:   ✓ expected=meeting_opinion    got=meeting_opinion
+│   Latency:  LLM=3944ms  TTS(s0)=0ms  TTFW=3944ms
+│   Answer:   From the discussion so far, I strongly recommend we adopt the hybrid recommendation approach. [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (12%)
+│   Expects:  Should reference co-occurrence for popular items vs vector for long-tail, 18 percent better hit rate
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [14] [VAG] What do you think about the sprint scope?
+│   Intent:   ✓ expected=meeting_opinion    got=meeting_opinion
+│   Latency:  LLM=3812ms  TTS(s0)=0ms  TTFW=3812ms
+│   Answer:   Based on what I heard, I believe the sprint scope is well-defined and strategically focused. [...]
+│   Score:    [●●●] 3/3  — OK
+│   Expects:  Should give opinion on whether Sprint 15 scope is realistic, referencing the discussion
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [15] [DET] How should we handle the Python 2 migration risk?
+│   Intent:   ✓ expected=meeting_opinion    got=meeting_opinion
+│   Latency:  LLM=3783ms  TTS(s0)=0ms  TTFW=3783ms
+│   Answer:   Given what the team discussed, I strongly recommend that we prioritize bringing in additional [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Expects:  Should reference 4000 lines manual review, Vikram's concern, suggest prioritization or [...]
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [16] [DET] What is horizontal pod autoscaling in Kubernetes and how does it work?
+│   Intent:   ✓ expected=general            got=general
+│   Latency:  LLM=5700ms  TTS(s0)=0ms  TTFW=5700ms
+│   Answer:   Horizontal pod autoscaling in Kubernetes automatically adjusts the number of pod replicas in a [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Expects:  Should explain HPA: monitors CPU/memory or custom metrics, scales pod replicas, no made-up details
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [17] [VAG] What is OpenTelemetry?
+│   Intent:   ✓ expected=general            got=general
+│   Latency:  LLM=4411ms  TTS(s0)=0ms  TTFW=4411ms
+│   Answer:   OpenTelemetry is an open-source framework that provides a set of tools and APIs for [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (14%)
+│   Expects:  Should explain distributed tracing / observability framework correctly
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [18] [VAG] What does P99 latency mean?
+│   Intent:   ✓ expected=general            got=general
+│   Latency:  LLM=4587ms  TTS(s0)=0ms  TTFW=4587ms
+│   Answer:   P99 latency refers to the 99th percentile of latency, meaning that 99% of the requests are [...]
+│   Score:    [●●○] 2/3  — Partial keyword coverage (40%)
+│   Expects:  Should explain 99th percentile latency correctly
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [19] [DET] What is SOC 2 Type 2 audit and why does it matter?
+│   Intent:   ✓ expected=general            got=general
+│   Latency:  LLM=4689ms  TTS(s0)=0ms  TTFW=4689ms
+│   Answer:   A SOC 2 Type 2 audit assesses an organization's systems and controls over a period of time, [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (25%)
+│   Expects:  Should explain SOC 2 Type 2 covers controls over time period, matters for enterprise trust / [...]
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [20] [DET] What's the difference between precision and recall in machine learning?
+│   Intent:   ✓ expected=general            got=general
+│   Latency:  LLM=4006ms  TTS(s0)=0ms  TTFW=4006ms
+│   Answer:   Precision measures the accuracy of the positive predictions made by a model, while recall [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (31%)
+│   Expects:  Should explain precision (correct positive / predicted positive) and recall (correct positive [...]
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+┌─ [21] [VAG] What is the current USD to INR exchange rate?
+│   Intent:   ✓ expected=general            got=general
+│   Latency:  LLM=5997ms  TTS(s0)=0ms  TTFW=5997ms
+│   Answer:   As of today, the exchange rate is approximately 93.16 Indian Rupees for 1 US dollar. For the [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Expects:  Should attempt web search or clearly state it cannot give live rate, no made-up number
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+==============================================================================================================
+  TOTAL SCORE: 48/63  (76%)
+  GRADE: MARGINAL ⚠
+==============================================================================================================
+
+  LATENCY BREAKDOWN (LLM call only)
+  Question                                                   Type Intent              LLM ms
+  --------------------------------------------------------------------------------------------
+  Can you give me a full summary of everything that was dis  det  meeting_summary      10197
+  Catch me up                                                vag  meeting_summary       6427
+  Give me a brief summary                                    vag  meeting_summary       3901
+  What did we talk about so far?                             vag  meeting_summary       3970
+  What are the action items and who owns each one?           det  action_items          4113
+  What do we need to do next?                                vag  action_items          4350
+  List the todos from this meeting                           vag  action_items          3438
+  What did Rohan say about the database migration?           det  speaker_query         3919
+  What did Deepa say?                                        vag  speaker_query         4503
+  What did Vikrum con tribute to the meeting?                det  speaker_query         3935
+  What did Sneha mention?                                    vag  speaker_query         5468
+  What do you think about deferring the mobile app to Q4? I  det  meeting_opinion       3538
+  Should we go with the hybrid recommendation approach?      det  meeting_opinion       3944
+  What do you think about the sprint scope?                  vag  meeting_opinion       3812
+  How should we handle the Python 2 migration risk?          det  meeting_opinion       3783
+  What is horizontal pod autoscaling in Kubernetes and how   det  general               5700
+  What is OpenTelemetry?                                     vag  general               4411
+  What does P99 latency mean?                                vag  general               4587
+  What is SOC 2 Type 2 audit and why does it matter?         det  general               4689
+  What's the difference between precision and recall in mac  det  general               4006
+  What is the current USD to INR exchange rate?              vag  general               5997
+  AVERAGE                                                                               4699
+  P95 (approx)                                                                          5997
+  MAX                                                                                  10197
+
+  SCORES BY INTENT
+    action_items         n=3  avg_score=3.0/3  avg_llm=3967ms
+    general              n=6  avg_score=2.0/3  avg_llm=4898ms
+    meeting_opinion      n=4  avg_score=2.2/3  avg_llm=3769ms
+    meeting_summary      n=4  avg_score=2.0/3  avg_llm=6124ms
+    speaker_query        n=4  avg_score=2.5/3  avg_llm=4456ms
+
+  SCORES BY QUESTION TYPE
+    detailed   n=10  avg_score=2.2/3
+    vague      n=11  avg_score=2.4/3
+
+==============================================================================================================
+  PIPELINE ANALYSIS & EXACT RECOMMENDATIONS
+==============================================================================================================
+
+  [CLASSIFICATION]
+  • All intents classified correctly. classifier.py fast-path is working well.
+
+  [ANSWER QUALITY]
+  • Moderate quality (avg 2.29/3). Focus on improving context injection in handlers — ensure transcript is
+    being passed fully, check JARVIS_SUMMARY_MAX_TOKENS / JARVIS_SPEAKER_QUERY_MAX_TOKENS.
+
+  [TTS LATENCY]
+  • CRITICAL — synthesize_speech() uses response.read() which blocks until the full audio is ready. Switch
+    to streaming byte iteration to reduce first-byte latency:     # In synthesize_speech(), replace
+    response.read() with:     chunks = []     for chunk in response.iter_bytes(chunk_size=1024):
+    chunks.append(chunk)         if not first_chunk_time:             first_chunk_time = time.perf_counter()
+    # TTFW is measurable here     return b''.join(chunks)     # Then in _speak_guarded, send first chunk to
+    bot as soon as it arrives.
+  • HIGH — The gap filler path already runs filler + LLM in parallel (good). But it waits for
+    gap_filler_task to FULLY finish before playing the pre-synthesized answer. Improvement: start playing
+    sentence[0] immediately when it's synthesized if the gap filler has already started (even if it hasn't
+    finished). This removes the 'wait for gap filler to end' dead time when LLM is fast.     Change in
+    _handle_general_question():     # Instead of: await gap_filler_task  # blocks until filler done     #
+    Use: asyncio.ensure_future(gap_filler_task)  # fire-and-forget, answer plays immediately     # NOTE:
+    only safe if the output_lock serialisation ensures no overlap.
+  • MEDIUM — Pre-synthesize all sentences in parallel (already done in _handle_general_question). But
+    meeting_responder handlers (summarize_meeting, extract_action_items, etc.) do NOT do this — they call
+    _speak_guarded with raw text, which synthesizes sentence-by-sentence just-in-time. Improvement: in
+    _handle_meeting_summary, _handle_action_items, _handle_speaker_query, _handle_meeting_opinion — pre-
+    synthesize all sentences in parallel while the gap filler plays, identical to the pattern in
+    _handle_general_question.     sentences = _split_into_sentences(answer)     syn_tasks =
+    [asyncio.create_task(asyncio.to_thread(synthesize_speech, s)) for s in sentences]     await
+    gap_filler_task     preloaded_all = list(await asyncio.gather(*syn_tasks))     await
+    _speak_guarded(answer, bot_id, generation, allow_stale=True, _preloaded_all=preloaded_all)
+  • MEDIUM — Use a faster TTS model or provider for filler phrases. Currently the gap filler uses a pre-
+    cached MP3 (fast) but falls back to OpenAI TTS (slow). Ensure generate_wav_assets.py is run and the
+    audio cache is populated (assets/audio/*.mp3 exist). Check get_random_filler_audio() and
+    get_random_ack_audio() — if they return None, the TTS call blocks for 300-800ms before Jarvis says
+    anything.
+  • LOW — Consider switching JARVIS_TTS_MODEL from 'tts-1' to 'tts-1' with response_format='pcm' or 'opus'.
+    PCM/Opus have lower overhead than MP3 encoding, reducing synthesis time by ~50ms. Recall.ai accepts
+    WAV/PCM directly: change 'kind' in speak() payload from 'mp3' to 'wav' and generate PCM audio.
+  • LOW — JARVIS_TTS_SPEED default is 1.0. Setting it to 1.1 or 1.15 shortens audio playback duration by
+    10-15%, reducing total speaking time without affecting quality significantly. Set JARVIS_TTS_SPEED=1.1
+    in .env to test.
+
+  [TTFW ANALYSIS]
+  • TTFW FORMULA: TTFW = max(gap_filler_duration, classifier_ms + LLM_ms) + TTS_sentence0_ms   • Micro-ack
+    (cached): ~0ms (fires immediately on wake word)   • Gap filler (cached MP3): ~800ms-1200ms typical
+    playback duration   • Classifier (fast-path): ~0ms; (LLM fallback): ~200-400ms   • LLM answer
+    generation: ~800ms-2500ms (gpt-4o-mini)   • TTS sentence[0] synthesis: ~300ms-700ms (tts-1)   CURRENT
+    BEST CASE (LLM slower than gap filler): ~1200ms TTFW   CURRENT WORST CASE (LLM faster than gap filler
+    but no pre-synthesis in meeting handlers): ~3200ms TTFW
+  • TARGET: <1500ms TTFW from question end to first spoken word. Achievable with:   1. Micro-ack fires
+    immediately (~0ms visible)   2. Gap filler plays from cache (~800ms audio)   3. LLM + TTS sentence[0]
+    overlap with gap filler (parallel)   4. Pre-synthesize remaining sentences during gap filler   5. Answer
+    starts immediately after gap filler ends (no dead air)
+
+  [ARCHITECTURE]
+  • 5 queries took >5s LLM time. These block the answer pipeline. Consider: (a) streaming the LLM response
+    and starting TTS on the first sentence as tokens arrive (streaming mode), or (b) lowering max_tokens for
+    the summary handlers when speech_rewrite_enabled=True since _rewrite_for_speech will condense anyway.
+  • MEETING HANDLERS: summarize_meeting(), extract_action_items(), generate_opinion(), summarize_speaker()
+    all run synchronously (asyncio.to_thread wrapping blocking OpenAI call). Improvement: use the OpenAI
+    streaming API for these too — stream tokens, buffer until sentence boundary detected ('. ' or '? ' or '!
+    '), synthesize each sentence immediately, play pipeline.
+  • GRAPH RAG: graph_rag.query_context() is called for general questions but exceptions are silently
+    swallowed. Add a timeout (asyncio.wait_for(..., timeout=0.5)) so a slow graph never delays the answer —
+    if it times out, proceed without graph context.

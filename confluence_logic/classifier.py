@@ -104,6 +104,13 @@ def _fast_classify(text: str) -> Optional[str]:
     if words[0] in ("what", "list", "give") and any(word in _ACTION_ITEMS_TRIGGERS for word in words):
         return "action_items"
 
+    # "What did we/everyone/the team talk about" — collective subject means meeting summary, not speaker
+    if re.search(r"\bwhat (?:did|have|has) (?:we|everyone|the team|you all|you guys)\b", normalized):
+        return "meeting_summary"
+    # "What did we talk about so far" / "what was discussed" etc.
+    if re.search(r"\bwhat (?:was|were|got|has been|have been) (?:discussed|talked|said|covered)\b", normalized):
+        return "meeting_summary"
+
     # Speaker query heuristic — handles split-verb STT artifacts like "con tribute"
     _normalized_for_speaker = re.sub(r'\bcon\s+tribute\b', 'contribute', normalized)
     if re.search(r"what (?:did|has|does) \w+ (?:say|said|mention|think|contribute|talk)", _normalized_for_speaker):

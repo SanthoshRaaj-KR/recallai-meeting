@@ -37,7 +37,11 @@ from .agents.editor_agent import EditorAgent
 from .classifier import classify_intent
 from .audio_cache import get_random_ack_audio, get_random_filler_audio
 from .general_responder import answer_general_question
-from .meeting_responder import summarize_meeting, generate_opinion, extract_action_items, summarize_speaker
+from .meeting_responder import (
+    summarize_meeting, generate_opinion, extract_action_items, summarize_speaker,
+    summarize_meeting_streaming, generate_opinion_streaming,
+    extract_action_items_streaming, summarize_speaker_streaming,
+)
 from confluence_logic import graph_rag
 
 load_dotenv()
@@ -56,7 +60,7 @@ JARVIS_AGENT_MODEL = os.getenv("JARVIS_AGENT_MODEL", "gpt-5-mini")
 RECALL_TRANSCRIPT_PROVIDER = os.getenv("RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming").strip()
 ASSEMBLY_API = (os.getenv("ASSEMBLY_API") or "").strip()
 
-JARVIS_TTS_PROVIDER = os.getenv("JARVIS_TTS_PROVIDER", "openai").strip().lower()
+JARVIS_TTS_PROVIDER = os.getenv("JARVIS_TTS_PROVIDER", "edge_tts").strip().lower()
 JARVIS_TTS_MODEL = os.getenv("JARVIS_TTS_MODEL", "tts-1").strip()
 JARVIS_TTS_VOICE = os.getenv("JARVIS_TTS_VOICE", "echo").strip()
 JARVIS_TTS_SPEED = float(os.getenv("JARVIS_TTS_SPEED", "1.0"))
@@ -586,7 +590,13 @@ def synthesize_speech(text: str) -> bytes:
     if JARVIS_TTS_PROVIDER == "edge_tts":
         try:
             import edge_tts as _edge_tts
-            voice = JARVIS_TTS_VOICE if JARVIS_TTS_VOICE else "en-US-GuyNeural"
+            # OpenAI-only voice names are invalid for edge_tts; use a good default instead
+            _OPENAI_ONLY_VOICES = {"echo", "alloy", "fable", "onyx", "nova", "shimmer"}
+            voice = (
+                JARVIS_TTS_VOICE
+                if JARVIS_TTS_VOICE and JARVIS_TTS_VOICE not in _OPENAI_ONLY_VOICES
+                else "en-US-GuyNeural"
+            )
             communicate = _edge_tts.Communicate(text, voice)
             chunks = []
             async def _collect():
@@ -782,12 +792,12 @@ def _split_into_sentences(text: str) -> list:
 
 
 async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: bool = False,
-                         _preloaded_first: Optional[bytes] = None) -> bool:
-    """Speak text with sentence-level pipelined TTS: synthesizes the next sentence while
-    the current one is playing, reducing perceived latency.
+                         _preloaded_all: Optional[list] = None) -> bool:
+    """Speak text with sentence-level pipelined TTS.
 
-    _preloaded_first: caller-supplied audio bytes for sentences[0], skipping TTS synthesis
-    for the first sentence (eliminates dead-time when pre-synthesis was started earlier).
+    _preloaded_all: list of pre-synthesized audio bytes for each sentence, in order.
+    When provided, skips all TTS synthesis (zero latency on first word).
+    When absent, synthesizes each sentence just-in-time with pipelining.
     """
     output_lock = _get_output_lock()
     async with output_lock:
@@ -805,19 +815,25 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
         if not sentences:
             return False
 
-        # Use pre-loaded audio if caller already synthesized sentence[0], else synthesize now
-        audio = _preloaded_first if _preloaded_first is not None else await asyncio.to_thread(synthesize_speech, sentences[0])
+        # Get first sentence audio — from preloaded cache or synthesize now
+        if _preloaded_all and len(_preloaded_all) > 0:
+            audio = _preloaded_all[0]
+        else:
+            audio = await asyncio.to_thread(synthesize_speech, sentences[0])
 
         for i, sentence_text in enumerate(sentences):
             if not allow_stale and generation != meeting_state["output_generation"]:
                 return False
 
-            # Kick off synthesis of the next sentence in parallel with playback
+            # Kick off synthesis of next sentence (only needed when not pre-loaded)
             next_task = None
             if i + 1 < len(sentences):
-                next_task = asyncio.create_task(
-                    asyncio.to_thread(synthesize_speech, sentences[i + 1])
-                )
+                if _preloaded_all and i + 1 < len(_preloaded_all):
+                    pass  # already available
+                else:
+                    next_task = asyncio.create_task(
+                        asyncio.to_thread(synthesize_speech, sentences[i + 1])
+                    )
 
             # Play current sentence
             ok = await asyncio.to_thread(speak_cached_audio, audio, bot_id)
@@ -826,7 +842,7 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
                     next_task.cancel()
                 return False
 
-            # Use word-count estimate — byte-size estimate over-estimates at OpenAI TTS bitrates
+            # Use word-count estimate — more accurate than byte-size at OpenAI TTS bitrates
             duration = _estimate_speech_duration(sentence_text)
             elapsed = 0.0
             while elapsed < duration:
@@ -837,9 +853,12 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
                         next_task.cancel()
                     return True
 
-            # Retrieve pre-synthesized next sentence (should be ready by now)
-            if next_task:
-                audio = await next_task
+            # Advance to next sentence audio
+            if i + 1 < len(sentences):
+                if _preloaded_all and i + 1 < len(_preloaded_all):
+                    audio = _preloaded_all[i + 1]
+                elif next_task:
+                    audio = await next_task
 
         return True
 
@@ -848,6 +867,88 @@ async def _speak_filler(bot_id: str, generation: int) -> None:
     """Speak a random filler phrase before a slow operation."""
     phrase = random.choice(JARVIS_FILLER_PHRASES)
     await _speak_guarded(phrase, bot_id, generation, allow_stale=True)
+
+
+async def _speak_streaming(
+    sentence_gen,
+    gap_filler_task: asyncio.Task,
+    bot_id: str,
+    generation: int,
+) -> Optional[str]:
+    """Play a streaming LLM response sentence-by-sentence under the output_lock.
+
+    Binary semaphore behaviour:
+    - output_lock is acquired once before the first word and held until the last word.
+    - While waiting for the next sentence to arrive from the LLM, the generation is
+      checked every 0.5 s so a new user query can interrupt within half a second.
+    - Returns the full answer text (joined sentences) or None if dropped.
+
+    The producer runs concurrently with the gap filler so sentence[0] is usually
+    synthesised and ready to play the moment the gap filler ends.
+    """
+    syn_queue: asyncio.Queue = asyncio.Queue()
+    full_sentences = []
+
+    async def _produce():
+        async for sentence in sentence_gen:
+            audio = await asyncio.to_thread(synthesize_speech, sentence)
+            await syn_queue.put((sentence, audio))
+        await syn_queue.put(None)
+
+    producer_task = asyncio.create_task(_produce())
+
+    # Wait for gap filler to end before acquiring the output lock
+    await gap_filler_task
+
+    output_lock = _get_output_lock()
+    async with output_lock:
+        if generation != meeting_state["output_generation"]:
+            producer_task.cancel()
+            return None
+
+        while True:
+            # Poll for the next sentence with a timeout so we can check generation
+            # even while the producer is still working.
+            if generation != meeting_state["output_generation"]:
+                producer_task.cancel()
+                return " ".join(full_sentences) or None
+
+            try:
+                item = await asyncio.wait_for(syn_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue  # re-check generation and try again
+
+            if item is None:
+                break  # stream exhausted
+
+            sentence_text, audio_bytes = item
+            full_sentences.append(sentence_text)
+
+            if generation != meeting_state["output_generation"]:
+                producer_task.cancel()
+                return " ".join(full_sentences) or None
+
+            ok = await asyncio.to_thread(speak_cached_audio, audio_bytes, bot_id)
+            if not ok:
+                producer_task.cancel()
+                return " ".join(full_sentences) or None
+
+            # Hold the lock (and block other audio) for the estimated playback duration
+            duration = _estimate_speech_duration(sentence_text)
+            elapsed = 0.0
+            while elapsed < duration:
+                await asyncio.sleep(0.1)
+                elapsed += 0.1
+                if generation != meeting_state["output_generation"]:
+                    producer_task.cancel()
+                    return " ".join(full_sentences) or None
+
+    await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
+    try:
+        await producer_task
+    except asyncio.CancelledError:
+        pass
+    return " ".join(full_sentences) or None
 
 
 async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
@@ -872,15 +973,21 @@ async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
 
 async def _emit_micro_ack(bot_id: str) -> None:
     """Emit an ultra-short acknowledgment to fill dead air on wake detection.
-    Runs outside output_lock — this is a best-effort signal, not serialized speech."""
+
+    Respects the output_lock binary semaphore — if audio is already playing,
+    skip the ack rather than overlap with it.
+    """
     if not JARVIS_MICRO_ACK_ENABLED:
         return
+    output_lock = _get_output_lock()
+    if output_lock.locked():
+        # Another answer is currently playing — skip the ack to avoid overlap
+        logger.debug("Micro-ack skipped — output_lock held")
+        return
     try:
-        # Try cached audio first (faster, no TTS call)
         cached = get_random_ack_audio()
         if cached:
             _, ack_bytes = cached
-            # Use raw speak_cached_audio, not guarded — micro-ack doesn't need serialization
             await asyncio.to_thread(speak_cached_audio, ack_bytes, bot_id)
         else:
             await asyncio.to_thread(speak, JARVIS_MICRO_ACK_TEXT, bot_id)
@@ -1388,16 +1495,16 @@ async def _handle_general_question(query: str, bot_id: str, force_web_search: bo
             if not answer.lower().startswith(("according to", "based on", "from what i found")):
                 answer = "Based on what I found, " + answer[0].lower() + answer[1:]
 
-        # Pre-synthesize first sentence in parallel with remaining gap filler playback
-        first_sentences = _split_into_sentences(answer)
-        presyn_task = (
-            asyncio.create_task(asyncio.to_thread(synthesize_speech, first_sentences[0]))
-            if first_sentences else None
-        )
+        # Pre-synthesize ALL sentences in parallel while gap filler plays
+        sentences = _split_into_sentences(answer)
+        syn_tasks = [
+            asyncio.create_task(asyncio.to_thread(synthesize_speech, s))
+            for s in sentences
+        ]
         await gap_filler_task  # ensure gap filler finishes before answer starts
-        first_audio = await presyn_task if presyn_task else None
+        preloaded_all = list(await asyncio.gather(*syn_tasks)) if syn_tasks else None
 
-        await _speak_guarded(answer, bot_id, generation, allow_stale=True, _preloaded_first=first_audio)
+        await _speak_guarded(answer, bot_id, generation, allow_stale=True, _preloaded_all=preloaded_all)
         await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
         if answer:
             _remember_general_exchange(query, answer)
@@ -1497,74 +1604,36 @@ async def _handle_summary_clarification_answer(answer_text: str, pending: dict) 
 
 
 async def _handle_meeting_summary(query: str, bot_id: str) -> None:
-    """Speak acknowledgment, optionally ask brief/detailed, then generate summary."""
+    """Stream the LLM summary sentence-by-sentence, playing under the output_lock."""
     generation = meeting_state["output_generation"]
     normalized_query = query.strip().lower()
 
-    # Detect detail level from original query
-    if any(w in normalized_query for w in ("brief", "short", "quick", "concise")):
-        detail_level = "brief"
-        specified = True
-    elif any(w in normalized_query for w in ("detailed", "full", "long", "complete", "thorough")):
+    if any(w in normalized_query for w in ("detailed", "full", "long", "complete", "thorough")):
         detail_level = "detailed"
-        specified = True
     else:
-        detail_level = None
-        specified = False
-
-    if specified:
-        # Type already known — generate directly
-        try:
-            transcript_log = list(meeting_state["transcript_log"])
-            summary_task = asyncio.create_task(summarize_meeting(transcript_log, detail_level=detail_level))
-            await _speak_gap_filler(query, bot_id, generation)
-            answer = await summary_task
-            answer = await _rewrite_for_speech(answer)
-            meeting_state["last_jarvis_response"] = {
-                "intent": "meeting_summary",
-                "query": query,
-                "answer": answer,
-            }
-            await _speak_guarded(answer, bot_id, generation, allow_stale=True)
-            await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
-        except Exception as e:
-            logger.error("Meeting summary handling failed: %s", e)
-    else:
-        # Default to brief summary; no clarifying question needed
         detail_level = "brief"
-        try:
-            transcript_log = list(meeting_state["transcript_log"])
-            summary_task = asyncio.create_task(summarize_meeting(transcript_log, detail_level=detail_level))
-            await _speak_gap_filler(query, bot_id, generation)
-            answer = await summary_task
-            answer = await _rewrite_for_speech(answer)
-            meeting_state["last_jarvis_response"] = {
-                "intent": "meeting_summary",
-                "query": query,
-                "answer": answer,
-            }
-            await _speak_guarded(answer, bot_id, generation, allow_stale=True)
-            await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
-        except Exception as e:
-            logger.error("Meeting summary handling failed: %s", e)
+
+    try:
+        transcript_log = list(meeting_state["transcript_log"])
+        sentence_gen = summarize_meeting_streaming(transcript_log, detail_level=detail_level)
+        gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
+        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation)
+        if answer:
+            meeting_state["last_jarvis_response"] = {"intent": "meeting_summary", "query": query, "answer": answer}
+    except Exception as e:
+        logger.error("Meeting summary handling failed: %s", e)
 
 
 async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
-    """Generate and speak a first-person opinion grounded in the meeting transcript."""
+    """Stream a first-person opinion grounded in the meeting transcript."""
     generation = meeting_state["output_generation"]
     try:
         transcript_log = list(meeting_state["transcript_log"])
-        opinion_task = asyncio.create_task(generate_opinion(transcript_log, query=query))
-        await _speak_gap_filler(query, bot_id, generation)
-        answer = await opinion_task
-        answer = await _rewrite_for_speech(answer)
-        meeting_state["last_jarvis_response"] = {
-            "intent": "meeting_opinion",
-            "query": query,
-            "answer": answer,
-        }
-        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
-        await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
+        sentence_gen = generate_opinion_streaming(transcript_log, query=query)
+        gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
+        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation)
+        if answer:
+            meeting_state["last_jarvis_response"] = {"intent": "meeting_opinion", "query": query, "answer": answer}
     except Exception as e:
         logger.error("Meeting opinion handling failed: %s", e)
 
@@ -1605,38 +1674,36 @@ def _extract_speaker_name(query: str) -> str:
 
 
 async def _handle_action_items(query: str, bot_id: str) -> None:
-    """Extract and speak action items from the meeting transcript."""
+    """Stream action items extracted from the meeting transcript."""
     generation = meeting_state["output_generation"]
     try:
         transcript_log = list(meeting_state["transcript_log"])
-        action_task = asyncio.create_task(extract_action_items(transcript_log))
-        await _speak_gap_filler(query, bot_id, generation)
-        answer = await action_task
-        answer = await _rewrite_for_speech(answer)
-        meeting_state["last_jarvis_response"] = {"intent": "action_items", "query": query, "answer": answer}
-        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
-        await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
+        sentence_gen = extract_action_items_streaming(transcript_log)
+        gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
+        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation)
+        if answer:
+            meeting_state["last_jarvis_response"] = {"intent": "action_items", "query": query, "answer": answer}
     except Exception as e:
         logger.error("Action items handling failed: %s", e)
 
 
 async def _handle_speaker_query(query: str, bot_id: str) -> None:
-    """Summarize what a specific speaker said in the meeting."""
+    """Stream a summary of what a specific speaker said in the meeting."""
     generation = meeting_state["output_generation"]
     try:
-        transcript_log = list(meeting_state["transcript_log"])
-        # Extract speaker name from query (best effort)
         speaker_name = _extract_speaker_name(query)
         if not speaker_name:
-            await _speak_guarded("I'm not sure which participant you're asking about. Could you say their name again?", bot_id, generation, allow_stale=True)
+            await _speak_guarded(
+                "I'm not sure which participant you're asking about. Could you say their name again?",
+                bot_id, generation, allow_stale=True,
+            )
             return
-        speaker_task = asyncio.create_task(summarize_speaker(transcript_log, speaker_name))
-        await _speak_gap_filler(query, bot_id, generation)
-        answer = await speaker_task
-        answer = await _rewrite_for_speech(answer)
-        meeting_state["last_jarvis_response"] = {"intent": "speaker_query", "query": query, "answer": answer}
-        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
-        await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
+        transcript_log = list(meeting_state["transcript_log"])
+        sentence_gen = summarize_speaker_streaming(transcript_log, speaker_name)
+        gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
+        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation)
+        if answer:
+            meeting_state["last_jarvis_response"] = {"intent": "speaker_query", "query": query, "answer": answer}
     except Exception as e:
         logger.error("Speaker query handling failed: %s", e)
 
