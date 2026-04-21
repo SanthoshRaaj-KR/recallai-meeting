@@ -8,6 +8,7 @@ websockets
 pyaudio
 openai
 openai-agents
+edge-tts
 pinecone-client
 docling
 pydantic

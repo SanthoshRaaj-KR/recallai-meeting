@@ -7,39 +7,39 @@
 
 ┌─ [01] [DET] Can you give me a full summary of everything that was discussed in this meeting?
 │   Intent:   ✓ expected=meeting_summary    got=meeting_summary
-│   Latency:  LLM=10197ms  TTS(s0)=0ms  TTFW=10197ms
-│   Answer:   In today's meeting, the team discussed several key topics and priorities. First, there was a [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (33%)
+│   Latency:  LLM=5383ms  TTS(s0)=0ms  TTFW=5383ms
+│   Answer:   In today's meeting, the team reviewed Sprint 14 and began planning for Q3. Arjun started by [...]
+│   Score:    [●●○] 2/3  — Partial keyword coverage (53%)
 │   Expects:  Should cover Razorpay / payment race condition, dashboard redesign, churn model, [...]
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [02] [VAG] Catch me up
 │   Intent:   ✓ expected=meeting_summary    got=meeting_summary
-│   Latency:  LLM=6427ms  TTS(s0)=0ms  TTFW=6427ms
-│   Answer:   Here are the main points: First, the team discussed the need for audit logging, particularly [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Latency:  LLM=2129ms  TTS(s0)=0ms  TTFW=2129ms
+│   Answer:   Here are the main points: First, the team reviewed product wins, highlighting the successful [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (14%)
 │   Expects:  Should mention main topics: payment fix, dashboard, churn model, K8s, Q3 priorities
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [03] [VAG] Give me a brief summary
 │   Intent:   ✓ expected=meeting_summary    got=meeting_summary
-│   Latency:  LLM=3901ms  TTS(s0)=0ms  TTFW=3901ms
-│   Answer:   Here are the main points: First, the team discussed the need for audit logging, especially for [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Latency:  LLM=2566ms  TTS(s0)=0ms  TTFW=2566ms
+│   Answer:   Here are the main points: First, the team reviewed recent product wins, including the [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (17%)
 │   Expects:  Short 3-5 point summary covering major themes
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [04] [VAG] What did we talk about so far?
 │   Intent:   ✓ expected=meeting_summary    got=meeting_summary
-│   Latency:  LLM=3970ms  TTS(s0)=0ms  TTFW=3970ms
-│   Answer:   Here are the main points: First, the team decided to include audit logging in Sprint 15, which [...]
+│   Latency:  LLM=1900ms  TTS(s0)=0ms  TTFW=1900ms
+│   Answer:   Here are the main points: First, the team reviewed product wins, highlighting the successful [...]
 │   Score:    [●●○] 2/3  — Low keyword coverage (0%)
 │   Expects:  Should list key discussion themes
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [05] [DET] What are the action items and who owns each one?
 │   Intent:   ✓ expected=action_items       got=action_items
-│   Latency:  LLM=4113ms  TTS(s0)=0ms  TTFW=4113ms
+│   Latency:  LLM=2190ms  TTS(s0)=0ms  TTFW=2190ms
 │   Answer:   Here are the action items: First, Rohan Gupta will run through who has access to production [...]
 │   Score:    [●●●] 3/3  — OK
 │   Expects:  Should list: Rohan payment dedup fix, Rohan access review, Deepa runbook, Vikram vendor [...]
@@ -47,175 +47,175 @@
 
 ┌─ [06] [VAG] What do we need to do next?
 │   Intent:   ✓ expected=action_items       got=action_items
-│   Latency:  LLM=4350ms  TTS(s0)=0ms  TTFW=4350ms
+│   Latency:  LLM=2060ms  TTS(s0)=0ms  TTFW=2060ms
 │   Answer:   Here are the action items: First, Rohan Gupta will run through who has access to production [...]
-│   Score:    [●●●] 3/3  — OK
+│   Score:    [●●○] 2/3  — Partial keyword coverage (50%)
 │   Expects:  Should mention Sprint 15 tasks, SOC 2 items, escalations
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [07] [VAG] List the todos from this meeting
 │   Intent:   ✓ expected=action_items       got=action_items
-│   Latency:  LLM=3438ms  TTS(s0)=0ms  TTFW=3438ms
-│   Answer:   Here are the action items: First, Rohan Gupta will run through who has access to production [...]
+│   Latency:  LLM=2100ms  TTS(s0)=0ms  TTFW=2100ms
+│   Answer:   Here are the action items: First, Rohan Gupta will handle the access review for production [...]
 │   Score:    [●●●] 3/3  — OK
 │   Expects:  Should list key action items from the meeting
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [08] [DET] What did Rohan say about the database migration?
 │   Intent:   ✓ expected=speaker_query      got=speaker_query
-│   Latency:  LLM=3919ms  TTS(s0)=0ms  TTFW=3919ms
-│   Answer:   Rohan Gupta provided several key updates and insights during the discussion. He identified and [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (20%)
+│   Latency:  LLM=2187ms  TTS(s0)=0ms  TTFW=2187ms
+│   Answer:   Rohan Gupta provided a detailed update on the database migration, specifically focusing on the [...]
+│   Score:    [●●●] 3/3  — OK
 │   Expects:  Should mention dual-write strategy, 70 percent complete, two-week timeline, maintenance window
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [09] [VAG] What did Deepa say?
 │   Intent:   ✓ expected=speaker_query      got=speaker_query
-│   Latency:  LLM=4503ms  TTS(s0)=0ms  TTFW=4503ms
-│   Answer:   Deepa Krishnan joined the meeting late but quickly caught up on the discussion, particularly [...]
-│   Score:    [●●○] 2/3  — Partial keyword coverage (40%)
+│   Latency:  LLM=2527ms  TTS(s0)=0ms  TTFW=2527ms
+│   Answer:   Deepa Krishnan joined the meeting a bit late but quickly got up to speed, asking about the [...]
+│   Score:    [●●●] 3/3  — OK
 │   Expects:  Should cover churn model (68% precision), recommendation engine, SOC 2 compliance gaps
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [10] [DET] What did Vikrum con tribute to the meeting?
 │   Intent:   ✓ expected=speaker_query      got=speaker_query
-│   Latency:  LLM=3935ms  TTS(s0)=0ms  TTFW=3935ms
-│   Answer:   Vikram Nair provided a detailed update on several infrastructure improvements, highlighting [...]
+│   Latency:  LLM=2332ms  TTS(s0)=0ms  TTFW=2332ms
+│   Answer:   Vikram Nair discussed several key updates and improvements, starting with the successful [...]
 │   Score:    [●●●] 3/3  — OK
 │   Expects:  Should match Vikram and cover search performance, K8s migration, Python 2 services, observability
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [11] [VAG] What did Sneha mention?
 │   Intent:   ✓ expected=speaker_query      got=speaker_query
-│   Latency:  LLM=5468ms  TTS(s0)=0ms  TTFW=5468ms
-│   Answer:   Sneha Rao mentioned that she would be a few minutes late to the meeting but highlighted the [...]
+│   Latency:  LLM=3041ms  TTS(s0)=0ms  TTFW=3041ms
+│   Answer:   Sneha Rao mentioned she would be a few minutes late to the meeting but contributed [...]
 │   Score:    [●●●] 3/3  — OK
 │   Expects:  Should mention dashboard redesign, funnel confusion, 15% engagement drop, A/B test plan
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [12] [DET] What do you think about deferring the mobile app to Q4? Is that the right call?
 │   Intent:   ✓ expected=meeting_opinion    got=meeting_opinion
-│   Latency:  LLM=3538ms  TTS(s0)=0ms  TTFW=3538ms
+│   Latency:  LLM=1639ms  TTS(s0)=0ms  TTFW=1639ms
 │   Answer:   Given what the team discussed, deferring the mobile app to Q4 is absolutely the right call. [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (38%)
+│   Score:    [●●○] 2/3  — Partial keyword coverage (43%)
 │   Expects:  Should reference activation rate 48 percent, web experience first, mobile vs web tradeoff
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [13] [DET] Should we go with the hybrid recommendation approach?
 │   Intent:   ✓ expected=meeting_opinion    got=meeting_opinion
-│   Latency:  LLM=3944ms  TTS(s0)=0ms  TTFW=3944ms
-│   Answer:   From the discussion so far, I strongly recommend we adopt the hybrid recommendation approach. [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (12%)
+│   Latency:  LLM=1891ms  TTS(s0)=0ms  TTFW=1891ms
+│   Answer:   Given what the team discussed, I strongly support the hybrid recommendation approach. It [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (22%)
 │   Expects:  Should reference co-occurrence for popular items vs vector for long-tail, 18 percent better hit rate
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [14] [VAG] What do you think about the sprint scope?
 │   Intent:   ✓ expected=meeting_opinion    got=meeting_opinion
-│   Latency:  LLM=3812ms  TTS(s0)=0ms  TTFW=3812ms
-│   Answer:   Based on what I heard, I believe the sprint scope is well-defined and strategically focused. [...]
-│   Score:    [●●●] 3/3  — OK
+│   Latency:  LLM=1541ms  TTS(s0)=0ms  TTFW=1541ms
+│   Answer:   Based on what I heard, I believe the Sprint 15 scope is well-defined and manageable. The [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (25%)
 │   Expects:  Should give opinion on whether Sprint 15 scope is realistic, referencing the discussion
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [15] [DET] How should we handle the Python 2 migration risk?
 │   Intent:   ✓ expected=meeting_opinion    got=meeting_opinion
-│   Latency:  LLM=3783ms  TTS(s0)=0ms  TTFW=3783ms
-│   Answer:   Given what the team discussed, I strongly recommend that we prioritize bringing in additional [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Latency:  LLM=2111ms  TTS(s0)=0ms  TTFW=2111ms
+│   Answer:   Given what the team discussed, I believe we should prioritize migrating the Python 2 services [...]
+│   Score:    [●●○] 2/3  — Partial keyword coverage (50%)
 │   Expects:  Should reference 4000 lines manual review, Vikram's concern, suggest prioritization or [...]
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [16] [DET] What is horizontal pod autoscaling in Kubernetes and how does it work?
 │   Intent:   ✓ expected=general            got=general
-│   Latency:  LLM=5700ms  TTS(s0)=0ms  TTFW=5700ms
-│   Answer:   Horizontal pod autoscaling in Kubernetes automatically adjusts the number of pod replicas in a [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Latency:  LLM=2792ms  TTS(s0)=0ms  TTFW=2792ms
+│   Answer:   Horizontal pod autoscaling in Kubernetes automatically adjusts the number of pods in a [...]
+│   Score:    [●●○] 2/3  — Partial keyword coverage (43%)
 │   Expects:  Should explain HPA: monitors CPU/memory or custom metrics, scales pod replicas, no made-up details
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [17] [VAG] What is OpenTelemetry?
 │   Intent:   ✓ expected=general            got=general
-│   Latency:  LLM=4411ms  TTS(s0)=0ms  TTFW=4411ms
-│   Answer:   OpenTelemetry is an open-source framework that provides a set of tools and APIs for [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (14%)
+│   Latency:  LLM=2338ms  TTS(s0)=0ms  TTFW=2338ms
+│   Answer:   OpenTelemetry is an open-source framework that helps developers collect and analyze telemetry [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (25%)
 │   Expects:  Should explain distributed tracing / observability framework correctly
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [18] [VAG] What does P99 latency mean?
 │   Intent:   ✓ expected=general            got=general
-│   Latency:  LLM=4587ms  TTS(s0)=0ms  TTFW=4587ms
-│   Answer:   P99 latency refers to the 99th percentile of latency, meaning that 99% of the requests are [...]
-│   Score:    [●●○] 2/3  — Partial keyword coverage (40%)
+│   Latency:  LLM=2175ms  TTS(s0)=0ms  TTFW=2175ms
+│   Answer:   P99 latency refers to the latency measurement where 99% of the requests are completed within a [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (33%)
 │   Expects:  Should explain 99th percentile latency correctly
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [19] [DET] What is SOC 2 Type 2 audit and why does it matter?
 │   Intent:   ✓ expected=general            got=general
-│   Latency:  LLM=4689ms  TTS(s0)=0ms  TTFW=4689ms
-│   Answer:   A SOC 2 Type 2 audit assesses an organization's systems and controls over a period of time, [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (25%)
+│   Latency:  LLM=2637ms  TTS(s0)=0ms  TTFW=2637ms
+│   Answer:   A SOC 2 Type 2 audit evaluates an organization's controls related to security, availability, [...]
+│   Score:    [●●●] 3/3  — OK
 │   Expects:  Should explain SOC 2 Type 2 covers controls over time period, matters for enterprise trust / [...]
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [20] [DET] What's the difference between precision and recall in machine learning?
 │   Intent:   ✓ expected=general            got=general
-│   Latency:  LLM=4006ms  TTS(s0)=0ms  TTFW=4006ms
+│   Latency:  LLM=2316ms  TTS(s0)=0ms  TTFW=2316ms
 │   Answer:   Precision measures the accuracy of the positive predictions made by a model, while recall [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (31%)
+│   Score:    [●●○] 2/3  — Partial keyword coverage (50%)
 │   Expects:  Should explain precision (correct positive / predicted positive) and recall (correct positive [...]
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ┌─ [21] [VAG] What is the current USD to INR exchange rate?
 │   Intent:   ✓ expected=general            got=general
-│   Latency:  LLM=5997ms  TTS(s0)=0ms  TTFW=5997ms
-│   Answer:   As of today, the exchange rate is approximately 93.16 Indian Rupees for 1 US dollar. For the [...]
-│   Score:    [●●○] 2/3  — Low keyword coverage (0%)
+│   Latency:  LLM=4402ms  TTS(s0)=0ms  TTFW=4402ms
+│   Answer:   The current exchange rate is approximately 93.51 Indian Rupees per US Dollar, but keep in mind [...]
+│   Score:    [●●○] 2/3  — Low keyword coverage (20%)
 │   Expects:  Should attempt web search or clearly state it cannot give live rate, no made-up number
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 ==============================================================================================================
-  TOTAL SCORE: 48/63  (76%)
+  TOTAL SCORE: 49/63  (78%)
   GRADE: MARGINAL ⚠
 ==============================================================================================================
 
   LATENCY BREAKDOWN (LLM call only)
   Question                                                   Type Intent              LLM ms
   --------------------------------------------------------------------------------------------
-  Can you give me a full summary of everything that was dis  det  meeting_summary      10197
-  Catch me up                                                vag  meeting_summary       6427
-  Give me a brief summary                                    vag  meeting_summary       3901
-  What did we talk about so far?                             vag  meeting_summary       3970
-  What are the action items and who owns each one?           det  action_items          4113
-  What do we need to do next?                                vag  action_items          4350
-  List the todos from this meeting                           vag  action_items          3438
-  What did Rohan say about the database migration?           det  speaker_query         3919
-  What did Deepa say?                                        vag  speaker_query         4503
-  What did Vikrum con tribute to the meeting?                det  speaker_query         3935
-  What did Sneha mention?                                    vag  speaker_query         5468
-  What do you think about deferring the mobile app to Q4? I  det  meeting_opinion       3538
-  Should we go with the hybrid recommendation approach?      det  meeting_opinion       3944
-  What do you think about the sprint scope?                  vag  meeting_opinion       3812
-  How should we handle the Python 2 migration risk?          det  meeting_opinion       3783
-  What is horizontal pod autoscaling in Kubernetes and how   det  general               5700
-  What is OpenTelemetry?                                     vag  general               4411
-  What does P99 latency mean?                                vag  general               4587
-  What is SOC 2 Type 2 audit and why does it matter?         det  general               4689
-  What's the difference between precision and recall in mac  det  general               4006
-  What is the current USD to INR exchange rate?              vag  general               5997
-  AVERAGE                                                                               4699
-  P95 (approx)                                                                          5997
-  MAX                                                                                  10197
+  Can you give me a full summary of everything that was dis  det  meeting_summary       5383
+  Catch me up                                                vag  meeting_summary       2129
+  Give me a brief summary                                    vag  meeting_summary       2566
+  What did we talk about so far?                             vag  meeting_summary       1900
+  What are the action items and who owns each one?           det  action_items          2190
+  What do we need to do next?                                vag  action_items          2060
+  List the todos from this meeting                           vag  action_items          2100
+  What did Rohan say about the database migration?           det  speaker_query         2187
+  What did Deepa say?                                        vag  speaker_query         2527
+  What did Vikrum con tribute to the meeting?                det  speaker_query         2332
+  What did Sneha mention?                                    vag  speaker_query         3041
+  What do you think about deferring the mobile app to Q4? I  det  meeting_opinion       1639
+  Should we go with the hybrid recommendation approach?      det  meeting_opinion       1891
+  What do you think about the sprint scope?                  vag  meeting_opinion       1541
+  How should we handle the Python 2 migration risk?          det  meeting_opinion       2111
+  What is horizontal pod autoscaling in Kubernetes and how   det  general               2792
+  What is OpenTelemetry?                                     vag  general               2338
+  What does P99 latency mean?                                vag  general               2175
+  What is SOC 2 Type 2 audit and why does it matter?         det  general               2637
+  What's the difference between precision and recall in mac  det  general               2316
+  What is the current USD to INR exchange rate?              vag  general               4402
+  AVERAGE                                                                               2488
+  P95 (approx)                                                                          3041
+  MAX                                                                                   5383
 
   SCORES BY INTENT
-    action_items         n=3  avg_score=3.0/3  avg_llm=3967ms
-    general              n=6  avg_score=2.0/3  avg_llm=4898ms
-    meeting_opinion      n=4  avg_score=2.2/3  avg_llm=3769ms
-    meeting_summary      n=4  avg_score=2.0/3  avg_llm=6124ms
-    speaker_query        n=4  avg_score=2.5/3  avg_llm=4456ms
+    action_items         n=3  avg_score=2.7/3  avg_llm=2117ms
+    general              n=6  avg_score=2.2/3  avg_llm=2777ms
+    meeting_opinion      n=4  avg_score=2.0/3  avg_llm=1796ms
+    meeting_summary      n=4  avg_score=2.0/3  avg_llm=2995ms
+    speaker_query        n=4  avg_score=3.0/3  avg_llm=2522ms
 
   SCORES BY QUESTION TYPE
-    detailed   n=10  avg_score=2.2/3
-    vague      n=11  avg_score=2.4/3
+    detailed   n=10  avg_score=2.4/3
+    vague      n=11  avg_score=2.3/3
 
 ==============================================================================================================
   PIPELINE ANALYSIS & EXACT RECOMMENDATIONS
@@ -225,7 +225,7 @@
   • All intents classified correctly. classifier.py fast-path is working well.
 
   [ANSWER QUALITY]
-  • Moderate quality (avg 2.29/3). Focus on improving context injection in handlers — ensure transcript is
+  • Moderate quality (avg 2.33/3). Focus on improving context injection in handlers — ensure transcript is
     being passed fully, check JARVIS_SUMMARY_MAX_TOKENS / JARVIS_SPEAKER_QUERY_MAX_TOKENS.
 
   [TTS LATENCY]
@@ -276,7 +276,7 @@
     starts immediately after gap filler ends (no dead air)
 
   [ARCHITECTURE]
-  • 5 queries took >5s LLM time. These block the answer pipeline. Consider: (a) streaming the LLM response
+  • 1 queries took >5s LLM time. These block the answer pipeline. Consider: (a) streaming the LLM response
     and starting TTS on the first sentence as tokens arrive (streaming mode), or (b) lowering max_tokens for
     the summary handlers when speech_rewrite_enabled=True since _rewrite_for_speech will condense anyway.
   • MEETING HANDLERS: summarize_meeting(), extract_action_items(), generate_opinion(), summarize_speaker()

@@ -1508,10 +1508,11 @@ async def _handle_general_question(query: str, bot_id: str, force_web_search: bo
             cross_context = f"User: {prior['query']}\nAssistant: {prior['answer']}"
             conversation_history = cross_context + "\n" + conversation_history if conversation_history and conversation_history.strip() != "[none]" else cross_context
         # Inject meeting context from graph (per D-01, D-02)
+        # Cap at 0.5 s so a slow/unavailable graph never delays the answer.
         graph_context = ""
         try:
-            graph_context = await graph_rag.query_context(query)
-        except Exception:
+            graph_context = await asyncio.wait_for(graph_rag.query_context(query), timeout=0.5)
+        except (asyncio.TimeoutError, Exception):
             pass  # Non-fatal — graph is optional
         # Determine multi-turn referencing
         use_multiturn_ref = bool(conversation_history and conversation_history.strip() != "[none]")
@@ -1730,6 +1731,24 @@ async def _handle_action_items(query: str, bot_id: str) -> None:
         logger.error("Action items handling failed: %s", e)
 
 
+def _extract_speaker_topic(query: str) -> str:
+    """Extract an optional topic qualifier from a speaker query.
+
+    E.g. "What did Rohan say about the database migration?" → "the database migration"
+         "What did Deepa mention about churn?" → "churn"
+         "What did Sneha say?" → ""
+    """
+    query = _normalize_split_verbs(query)
+    m = re.search(
+        r"(?:say|said|mention(?:ed)?|talk(?:ed)?|contribute[d]?) (?:about|regarding|on|regarding) (.+?)(?:\?|$)",
+        query,
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip().rstrip("?").strip()
+    return ""
+
+
 async def _handle_speaker_query(query: str, bot_id: str) -> None:
     """Stream a summary of what a specific speaker said in the meeting."""
     generation = meeting_state["output_generation"]
@@ -1741,8 +1760,9 @@ async def _handle_speaker_query(query: str, bot_id: str) -> None:
                 bot_id, generation, allow_stale=True,
             )
             return
+        topic = _extract_speaker_topic(query)
         transcript_log = list(meeting_state["transcript_log"])
-        sentence_gen = summarize_speaker_streaming(transcript_log, speaker_name)
+        sentence_gen = summarize_speaker_streaming(transcript_log, speaker_name, topic=topic)
         gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
         answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation)
         if answer:

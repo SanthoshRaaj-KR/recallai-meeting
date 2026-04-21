@@ -378,8 +378,15 @@ def _reset_state():
 async def _run_case_quality(tc: TestCase) -> Result:
     """Run one case with TTS mocked. Returns answer quality + total LLM latency.
 
-    Key design: the gap filler uses _speak_cached_guarded (silently mocked here),
-    so ALL calls to _speak_guarded are actual answer content — capture them all.
+    Patches three output paths:
+    1. _speak_guarded   — used by general_responder for text output
+    2. _speak_cached_guarded — used for gap-filler MP3 playback
+    3. synthesize_speech / speak_cached_audio — used by _speak_streaming (meeting handlers)
+
+    Meeting handlers (_handle_meeting_summary etc.) use _speak_streaming which calls
+    synthesize_speech + speak_cached_audio directly, and stores the result in
+    meeting_state["last_jarvis_response"]. We patch the audio calls to be no-ops and
+    read the result from state after the handler completes.
     """
     _reset_state()
 
@@ -392,7 +399,16 @@ async def _run_case_quality(tc: TestCase) -> Result:
         return True
 
     async def mock_speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int) -> bool:
-        return True  # gap filler plays silently; answer comes via _speak_guarded
+        return True  # gap filler plays silently
+
+    # Stub out actual TTS synthesis and Recall audio delivery so _speak_streaming
+    # runs at full speed without network calls. The text is still returned via
+    # meeting_state["last_jarvis_response"]["answer"] which we read below.
+    def mock_synthesize_speech(text: str) -> bytes:
+        return b"\xff\xfb\x90\x00" * 16  # minimal valid MP3-ish header stub
+
+    def mock_speak_cached_audio(audio_bytes: bytes, bot_id: str) -> bool:
+        return True
 
     async def mock_sleep(secs: float) -> None:
         pass
@@ -403,6 +419,8 @@ async def _run_case_quality(tc: TestCase) -> Result:
     with (
         patch.object(ja, "_speak_guarded", side_effect=mock_speak_guarded),
         patch.object(ja, "_speak_cached_guarded", side_effect=mock_speak_cached_guarded),
+        patch.object(ja, "synthesize_speech", side_effect=mock_synthesize_speech),
+        patch.object(ja, "speak_cached_audio", side_effect=mock_speak_cached_audio),
         patch("asyncio.sleep", side_effect=mock_sleep),
     ):
         try:
@@ -422,6 +440,14 @@ async def _run_case_quality(tc: TestCase) -> Result:
             captured.append(f"[Handler error: {exc}]")
 
     llm_ms = (time.perf_counter() - start) * 1000
+
+    # Meeting handlers (_speak_streaming path) store text in last_jarvis_response,
+    # not via _speak_guarded. Fall back to reading it here.
+    if not captured:
+        last = ja.meeting_state.get("last_jarvis_response") or {}
+        ans = last.get("answer", "")
+        if ans:
+            captured.append(ans)
 
     return Result(
         question=tc.question,
@@ -530,15 +556,24 @@ def _score_result(r: Result) -> tuple[int, str]:
         notes.append("Answer is an error fallback")
         return 1 if intent_ok else 0, "; ".join(notes)
 
+    _STOP_WORDS = {
+        "should", "their", "these", "which", "still", "match", "cover", "mention",
+        "reference", "explain", "about", "answer", "gives", "state", "clearly",
+        "attempt", "search", "correctly", "without", "number", "details", "using",
+        "specific", "points", "cover", "mention", "should", "state",
+    }
+    # Split on whitespace AND punctuation (/, -, :) to handle "CPU/memory", "made-up", "50%"
+    import re as _re
+    raw_tokens = _re.split(r"[\s/\-:,]+", r.expectation)
     expectation_keywords = [
-        w.lower() for w in r.expectation.split()
-        if len(w) > 4
-        and w[0].isupper()
-        and w.lower() not in ("should", "their", "these", "which", "still", "match", "cover", "mention", "reference")
+        t.strip("()%.'\"").lower()
+        for t in raw_tokens
+        if len(t.strip("()%.'\"")) > 3
+        and t.strip("()%.'\"").lower() not in _STOP_WORDS
     ]
-    if not expectation_keywords:
-        # All lowercase expectation — fall back to longer words
-        expectation_keywords = [w.lower() for w in r.expectation.split() if len(w) > 5]
+    # De-duplicate while preserving order
+    seen = set()
+    expectation_keywords = [k for k in expectation_keywords if not (k in seen or seen.add(k))]
 
     matches = sum(1 for kw in expectation_keywords if kw in answer_lower)
     coverage = matches / max(len(expectation_keywords), 1)

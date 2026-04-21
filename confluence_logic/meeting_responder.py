@@ -27,11 +27,11 @@ def _get_client() -> OpenAI:
 
 
 MEETING_RESPONDER_MODEL = os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini").strip()
-JARVIS_SUMMARY_MAX_TOKENS = int(os.getenv("JARVIS_SUMMARY_MAX_TOKENS", "400"))
-JARVIS_SUMMARY_BRIEF_MAX_TOKENS = int(os.getenv("JARVIS_SUMMARY_BRIEF_MAX_TOKENS", "280"))
-JARVIS_OPINION_MAX_TOKENS = int(os.getenv("JARVIS_OPINION_MAX_TOKENS", "350"))
-JARVIS_ACTION_ITEMS_MAX_TOKENS = int(os.getenv("JARVIS_ACTION_ITEMS_MAX_TOKENS", "300"))
-JARVIS_SPEAKER_QUERY_MAX_TOKENS = int(os.getenv("JARVIS_SPEAKER_QUERY_MAX_TOKENS", "250"))
+JARVIS_SUMMARY_MAX_TOKENS = int(os.getenv("JARVIS_SUMMARY_MAX_TOKENS", "700"))
+JARVIS_SUMMARY_BRIEF_MAX_TOKENS = int(os.getenv("JARVIS_SUMMARY_BRIEF_MAX_TOKENS", "400"))
+JARVIS_OPINION_MAX_TOKENS = int(os.getenv("JARVIS_OPINION_MAX_TOKENS", "700"))
+JARVIS_ACTION_ITEMS_MAX_TOKENS = int(os.getenv("JARVIS_ACTION_ITEMS_MAX_TOKENS", "400"))
+JARVIS_SPEAKER_QUERY_MAX_TOKENS = int(os.getenv("JARVIS_SPEAKER_QUERY_MAX_TOKENS", "400"))
 
 _EMPTY_TRANSCRIPT_FALLBACK = "I haven't heard anything in the meeting yet."
 
@@ -59,10 +59,13 @@ async def summarize_meeting(transcript_log: List[Dict[str, Any]], detail_level: 
         return _EMPTY_TRANSCRIPT_FALLBACK
 
     transcript_text = _format_transcript(transcript_log)
-    # Truncate from the start if excessively long (keep the most recent content)
+    # Preserve both the meeting opening and recent content when truncating.
+    # Keeping only the tail loses early topics (intros, first agenda items).
     max_chars = 8000
     if len(transcript_text) > max_chars:
-        transcript_text = transcript_text[-max_chars:]
+        head = transcript_text[:2000]
+        tail = transcript_text[-(max_chars - 2000):]
+        transcript_text = head + "\n[... earlier content omitted for brevity ...]\n" + tail
 
     if detail_level == "brief":
         system_prompt = (
@@ -348,7 +351,9 @@ async def summarize_meeting_streaming(transcript_log: List[Dict[str, Any]], deta
 
     transcript_text = _format_transcript(transcript_log)
     if len(transcript_text) > 8000:
-        transcript_text = transcript_text[-8000:]
+        head = transcript_text[:2000]
+        tail = transcript_text[-6000:]
+        transcript_text = head + "\n[... earlier content omitted for brevity ...]\n" + tail
 
     if detail_level == "brief":
         system_prompt = (
@@ -385,22 +390,32 @@ async def generate_opinion_streaming(transcript_log: List[Dict[str, Any]], query
 
     transcript_text = _format_transcript(transcript_log)
     if len(transcript_text) > 8000:
-        transcript_text = transcript_text[-8000:]
+        head = transcript_text[:2000]
+        tail = transcript_text[-6000:]
+        transcript_text = head + "\n[... earlier content omitted for brevity ...]\n" + tail
 
+    query_focus = (
+        f" The user's specific question is: '{query}'. Address this question directly — "
+        "do not drift to other meeting topics unless they directly support your answer."
+        if query else ""
+    )
     system_prompt = (
         "You are Jarvis, an AI assistant attending a live meeting. "
         "The user wants your opinion or recommendation based on what was discussed. "
         "Deliver a confident, direct, first-person opinion. Pick a side — do not hedge with 'it depends' alone. "
         "Do not use phrases like 'might', 'could potentially', or 'it depends' without committing to a clear recommendation. "
+        "IMPORTANT: If the meeting participants already reached a decision or consensus on the topic, your opinion must be grounded in that decision — validate or critique it, but do not argue against what was clearly agreed upon as if the decision had not been made. "
         "Always open with a short grounding phrase such as 'Based on what I heard,' or 'From the discussion so far,' or 'Given what the team discussed,' — then immediately give your opinion. "
         "Reference specific points, numbers, costs, or percentages from the transcript to justify your view — quote exact figures when they are relevant. "
         "Speak naturally as if talking aloud in the meeting. "
         "No markdown, no bullet points, no formatting. 2 to 4 sentences maximum."
+        + query_focus
     )
-    user_content = f"Meeting transcript:\n\n{transcript_text}"
+    # Put the specific question first in the user content so the LLM treats it as the primary task
     if query:
-        user_content += f"\n\nThe user asked: {query}"
-    user_content += "\n\nWhat is your opinion or recommendation?"
+        user_content = f"Question: {query}\n\nMeeting transcript:\n\n{transcript_text}\n\nAnswer the question above with a direct opinion grounded in the transcript."
+    else:
+        user_content = f"Meeting transcript:\n\n{transcript_text}\n\nWhat is your opinion or recommendation?"
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -437,11 +452,15 @@ async def extract_action_items_streaming(transcript_log: List[Dict[str, Any]]):
         yield sentence
 
 
-async def summarize_speaker_streaming(transcript_log: List[Dict[str, Any]], speaker_name: str):
+async def summarize_speaker_streaming(transcript_log: List[Dict[str, Any]], speaker_name: str, topic: str = ""):
     """Streaming version of summarize_speaker — yields sentences as the LLM generates them.
 
     Performs the same fuzzy-match speaker lookup as summarize_speaker before streaming.
     Yields a single error sentence if the speaker cannot be matched.
+
+    Args:
+        topic: Optional topic qualifier (e.g. "the database migration"). When provided,
+               the LLM is instructed to focus only on what the speaker said about that topic.
     """
     if not transcript_log:
         yield "I haven't heard anything in the meeting yet."
@@ -481,10 +500,16 @@ async def summarize_speaker_streaming(transcript_log: List[Dict[str, Any]], spea
     if len(speaker_text) > 4000:
         speaker_text = speaker_text[-4000:]
 
+    topic_focus = (
+        f" Focus specifically on what {matched_participant} said about {topic}. "
+        "If they did not say anything relevant to that topic, say so clearly."
+        if topic else ""
+    )
     system_prompt = (
         f"You are Jarvis, an AI assistant in a live meeting. "
-        f"Summarize what {matched_participant} has said and contributed to the discussion. "
-        "Cover their key points, opinions, and any decisions or commitments they made. "
+        f"Summarize what {matched_participant} has said and contributed to the discussion."
+        + topic_focus
+        + " Cover their key points, opinions, and any decisions or commitments they made. "
         "Speak naturally — no markdown, no bullet points. Keep it concise (3-5 sentences max)."
     )
     messages = [
