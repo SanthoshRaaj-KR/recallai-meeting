@@ -86,18 +86,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if MEETING_URL:
-        bot_id = create_bot(MEETING_URL)
-        if bot_id:
-            meeting_state["bot_id"] = bot_id
-            meeting_state["is_active"] = True
-            with open("bot_id.txt", "w") as f:
-                f.write(bot_id)
-            logger.info("Bot joined meeting: %s", bot_id)
-        else:
-            logger.error("Failed to create bot on startup")
-    else:
-        logger.warning("MEETING_URL not set — bot will not join a meeting automatically")
+    # Bot is started on-demand via POST /bot/start from the review UI.
+    # Do not auto-join on startup — MEETING_URL in .env is ignored here.
+    logger.info("Jarvis server ready — waiting for /bot/start from the UI")
     yield
 
 
