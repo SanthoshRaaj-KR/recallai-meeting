@@ -733,9 +733,9 @@ def _build_request_reference(task: VoiceTask) -> str:
 
 
 def _estimate_speech_duration(text: str) -> float:
-    """Estimate playback duration in seconds from text word count (2.5 words/sec, min 0.5s)."""
+    """Estimate playback duration in seconds from text word count (3.5 words/sec, min 0.3s)."""
     words = len((text or "").split())
-    return max(0.5, words / 2.5)
+    return max(0.3, words / 3.5)
 
 
 async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: bool = False) -> bool:
@@ -1260,17 +1260,19 @@ async def _handle_general_question(query: str, bot_id: str, force_web_search: bo
             pass  # Non-fatal — graph is optional
         # Determine multi-turn referencing
         use_multiturn_ref = bool(conversation_history and conversation_history.strip() != "[none]")
-        # Speak contextual filler immediately while LLM generates the answer (FILLER-02, D-10)
-        filler = await _generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name())
-        await _speak_guarded(filler, bot_id, generation, allow_stale=True)
-        answer = await answer_general_question(
+        # Fire filler and answer generation in parallel so the answer is ready when filler ends (FILLER-02, D-10)
+        filler_task = asyncio.create_task(_generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name()))
+        answer_task = asyncio.create_task(answer_general_question(
             query,
             conversation_history,
             graph_context=graph_context,
             force_web_search=force_web_search,
             speech_rewrite_enabled=JARVIS_SPEECH_REWRITE_ENABLED,
             multiturn_reference=use_multiturn_ref,
-        )
+        ))
+        filler = await filler_task
+        await _speak_guarded(filler, bot_id, generation, allow_stale=True)
+        answer = await answer_task
         if not answer:
             return
 
@@ -1784,9 +1786,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     accumulated = meeting_state.get("_accumulated_query", "")
                     accumulated = (accumulated + " " + query).strip() if accumulated else query
                     meeting_state["_accumulated_query"] = accumulated
-                    # MICROACK-01: immediate acknowledgment on first wake detection
-                    if not meeting_state.get("_pending_debounce_task") or meeting_state["_pending_debounce_task"].done():
-                        asyncio.create_task(_emit_micro_ack(bot_id))
                     # INTERRUPT-01: if TTS is currently playing (output_lock held), emit yield phrase
                     output_lock = _get_output_lock()
                     if output_lock.locked():
