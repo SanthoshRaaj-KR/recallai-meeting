@@ -875,8 +875,8 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
                     next_task.cancel()
                 return False
 
-            # Use word-count estimate — more accurate than byte-size at OpenAI TTS bitrates
-            duration = _estimate_speech_duration(sentence_text)
+            # Use byte-based duration estimate — accurate for both Edge TTS and OpenAI TTS
+            duration = _estimate_cached_duration(audio)
             elapsed = 0.0
             while elapsed < duration:
                 await asyncio.sleep(0.1)
@@ -967,7 +967,7 @@ async def _speak_streaming(
                 return " ".join(full_sentences) or None
 
             # Hold the lock (and block other audio) for the estimated playback duration
-            duration = _estimate_speech_duration(sentence_text)
+            duration = _estimate_cached_duration(audio_bytes)
             elapsed = 0.0
             while elapsed < duration:
                 await asyncio.sleep(0.1)
@@ -2046,11 +2046,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     accumulated = meeting_state.get("_accumulated_query", "")
                     accumulated = (accumulated + " " + query).strip() if accumulated else query
                     meeting_state["_accumulated_query"] = accumulated
-                    # MICROACK-01: immediate acknowledgment on first wake detection
-                    # Skip if query came from listening mode — "Yes?" already served as ack
+                    # Skip micro-ack when wake+query arrive together — gap filler handles it
                     _from_listening = meeting_state.pop("_query_from_listening", False)
-                    if not _from_listening and (not meeting_state.get("_pending_debounce_task") or meeting_state["_pending_debounce_task"].done()):
-                        asyncio.create_task(_emit_micro_ack(bot_id))
+                    _ = _from_listening  # consumed, not needed for this path
                     # INTERRUPT-01: if TTS is currently playing (output_lock held), emit yield phrase
                     output_lock = _get_output_lock()
                     if output_lock.locked():
