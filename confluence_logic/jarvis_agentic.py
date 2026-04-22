@@ -102,6 +102,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Mount the review API router (GET /review/summary and related endpoints).
+from .review.api import router as _review_router  # noqa: E402
+app.include_router(_review_router)
+
 session_agent = EditorAgent(model=JARVIS_AGENT_MODEL)
 logger.info("Jarvis meeting agent using model: %s", JARVIS_AGENT_MODEL)
 logger.info("Jarvis transcript provider: %s", RECALL_TRANSCRIPT_PROVIDER)
