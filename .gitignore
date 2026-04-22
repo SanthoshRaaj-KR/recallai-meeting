@@ -20,3 +20,8 @@ __pycache__/
 *$py.class
 .planning
 
+node_modules
+.next
+.DS_Store
+
+
