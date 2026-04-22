@@ -663,17 +663,29 @@ def speak_cached_audio(audio_bytes: bytes, bot_id: str) -> bool:
         return False
 
 
-def _estimate_cached_duration(audio_bytes: bytes) -> float:
-    """Estimate MP3 playback duration by parsing the actual bitrate from the first frame header.
+def _get_audio_duration(audio_bytes: bytes) -> float:
+    """Compute exact MP3 playback duration by counting all MPEG Layer III frames.
 
-    The pre-generated gap filler files are 224 kbps (28000 bytes/sec).
-    The old hard-coded formula assumed 32 kbps (4000 bytes/sec), causing a 7× overestimate
-    that held output_lock for ~15 s instead of ~2 s.
+    Algorithm:
+    1. Skip ID3v2 tag to reach the first frame sync.
+    2. Check for a Xing/Info VBR header in the first frame — if present, use
+       stored frame_count × 1152 / sample_rate for exact VBR duration.
+    3. Otherwise hop frame-by-frame (CBR: all frames same size ± 1 padding byte),
+       count them, and return frame_count × 1152 / sample_rate.
+    4. Final fallback: file_size / (bitrate / 8).
+
+    This gives exact duration regardless of TTS provider, voice, or speed setting.
     """
     _BITRATES = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0]
     _SAMPLERATES = [44100, 48000, 32000, 0]
+    SAMPLES_PER_FRAME = 1152  # MPEG-1 Layer III constant
+    MIN_DURATION = 0.1
+
     data = audio_bytes
-    # Skip ID3v2 tag so we land on the first MP3 frame sync
+    if not data:
+        return MIN_DURATION
+
+    # Step 1: skip ID3v2 tag
     offset = 0
     if data[:3] == b"ID3" and len(data) >= 10:
         sz = (
@@ -683,22 +695,69 @@ def _estimate_cached_duration(audio_bytes: bytes) -> float:
             | (data[9] & 0x7F)
         )
         offset = 10 + sz
+
+    # Step 2: find first valid frame header
+    first_bitrate = 0
+    first_samplerate = 0
+    first_pos = offset
     pos = offset
     while pos + 4 < len(data):
-        b = data[pos : pos + 4]
+        b = data[pos:pos + 4]
         if b[0] == 0xFF and (b[1] & 0xE0) == 0xE0:
-            layer = (b[1] >> 1) & 0x3        # 01 = MPEG Layer III (MP3)
+            layer = (b[1] >> 1) & 0x3
             bi = (b[2] >> 4) & 0xF
             si = (b[2] >> 2) & 0x3
+            padding = (b[2] >> 1) & 0x1
             if layer == 1 and 0 < bi < 15 and si < 3:
-                bitrate = _BITRATES[bi] * 1000  # bits/sec
+                bitrate = _BITRATES[bi] * 1000
                 samplerate = _SAMPLERATES[si]
                 if bitrate > 0 and samplerate > 0:
-                    bytes_per_sec = bitrate / 8
-                    return max(0.3, (len(data) - offset) / bytes_per_sec)
+                    first_bitrate = bitrate
+                    first_samplerate = samplerate
+                    first_pos = pos
+                    # Step 3: check for Xing/Info VBR header
+                    # Offset within frame: 4-byte header + 32-byte side info (stereo MPEG-1)
+                    xing_off = pos + 36
+                    if xing_off + 12 <= len(data):
+                        tag = data[xing_off:xing_off + 4]
+                        if tag in (b"Xing", b"Info"):
+                            flags = int.from_bytes(data[xing_off + 4:xing_off + 8], "big")
+                            if flags & 0x1:  # Frames field present
+                                frame_count = int.from_bytes(data[xing_off + 8:xing_off + 12], "big")
+                                if frame_count > 0:
+                                    return max(MIN_DURATION, frame_count * SAMPLES_PER_FRAME / samplerate)
+                    break
         pos += 1
-    # Fallback: assume 224 kbps (matches all current gap filler assets)
-    return max(0.3, len(audio_bytes) / 28000)
+
+    if not first_bitrate or not first_samplerate:
+        # No valid frame found — fallback to 224 kbps assumption
+        return max(MIN_DURATION, len(data) / 28000)
+
+    # Step 4: CBR frame-hopping — count all frames
+    frame_count = 0
+    pos = first_pos
+    while pos + 4 < len(data):
+        b = data[pos:pos + 4]
+        if b[0] == 0xFF and (b[1] & 0xE0) == 0xE0:
+            layer = (b[1] >> 1) & 0x3
+            bi = (b[2] >> 4) & 0xF
+            si = (b[2] >> 2) & 0x3
+            padding = (b[2] >> 1) & 0x1
+            if layer == 1 and 0 < bi < 15 and si < 3:
+                bitrate = _BITRATES[bi] * 1000
+                samplerate = _SAMPLERATES[si]
+                if bitrate > 0 and samplerate > 0:
+                    frame_size = 144 * bitrate // samplerate + padding
+                    frame_count += 1
+                    pos += max(frame_size, 1)
+                    continue
+        pos += 1
+
+    if frame_count > 0:
+        return max(MIN_DURATION, frame_count * SAMPLES_PER_FRAME / first_samplerate)
+
+    # Final fallback: size / bitrate
+    return max(MIN_DURATION, (len(data) - offset) / (first_bitrate / 8))
 
 
 async def _speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int) -> bool:
@@ -716,7 +775,7 @@ async def _speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int
                 return False
         ok = await asyncio.to_thread(speak_cached_audio, audio_bytes, bot_id)
         if ok:
-            duration = _estimate_cached_duration(audio_bytes)
+            duration = _get_audio_duration(audio_bytes)
             elapsed = 0.0
             while elapsed < duration:
                 await asyncio.sleep(0.1)
@@ -812,12 +871,6 @@ def _build_request_reference(task: VoiceTask) -> str:
     return "this request"
 
 
-def _estimate_speech_duration(text: str) -> float:
-    """Estimate playback duration in seconds from text word count (2.5 words/sec, min 0.5s)."""
-    words = len((text or "").split())
-    return max(0.5, words / 2.5)
-
-
 def _split_into_sentences(text: str) -> list:
     """Split text into sentences for pipelined TTS delivery."""
     parts = re.split(r'(?<=[.!?])\s+', (text or "").strip())
@@ -876,7 +929,7 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
                 return False
 
             # Use byte-based duration estimate — accurate for both Edge TTS and OpenAI TTS
-            duration = _estimate_cached_duration(audio)
+            duration = _get_audio_duration(audio)
             elapsed = 0.0
             while elapsed < duration:
                 await asyncio.sleep(0.1)
@@ -967,7 +1020,7 @@ async def _speak_streaming(
                 return " ".join(full_sentences) or None
 
             # Hold the lock (and block other audio) for the estimated playback duration
-            duration = _estimate_cached_duration(audio_bytes)
+            duration = _get_audio_duration(audio_bytes)
             elapsed = 0.0
             while elapsed < duration:
                 await asyncio.sleep(0.1)
@@ -1026,7 +1079,7 @@ async def _emit_micro_ack(bot_id: str) -> None:
         cached = get_random_ack_audio()
         if cached:
             _, ack_bytes = cached
-            if _estimate_cached_duration(ack_bytes) > _MICRO_ACK_MAX_SECONDS:
+            if _get_audio_duration(ack_bytes) > _MICRO_ACK_MAX_SECONDS:
                 # All cached files are long gap-fillers; the handler will play one shortly.
                 # Suppress the micro-ack so the user doesn't hear two filler phrases.
                 logger.debug("Micro-ack skipped — cached audio too long (gap-filler only cache)")
