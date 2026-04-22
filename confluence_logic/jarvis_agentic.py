@@ -67,6 +67,7 @@ JARVIS_TTS_SPEED = float(os.getenv("JARVIS_TTS_SPEED", "1.0"))
 JARVIS_WAKE_ACK = os.getenv("JARVIS_WAKE_ACK", "Yes?").strip()
 JARVIS_BUSY_ACK = os.getenv("JARVIS_BUSY_ACK", "I'm already on it. Give me a moment.").strip()
 JARVIS_SPEECH_HOLD_SECONDS = float(os.getenv("JARVIS_SPEECH_HOLD_SECONDS", "0.8"))
+JARVIS_INTER_SENTENCE_GAP_SECONDS = float(os.getenv("JARVIS_INTER_SENTENCE_GAP_SECONDS", "0.18"))
 JARVIS_GENERAL_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_GENERAL_CLARIFICATION_TIMEOUT", "15.0"))
 JARVIS_LISTENING_TIMEOUT = float(os.getenv("JARVIS_LISTENING_TIMEOUT", "10.0"))
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "1.0"))
@@ -935,6 +936,10 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
                         next_task.cancel()
                     return True
 
+            # Small gap between sentences so Recall.ai finishes playback before next starts
+            if i + 1 < len(sentences):
+                await asyncio.sleep(JARVIS_INTER_SENTENCE_GAP_SECONDS)
+
             # Advance to next sentence audio
             if i + 1 < len(sentences):
                 if _preloaded_all and i + 1 < len(_preloaded_all):
@@ -1024,6 +1029,9 @@ async def _speak_streaming(
                 if generation != meeting_state["output_generation"]:
                     producer_task.cancel()
                     return " ".join(full_sentences) or None
+
+            # Small gap between sentences so Recall.ai finishes playback before next starts
+            await asyncio.sleep(JARVIS_INTER_SENTENCE_GAP_SECONDS)
 
     await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
     try:
