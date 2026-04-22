@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { startBot, getSession } from "@/lib/api";
-import type { BotStatus } from "@/types";
 
 type PageState = "idle" | "joining" | "active" | "error";
 
