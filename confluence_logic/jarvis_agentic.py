@@ -876,11 +876,14 @@ def _split_into_sentences(text: str) -> list:
 
 async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: bool = False,
                          _preloaded_all: Optional[list] = None) -> bool:
-    """Speak text with sentence-level pipelined TTS.
+    """Speak text as a single concatenated MP3 clip to eliminate inter-sentence overlap.
+
+    All sentences are synthesised in parallel, their raw MP3 bytes are joined, and the
+    result is sent to Recall.ai in one POST.  Because Recall.ai receives a single
+    continuous audio stream there is no timing-based gap needed between sentences.
 
     _preloaded_all: list of pre-synthesized audio bytes for each sentence, in order.
-    When provided, skips all TTS synthesis (zero latency on first word).
-    When absent, synthesizes each sentence just-in-time with pipelining.
+    When provided, skips all TTS synthesis entirely.
     """
     output_lock = _get_output_lock()
     async with output_lock:
@@ -898,54 +901,38 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
         if not sentences:
             return False
 
-        # Get first sentence audio — from preloaded cache or synthesize now
-        if _preloaded_all and len(_preloaded_all) > 0:
-            audio = _preloaded_all[0]
+        # Collect audio for all sentences
+        if _preloaded_all and len(_preloaded_all) >= len(sentences):
+            all_audio: list = list(_preloaded_all[:len(sentences)])
         else:
-            audio = await asyncio.to_thread(synthesize_speech, sentences[0])
-
-        for i, sentence_text in enumerate(sentences):
+            # Synthesise all sentences in parallel, then gather in order
+            tasks = [
+                asyncio.create_task(asyncio.to_thread(synthesize_speech, s))
+                for s in sentences
+            ]
             if not allow_stale and generation != meeting_state["output_generation"]:
+                for t in tasks:
+                    t.cancel()
                 return False
+            all_audio = list(await asyncio.gather(*tasks))
 
-            # Kick off synthesis of next sentence (only needed when not pre-loaded)
-            next_task = None
-            if i + 1 < len(sentences):
-                if _preloaded_all and i + 1 < len(_preloaded_all):
-                    pass  # already available
-                else:
-                    next_task = asyncio.create_task(
-                        asyncio.to_thread(synthesize_speech, sentences[i + 1])
-                    )
+        if not allow_stale and generation != meeting_state["output_generation"]:
+            return False
 
-            # Play current sentence
-            ok = await asyncio.to_thread(speak_cached_audio, audio, bot_id)
-            if not ok:
-                if next_task:
-                    next_task.cancel()
-                return False
+        # Concatenate into one MP3 stream — single POST, zero timing gaps needed
+        combined = b"".join(all_audio)
+        ok = await asyncio.to_thread(speak_cached_audio, combined, bot_id)
+        if not ok:
+            return False
 
-            # Use byte-based duration estimate — accurate for both Edge TTS and OpenAI TTS
-            duration = _get_audio_duration(audio)
-            elapsed = 0.0
-            while elapsed < duration:
-                await asyncio.sleep(0.1)
-                elapsed += 0.1
-                if generation != meeting_state["output_generation"]:
-                    if next_task:
-                        next_task.cancel()
-                    return True
-
-            # Small gap between sentences so Recall.ai finishes playback before next starts
-            if i + 1 < len(sentences):
-                await asyncio.sleep(JARVIS_INTER_SENTENCE_GAP_SECONDS)
-
-            # Advance to next sentence audio
-            if i + 1 < len(sentences):
-                if _preloaded_all and i + 1 < len(_preloaded_all):
-                    audio = _preloaded_all[i + 1]
-                elif next_task:
-                    audio = await next_task
+        # Wait for the exact playback duration of the combined clip
+        duration = _get_audio_duration(combined)
+        elapsed = 0.0
+        while elapsed < duration:
+            await asyncio.sleep(0.1)
+            elapsed += 0.1
+            if generation != meeting_state["output_generation"]:
+                return True
 
         return True
 
