@@ -1,15 +1,14 @@
 """
 Intent classifier for Jarvis voice assistant.
 
-Classifies user transcript into 'confluence' (edit/create/delete intent)
-or 'general' (question/conversation).
-
-Fast-path heuristic handles obvious cases; LLM fallback handles ambiguous ones.
+Classifies user text into one of six intents using an LLM.
+All queries go directly to the LLM — no regex fast-path — so that
+STT noise (filler words, split words, mangled names, spelled-out acronyms)
+does not confuse heuristic matching.
 """
 import asyncio
 import logging
 import os
-import re
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -29,129 +28,13 @@ def _get_client() -> OpenAI:
     return _openai_client
 
 
-_CONFLUENCE_VERBS = frozenset({
-    "create", "edit", "update", "delete", "remove", "add", "rename",
-    "list", "show", "make", "write", "rewrite", "change", "replace",
-})
-
-_CONFLUENCE_NOUNS = (
-    "page", "pages", "section", "heading", "title", "document",
-    "confluence", "workspace", "content",
-)
-
-_SUMMARY_TRIGGERS = frozenset({
-    "summarize", "summary", "recap", "recapping", "missed", "miss",
-})
-_SUMMARY_PHRASES = (
-    "catch me up", "what was said", "what did i miss", "what have i missed",
-    "summarize the meeting", "give me a summary", "what happened so far",
-)
-
-_OPINION_TRIGGERS = frozenset({
-    "think", "opinion", "recommend", "recommendation", "suggestion", "suggest", "prefer", "choose",
-    "feel", "thoughts",
-})
-_OPINION_PHRASES = (
-    "what do you think", "what's your take", "what is your take",
-    "how should we proceed", "which option", "what would you do",
-    "what do you recommend", "your thoughts", "your opinion",
-)
-
-_ACTION_ITEMS_TRIGGERS = frozenset({
-    "action", "actions", "todos", "todo", "tasks", "commitments", "assignments",
-})
-_ACTION_ITEMS_PHRASES = (
-    "action items", "action points", "what are the action", "to-do list",
-    "what do we need to do", "what needs to be done", "who's doing what",
-    "what are the next steps", "next steps",
-)
-
-_SPEAKER_QUERY_PHRASES = (
-    "what did .+ say", "what has .+ said", "what .+ said",
-    "what did .+ mention", "what .+ talked about", "what .+ contributed",
-    "summarize what .+ said",
-)
-
-
-def _fast_classify(text: str) -> Optional[str]:
-    """Return intent string if heuristic is confident, else None for LLM fallback."""
-    normalized = text.strip().lower()
-    words = normalized.split()
-    if not words:
-        return None
-
-    # A Confluence-specific noun in the query means the action targets a page/document,
-    # not just the spoken meeting transcript.
-    has_confluence_target = any(noun in normalized for noun in _CONFLUENCE_NOUNS)
-    has_summary_trigger = (
-        any(phrase in normalized for phrase in _SUMMARY_PHRASES)
-        or any(word in _SUMMARY_TRIGGERS for word in words)
-    )
-
-    # If a summary trigger AND a Confluence target both appear, the user wants Jarvis to
-    # summarize or act on a Confluence document (or create a page with the summary).
-    # Route to confluence so the editor pipeline handles it end-to-end.
-    if has_summary_trigger and has_confluence_target:
-        return "confluence"
-
-    # Pure meeting-summary heuristics — only when there is no Confluence target.
-    if not has_confluence_target and has_summary_trigger:
-        return "meeting_summary"
-
-    # Action items heuristic
-    if any(phrase in normalized for phrase in _ACTION_ITEMS_PHRASES):
-        return "action_items"
-    if words[0] in ("what", "list", "give") and any(word in _ACTION_ITEMS_TRIGGERS for word in words):
-        return "action_items"
-
-    # "What did we/everyone/the team talk about" — collective subject means meeting summary, not speaker
-    if re.search(r"\bwhat (?:did|have|has) (?:we|everyone|the team|you all|you guys)\b", normalized):
-        return "meeting_summary"
-    # "What did we talk about so far" / "what was discussed" etc.
-    if re.search(r"\bwhat (?:was|were|got|has been|have been) (?:discussed|talked|said|covered)\b", normalized):
-        return "meeting_summary"
-
-    # Speaker query heuristic — handles split-verb STT artifacts like "con tribute"
-    _normalized_for_speaker = re.sub(r'\bcon\s+tribute\b', 'contribute', normalized)
-    if re.search(r"what (?:did|has|does) \w+ (?:say|said|mention|think|contribute|talk)", _normalized_for_speaker):
-        return "speaker_query"
-
-    # Meeting opinion heuristics (per D-03)
-    if any(phrase in normalized for phrase in _OPINION_PHRASES):
-        return "meeting_opinion"
-    # "how should we handle/approach/deal/proceed" → meeting opinion, not generic general
-    if re.search(r"\bhow (?:should|do|can) (?:we|i) (?:handle|approach|deal with|proceed|address)\b", normalized):
-        return "meeting_opinion"
-    if words[0] in ("what", "how", "which") and any(word in _OPINION_TRIGGERS for word in words):
-        return "meeting_opinion"
-
-    # If first word is a confluence verb AND mentions a confluence noun, it's confluence
-    if words[0] in _CONFLUENCE_VERBS:
-        if any(noun in normalized for noun in _CONFLUENCE_NOUNS):
-            return "confluence"
-        # First word is action verb but no confluence noun — still likely confluence
-        # (e.g., "delete the roadmap section")
-        return "confluence"
-    # Obvious question patterns are general
-    if words[0] in ("what", "why", "how", "when", "where", "who", "is", "are", "can", "could", "would", "do", "does", "did", "tell", "explain"):
-        if not any(noun in normalized for noun in _CONFLUENCE_NOUNS):
-            return "general"
-    return None
-
-
 async def classify_intent(text: str) -> str:
     """
     Classify user text into one of six intents:
     'confluence', 'general', 'meeting_summary', 'meeting_opinion', 'action_items', 'speaker_query'.
     Returns one of the six intent strings.
+    All queries go through the LLM — no regex pre-filter.
     """
-    # Try fast heuristic first
-    fast = _fast_classify(text)
-    if fast is not None:
-        logger.info("Classifier fast-path: %s -> %s", text[:60], fast)
-        return fast
-
-    # LLM fallback for ambiguous cases
     system_prompt = (
         "You are a classifier. The user is speaking to a voice assistant called Jarvis in a meeting. "
         "Jarvis can edit, create, delete, and list Confluence wiki pages, answer general questions, "

@@ -68,6 +68,7 @@ JARVIS_WAKE_ACK = os.getenv("JARVIS_WAKE_ACK", "Yes?").strip()
 JARVIS_BUSY_ACK = os.getenv("JARVIS_BUSY_ACK", "I'm already on it. Give me a moment.").strip()
 JARVIS_SPEECH_HOLD_SECONDS = float(os.getenv("JARVIS_SPEECH_HOLD_SECONDS", "0.8"))
 JARVIS_INTER_SENTENCE_GAP_SECONDS = float(os.getenv("JARVIS_INTER_SENTENCE_GAP_SECONDS", "0.18"))
+JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS = float(os.getenv("JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", "0.35"))
 JARVIS_GENERAL_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_GENERAL_CLARIFICATION_TIMEOUT", "15.0"))
 JARVIS_LISTENING_TIMEOUT = float(os.getenv("JARVIS_LISTENING_TIMEOUT", "10.0"))
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "1.0"))
@@ -772,7 +773,7 @@ async def _speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int
                 return False
         ok = await asyncio.to_thread(speak_cached_audio, audio_bytes, bot_id)
         if ok:
-            duration = _get_audio_duration(audio_bytes)
+            duration = _playback_wait_seconds(audio_bytes)
             elapsed = 0.0
             while elapsed < duration:
                 await asyncio.sleep(0.1)
@@ -874,6 +875,11 @@ def _split_into_sentences(text: str) -> list:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _playback_wait_seconds(audio_bytes: bytes) -> float:
+    """Return how long to hold the output lock after posting audio to Recall."""
+    return _get_audio_duration(audio_bytes) + max(0.0, JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS)
+
+
 async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: bool = False,
                          _preloaded_all: Optional[list] = None) -> bool:
     """Speak text as a single concatenated MP3 clip to eliminate inter-sentence overlap.
@@ -926,7 +932,7 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
             return False
 
         # Wait for the exact playback duration of the combined clip
-        duration = _get_audio_duration(combined)
+        duration = _playback_wait_seconds(combined)
         elapsed = 0.0
         while elapsed < duration:
             await asyncio.sleep(0.1)
@@ -949,82 +955,80 @@ async def _speak_streaming(
     bot_id: str,
     generation: int,
 ) -> Optional[str]:
-    """Play a streaming LLM response sentence-by-sentence under the output_lock.
+    """Consume a streaming LLM response, then play it as one Recall audio clip.
 
-    Binary semaphore behaviour:
-    - output_lock is acquired once before the first word and held until the last word.
-    - While waiting for the next sentence to arrive from the LLM, the generation is
-      checked every 0.5 s so a new user query can interrupt within half a second.
-    - Returns the full answer text (joined sentences) or None if dropped.
-
-    The producer runs concurrently with the gap filler so sentence[0] is usually
-    synthesised and ready to play the moment the gap filler ends.
+    Recall's output_audio endpoint receives complete MP3 uploads, not a true
+    realtime stream. Sending one upload per sentence can overlap in the meeting
+    because local duration estimates and Recall playback buffering can drift.
+    This keeps the low-latency LLM/TTS pipeline, but concatenates all sentence
+    MP3s and sends a single output_audio request.
     """
     syn_queue: asyncio.Queue = asyncio.Queue()
-    full_sentences = []
 
     async def _produce():
-        async for sentence in sentence_gen:
-            audio = await asyncio.to_thread(synthesize_speech, sentence)
-            await syn_queue.put((sentence, audio))
-        await syn_queue.put(None)
+        try:
+            async for sentence in sentence_gen:
+                if generation != meeting_state["output_generation"]:
+                    break
+                audio = await asyncio.to_thread(synthesize_speech, sentence)
+                await syn_queue.put((sentence, audio))
+        except Exception as exc:
+            logger.error("Streaming TTS producer failed: %s", exc)
+        finally:
+            await syn_queue.put(None)
 
     producer_task = asyncio.create_task(_produce())
 
-    # Wait for gap filler to end before acquiring the output lock
-    await gap_filler_task
+    full_sentences = []
+    all_audio = []
 
-    output_lock = _get_output_lock()
-    async with output_lock:
-        if generation != meeting_state["output_generation"]:
-            producer_task.cancel()
-            return None
-
+    try:
         while True:
-            # Poll for the next sentence with a timeout so we can check generation
-            # even while the producer is still working.
             if generation != meeting_state["output_generation"]:
                 producer_task.cancel()
-                return " ".join(full_sentences) or None
+                return None
 
             try:
                 item = await asyncio.wait_for(syn_queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
-                continue  # re-check generation and try again
+                continue
 
             if item is None:
-                break  # stream exhausted
+                break
 
             sentence_text, audio_bytes = item
             full_sentences.append(sentence_text)
+            all_audio.append(audio_bytes)
+    finally:
+        try:
+            await producer_task
+        except asyncio.CancelledError:
+            pass
 
+    await gap_filler_task
+
+    if not all_audio:
+        return None
+
+    output_lock = _get_output_lock()
+    async with output_lock:
+        if generation != meeting_state["output_generation"]:
+            return None
+
+        combined = b"".join(all_audio)
+        ok = await asyncio.to_thread(speak_cached_audio, combined, bot_id)
+        if not ok:
+            return None
+
+        duration = _playback_wait_seconds(combined)
+        elapsed = 0.0
+        while elapsed < duration:
+            await asyncio.sleep(0.1)
+            elapsed += 0.1
             if generation != meeting_state["output_generation"]:
-                producer_task.cancel()
                 return " ".join(full_sentences) or None
-
-            ok = await asyncio.to_thread(speak_cached_audio, audio_bytes, bot_id)
-            if not ok:
-                producer_task.cancel()
-                return " ".join(full_sentences) or None
-
-            # Hold the lock (and block other audio) for the estimated playback duration
-            duration = _get_audio_duration(audio_bytes)
-            elapsed = 0.0
-            while elapsed < duration:
-                await asyncio.sleep(0.1)
-                elapsed += 0.1
-                if generation != meeting_state["output_generation"]:
-                    producer_task.cancel()
-                    return " ".join(full_sentences) or None
-
-            # Small gap between sentences so Recall.ai finishes playback before next starts
-            await asyncio.sleep(JARVIS_INTER_SENTENCE_GAP_SECONDS)
 
     await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
-    try:
-        await producer_task
-    except asyncio.CancelledError:
-        pass
     return " ".join(full_sentences) or None
 
 

@@ -387,6 +387,42 @@ import pytest
 
 
 @pytest.mark.asyncio
+async def test_speak_streaming_combines_sentences_into_one_recall_upload():
+    _reset_meeting_state()
+
+    async def sentence_gen():
+        yield "First sentence."
+        yield "Second sentence."
+
+    async def gap_filler():
+        return None
+
+    posted_audio = []
+
+    def fake_synthesize(text):
+        return f"<{text}>".encode()
+
+    def fake_post(audio_bytes, bot_id):
+        posted_audio.append((audio_bytes, bot_id))
+        return True
+
+    with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
+         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
+         patch.object(ja, "_get_audio_duration", return_value=0.0), \
+         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
+        answer = await ja._speak_streaming(
+            sentence_gen(),
+            asyncio.create_task(gap_filler()),
+            "bot123",
+            ja.meeting_state["output_generation"],
+        )
+
+    assert answer == "First sentence. Second sentence."
+    assert posted_audio == [(b"<First sentence.><Second sentence.>", "bot123")]
+
+
+@pytest.mark.asyncio
 async def test_handle_general_question_injects_graph_context():
     """CLASSIFY-03: _handle_general_question calls graph_rag.query_context and passes result to answer_general_question."""
     _reset_meeting_state()
