@@ -9,11 +9,23 @@ create table if not exists public.meeting_history (
   ended_at timestamptz,
   summary text,
   summary_json jsonb,
+  transcript_compressed text,
+  transcript_codec text,
+  transcript_entry_count integer default 0,
+  transcript_uncompressed_bytes integer default 0,
+  transcript_compressed_bytes integer default 0,
   change_count integer default 0,
   stats jsonb,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+
+alter table public.meeting_history
+  add column if not exists transcript_compressed text,
+  add column if not exists transcript_codec text,
+  add column if not exists transcript_entry_count integer default 0,
+  add column if not exists transcript_uncompressed_bytes integer default 0,
+  add column if not exists transcript_compressed_bytes integer default 0;
 
 create index if not exists meeting_history_user_updated_idx
   on public.meeting_history (user_id, updated_at desc);

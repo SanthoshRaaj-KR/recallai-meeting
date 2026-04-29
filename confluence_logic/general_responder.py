@@ -161,7 +161,11 @@ async def answer_general_question(
         + conciseness_instruction
         + "Do not use markdown, bullet points, or formatting. "
         "Do not mention Confluence or page editing unless the user asks about it. "
-        "Speak in a warm, professional tone."
+        "Speak in a warm, professional tone. "
+        "Use meeting context as helpful background, but do not let it constrain your reasoning. "
+        "For requests asking for your opinion, critique, strategy, how to fix something, or what you would do, "
+        "think independently using your broader knowledge. You may respectfully disagree with the meeting's plan, "
+        "explain why, and propose a better alternative."
     )
 
     if multiturn_reference:
@@ -176,9 +180,10 @@ async def answer_general_question(
             "\n\nMeeting context (from the current conversation):\n"
             + graph_context
             + "\n\nIf the question relates to something in the meeting context above, "
-            "explicitly tie your answer to what was discussed — for example, say "
-            "'which is exactly what the team is working on' or 'as was mentioned earlier in this meeting'. "
-            "Do not answer generically if the meeting context is directly relevant."
+            "use that context to understand the situation and cite it when useful. "
+            "If the user is asking for factual recall about the meeting, answer from the meeting context. "
+            "If the user is asking for advice, critique, or a fix, combine the meeting context with your own knowledge "
+            "and clearly explain your reasoning."
         )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -219,7 +224,7 @@ async def answer_general_question(
             lambda: _get_client().chat.completions.create(
                 model=GENERAL_RESPONDER_MODEL,
                 messages=messages,
-                max_tokens=150,
+                max_tokens=260 if speech_rewrite_enabled else 220,
                 temperature=0.7,
             )
         )

@@ -7,6 +7,8 @@ All routes are served at the root prefix (e.g. GET /review/summary, POST /bot/st
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
 import json
 import logging
 import os
@@ -55,6 +57,12 @@ _RECALL_ACTIVE_CODES = {
     "recording_permission_allowed",
 }
 _RECALL_STATUS_CACHE_SECONDS = float(os.getenv("RECALL_STATUS_CACHE_SECONDS", "4.0"))
+JARVIS_REVIEW_MODEL = os.getenv("JARVIS_REVIEW_MODEL", "gpt-4o").strip()
+JARVIS_REVIEW_MAX_INPUT_CHARS = int(os.getenv("JARVIS_REVIEW_MAX_INPUT_CHARS", "0"))
+JARVIS_REVIEW_SUMMARY_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_SUMMARY_MAX_TOKENS", "1100"))
+JARVIS_REVIEW_MOM_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_MOM_MAX_TOKENS", "900"))
+JARVIS_REVIEW_TOPICS_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_TOPICS_MAX_TOKENS", "700"))
+JARVIS_REVIEW_ACTION_ITEMS_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_ACTION_ITEMS_MAX_TOKENS", "700"))
 
 
 def _utc_now() -> datetime:
@@ -76,6 +84,15 @@ class StartBotRequest(BaseModel):
 
 class ExecuteChangesRequest(BaseModel):
     ids: List[int]
+
+
+class MeetingChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class MeetingChatRequest(BaseModel):
+    messages: List[MeetingChatMessage]
 
 
 def _bearer_token(authorization: Optional[str]) -> str:
@@ -182,18 +199,47 @@ def _build_summary_text(transcript_log: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _format_transcript(transcript_log: List[Dict[str, Any]], max_chars: int = 10000) -> str:
+def _format_transcript(transcript_log: List[Dict[str, Any]], max_chars: Optional[int] = None) -> str:
     lines = [
         f"{entry.get('participant', 'Unknown')}: {entry.get('text', '')}"
         for entry in transcript_log
         if entry.get("text")
     ]
     text = "\n".join(lines)
+    if max_chars is None or max_chars <= 0:
+        return text
     if len(text) <= max_chars:
         return text
     head = text[:2000]
     tail = text[-(max_chars - 2000):]
     return f"{head}\n[... middle transcript omitted ...]\n{tail}"
+
+
+def _compress_transcript(transcript_log: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not transcript_log:
+        return None
+    raw = json.dumps(transcript_log, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    compressed = gzip.compress(raw, compresslevel=6)
+    return {
+        "transcript_compressed": base64.b64encode(compressed).decode("ascii"),
+        "transcript_codec": "json+gzip+base64",
+        "transcript_entry_count": len(transcript_log),
+        "transcript_uncompressed_bytes": len(raw),
+        "transcript_compressed_bytes": len(compressed),
+    }
+
+
+def _decompress_transcript(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if row.get("transcript_codec") != "json+gzip+base64" or not row.get("transcript_compressed"):
+        return []
+    try:
+        compressed = base64.b64decode(row["transcript_compressed"])
+        decoded = gzip.decompress(compressed).decode("utf-8")
+        data = json.loads(decoded)
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        logger.warning("Could not decode stored transcript for session %s: %s", row.get("session_id"), exc)
+        return []
 
 
 def _format_offset(timestamp: Any, started_at: Optional[str], first_timestamp: Optional[float]) -> str:
@@ -314,57 +360,130 @@ def _coerce_object_list(value: Any, keys: List[str]) -> List[Dict[str, Any]]:
     return items
 
 
-async def _generate_review_insights(
-    transcript_log: List[Dict[str, Any]],
-    key_topics: List[str],
-    decisions: List[str],
+async def _run_review_agent(
+    name: str,
+    system_prompt: str,
+    transcript_text: str,
+    fallback: Dict[str, Any],
+    max_tokens: int,
+    hints: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    fallback = _fallback_review_insights(transcript_log, key_topics, decisions)
-    transcript_text = _format_transcript(transcript_log)
-    if not transcript_text:
-        return fallback
-
-    prompt = (
-        "You generate structured meeting review data for a UI. "
-        "Return ONLY valid JSON with this exact shape:\n"
-        "{"
-        "\"summary\": string, "
-        "\"key_topics\": string[], "
-        "\"decisions\": string[], "
-        "\"action_items\": [{\"description\": string, \"owner\": string|null, \"due\": string|null}], "
-        "\"mom\": [{\"topic\": string, \"summary\": string}]"
-        "}\n"
-        "Use only the transcript. Do not invent people, due dates, or decisions. "
-        "If a field has no real evidence, return an empty array for it."
-    )
-
     try:
         response = await asyncio.to_thread(
             lambda: _get_openai_client().chat.completions.create(
-                model=os.getenv("JARVIS_REVIEW_MODEL", os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini")),
+                model=JARVIS_REVIEW_MODEL,
                 messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": f"Transcript:\n{transcript_text}"},
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Optional hints:\n{json.dumps(hints or {}, ensure_ascii=False)}\n\n"
+                            f"Full transcript:\n{transcript_text}"
+                        ),
+                    },
                 ],
-                max_tokens=900,
+                max_tokens=max_tokens,
                 temperature=0.2,
                 response_format={"type": "json_object"},
             )
         )
         raw = response.choices[0].message.content or "{}"
         data = json.loads(raw)
+        return data if isinstance(data, dict) else fallback
     except Exception as exc:
-        logger.warning("Review insight generation failed; using fallback: %s", exc)
+        logger.warning("%s review agent failed; using fallback: %s", name, exc)
         return fallback
 
-    generated_topics = _coerce_string_list(data.get("key_topics"))
-    generated_decisions = _coerce_string_list(data.get("decisions"))
+
+async def _generate_review_insights(
+    transcript_log: List[Dict[str, Any]],
+    key_topics: List[str],
+    decisions: List[str],
+) -> Dict[str, Any]:
+    fallback = _fallback_review_insights(transcript_log, key_topics, decisions)
+    transcript_text = _format_transcript(transcript_log, JARVIS_REVIEW_MAX_INPUT_CHARS)
+    if not transcript_text:
+        return fallback
+
+    hints = {
+        "graph_key_topics": key_topics,
+        "graph_decisions": decisions,
+    }
+
+    summary_prompt = (
+        "You are the executive-summary specialist for a processed meeting UI. "
+        "Return ONLY JSON shaped as {\"summary\": string}. "
+        "Read the full transcript, including Jarvis turns, and write a detailed executive summary. "
+        "Cover every important discussion, tradeoff, risk, decision, blocker, and follow-up supported by the transcript. "
+        "Use 2-4 short paragraphs followed by concise bullets or a compact markdown table if that improves scanability. "
+        "Do not invent facts."
+    )
+    topics_prompt = (
+        "You are the topic and decision extraction specialist for a processed meeting UI. "
+        "Return ONLY JSON shaped as {\"key_topics\": string[], \"decisions\": string[]}. "
+        "Use the full transcript as source of truth; optional graph hints are only hints. "
+        "Key topics should be concise labels. Decisions must be explicit or strongly evidenced by the discussion. "
+        "Do not invent decisions."
+    )
+    action_prompt = (
+        "You are the action-item extraction specialist for a processed meeting UI. "
+        "Return ONLY JSON shaped as {\"action_items\": [{\"description\": string, \"owner\": string|null, \"due\": string|null}]}. "
+        "Extract concrete follow-ups, ownership, due dates, blockers to unblock, and promised next steps. "
+        "Only include items supported by the transcript; use null when owner or due date is not stated."
+    )
+    mom_prompt = (
+        "You are the minutes-of-meeting specialist for a processed meeting UI. "
+        "Return ONLY JSON shaped as {\"mom\": [{\"topic\": string, \"summary\": string}]}. "
+        "Create clean chronological minutes that cover the meeting's important discussion sections. "
+        "Each topic should be short; each summary should capture the substance, context, and outcome of that section."
+    )
+
+    summary_data, topic_data, action_data, mom_data = await asyncio.gather(
+        _run_review_agent(
+            "Executive summary",
+            summary_prompt,
+            transcript_text,
+            {"summary": fallback["summary"]},
+            JARVIS_REVIEW_SUMMARY_MAX_TOKENS,
+            hints,
+        ),
+        _run_review_agent(
+            "Topics and decisions",
+            topics_prompt,
+            transcript_text,
+            {"key_topics": key_topics, "decisions": decisions},
+            JARVIS_REVIEW_TOPICS_MAX_TOKENS,
+            hints,
+        ),
+        _run_review_agent(
+            "Action items",
+            action_prompt,
+            transcript_text,
+            {"action_items": fallback["action_items"]},
+            JARVIS_REVIEW_ACTION_ITEMS_MAX_TOKENS,
+            hints,
+        ),
+        _run_review_agent(
+            "Minutes of meeting",
+            mom_prompt,
+            transcript_text,
+            {"mom": fallback["mom"]},
+            JARVIS_REVIEW_MOM_MAX_TOKENS,
+            hints,
+        ),
+    )
+
+    generated_topics = _coerce_string_list(topic_data.get("key_topics"))
+    generated_decisions = _coerce_string_list(topic_data.get("decisions"))
     return {
-        "summary": str(data.get("summary") or fallback["summary"]).strip(),
+        "summary": str(summary_data.get("summary") or fallback["summary"]).strip(),
         "key_topics": generated_topics or key_topics,
         "decisions": generated_decisions or decisions,
-        "action_items": _coerce_object_list(data.get("action_items"), ["description", "owner", "due"]),
-        "mom": _coerce_object_list(data.get("mom"), ["topic", "summary"]),
+        "action_items": (
+            _coerce_object_list(action_data.get("action_items"), ["description", "owner", "due"])
+            or fallback["action_items"]
+        ),
+        "mom": _coerce_object_list(mom_data.get("mom"), ["topic", "summary"]) or fallback["mom"],
     }
 
 
@@ -609,6 +728,94 @@ def _history_title(state: Dict[str, Any]) -> str:
         return str(meeting_url)
 
 
+def _meeting_chat_context(
+    state: Dict[str, Any],
+    history_item: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    summary_json = (history_item or {}).get("summary_json") or {}
+    transcript_log = _decompress_transcript(history_item or {}) if history_item else []
+
+    if not transcript_log:
+        transcript_log = state.get("transcript_log") or []
+
+    if not summary_json:
+        summary_json = {
+            "title": (history_item or {}).get("title") or _history_title(state),
+            "summary": (history_item or {}).get("summary"),
+            "key_topics": [],
+            "decisions": [],
+            "action_items": [],
+            "mom": [],
+            "participants": _extract_participants(_get_local_nodes(state.get("session_id"))),
+        }
+
+    return {
+        "summary": summary_json,
+        "transcript": transcript_log,
+    }
+
+
+def _format_chat_context(context: Dict[str, Any]) -> str:
+    summary = context.get("summary") or {}
+    transcript = context.get("transcript") or []
+    context_payload = {
+        "title": summary.get("title"),
+        "date": summary.get("date"),
+        "executive_summary": summary.get("summary"),
+        "key_topics": summary.get("key_topics") or [],
+        "decisions": summary.get("decisions") or [],
+        "action_items": summary.get("action_items") or [],
+        "minutes_of_meeting": summary.get("mom") or [],
+        "participants": summary.get("participants") or [],
+    }
+    return (
+        f"Processed meeting context:\n{json.dumps(context_payload, ensure_ascii=False)}\n\n"
+        f"Full meeting transcript:\n{_format_transcript(transcript, JARVIS_REVIEW_MAX_INPUT_CHARS)}"
+    )
+
+
+def _coerce_chat_messages(messages: List[MeetingChatMessage]) -> List[Dict[str, str]]:
+    coerced: List[Dict[str, str]] = []
+    for message in messages[-12:]:
+        role = message.role if message.role in {"user", "assistant"} else "user"
+        content = message.content.strip()
+        if content:
+            coerced.append({"role": role, "content": content})
+    return coerced
+
+
+async def _answer_meeting_chat(context: Dict[str, Any], messages: List[MeetingChatMessage]) -> str:
+    chat_messages = _coerce_chat_messages(messages)
+    if not chat_messages:
+        raise HTTPException(status_code=400, detail="At least one chat message is required.")
+    if not context.get("transcript") and not (context.get("summary") or {}).get("summary"):
+        raise HTTPException(status_code=404, detail="No meeting context is available for this session.")
+
+    system_prompt = (
+        "You are a meeting-specific chat assistant with independent judgment. "
+        "Use the provided meeting context to understand what happened: executive summary, minutes, topics, "
+        "decisions, action items, participants, and transcript. The transcript may include Jarvis as a meeting participant. "
+        "When the user asks what happened, who said something, what was decided, or what action items exist, answer strictly from this meeting context. "
+        "When the user asks for your opinion, critique, strategy, risks, how to fix something, or what you think about a plan, "
+        "combine the meeting context with your general knowledge and reasoning. You may disagree with the plan discussed in the meeting, "
+        "propose a better plan, point out missing risks, and be creative. Clearly separate meeting facts from your own assessment when needed. "
+        "Be respectful, practical, and specific. If something is not in the meeting context, say that clearly before giving external analysis."
+    )
+    response = await asyncio.to_thread(
+        lambda: _get_openai_client().chat.completions.create(
+            model=JARVIS_REVIEW_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": _format_chat_context(context)},
+                *chat_messages,
+            ],
+            max_tokens=800,
+            temperature=0.2,
+        )
+    )
+    return (response.choices[0].message.content or "").strip() or "I could not answer that from this meeting."
+
+
 def _persist_history_snapshot(
     state: Dict[str, Any],
     user: Optional[Dict[str, Any]],
@@ -618,6 +825,7 @@ def _persist_history_snapshot(
         return
 
     stats = summary.get("stats") if summary else None
+    transcript_payload = _compress_transcript(state.get("transcript_log") or []) or {}
     supabase_store.upsert_history(
         {
             "user_id": user.get("id"),
@@ -631,6 +839,7 @@ def _persist_history_snapshot(
             "summary_json": summary,
             "change_count": state.get("change_count", 0),
             "stats": stats,
+            **transcript_payload,
         }
     )
 
@@ -837,3 +1046,28 @@ async def get_review_summary_for_session(
     summary = await _get_review_summary_for_state(state, session_id=session_id)
     _persist_history_snapshot(state, _auth_user_from_header(authorization), summary)
     return summary
+
+
+@router.post("/sessions/{session_id}/review/chat")
+async def chat_with_meeting(
+    session_id: str,
+    body: MeetingChatRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    user = _auth_user_from_header(authorization)
+    history_item = supabase_store.get_history_item(user["id"], session_id) if user else None
+    state = _get_meeting_state(session_id)
+
+    if user and not history_item and not state.get("transcript_log"):
+        raise HTTPException(status_code=404, detail="Meeting history item not found.")
+
+    context = _meeting_chat_context(state, history_item)
+    answer = await _answer_meeting_chat(context, body.messages)
+    return {
+        "answer": answer,
+        "session_id": session_id,
+        "context": {
+            "transcript_entries": len(context.get("transcript") or []),
+            "has_summary": bool((context.get("summary") or {}).get("summary")),
+        },
+    }

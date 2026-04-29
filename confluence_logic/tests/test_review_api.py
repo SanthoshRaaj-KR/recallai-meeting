@@ -1,3 +1,6 @@
+import base64
+import gzip
+import json
 from unittest.mock import Mock, patch
 
 import pytest
@@ -53,6 +56,131 @@ def test_refresh_session_status_marks_missing_bot_as_ended():
     assert state["is_active"] is False
     assert state["session_status"] == "ended"
     assert state["end_reason"] == "Recall no longer returns this bot session."
+
+
+def test_compress_transcript_round_trips_full_log():
+    transcript = [
+        {"participant": "Asha", "text": "We should launch next week.", "timestamp": 1.0},
+        {"participant": "Jarvis", "text": "I noted the launch timing.", "timestamp": 2.0, "source": "jarvis"},
+    ]
+
+    payload = api._compress_transcript(transcript)
+
+    assert payload["transcript_codec"] == "json+gzip+base64"
+    assert payload["transcript_entry_count"] == 2
+    compressed = base64.b64decode(payload["transcript_compressed"])
+    restored = json.loads(gzip.decompress(compressed).decode("utf-8"))
+    assert restored == transcript
+
+
+def test_decompress_transcript_returns_empty_for_missing_payload():
+    assert api._decompress_transcript({"session_id": "missing"}) == []
+
+
+def test_persist_history_snapshot_stores_compressed_transcript():
+    state = {
+        "session_id": "session-1",
+        "meeting_url": "https://meet.google.com/abc-defg-hij",
+        "session_status": "ended",
+        "transcript_log": [
+            {"participant": "Asha", "text": "Please follow up.", "timestamp": 1.0},
+        ],
+        "change_count": 0,
+    }
+
+    with patch.object(api.supabase_store, "upsert_history") as upsert:
+        api._persist_history_snapshot(state, {"id": "user-1"}, {"summary": "Done", "stats": {}})
+
+    row = upsert.call_args.args[0]
+    assert row["transcript_codec"] == "json+gzip+base64"
+    assert row["transcript_entry_count"] == 1
+    assert row["transcript_compressed"]
+
+
+@pytest.mark.asyncio
+async def test_generate_review_insights_uses_parallel_specialists():
+    transcript = [
+        {"participant": "Asha", "text": "We decided to launch next week.", "timestamp": 1.0},
+        {"participant": "Ben", "text": "I will prepare the rollout checklist.", "timestamp": 2.0},
+    ]
+    calls = []
+
+    async def fake_agent(name, *_args, **_kwargs):
+        calls.append(name)
+        if name == "Executive summary":
+            return {"summary": "Detailed summary"}
+        if name == "Topics and decisions":
+            return {"key_topics": ["Launch"], "decisions": ["Launch next week"]}
+        if name == "Action items":
+            return {"action_items": [{"description": "Prepare rollout checklist", "owner": "Ben", "due": None}]}
+        if name == "Minutes of meeting":
+            return {"mom": [{"topic": "Launch plan", "summary": "The team aligned on next week's launch."}]}
+        return {}
+
+    with patch.object(api, "_run_review_agent", side_effect=fake_agent):
+        insights = await api._generate_review_insights(transcript, [], [])
+
+    assert set(calls) == {"Executive summary", "Topics and decisions", "Action items", "Minutes of meeting"}
+    assert insights["summary"] == "Detailed summary"
+    assert insights["key_topics"] == ["Launch"]
+    assert insights["decisions"] == ["Launch next week"]
+    assert insights["action_items"][0]["owner"] == "Ben"
+    assert insights["mom"][0]["topic"] == "Launch plan"
+
+
+@pytest.mark.asyncio
+async def test_chat_with_meeting_uses_session_context():
+    from confluence_logic import jarvis_agentic
+
+    session_id = "chat-session-review-api"
+    state = jarvis_agentic.get_meeting_session_state(session_id)
+    state["session_id"] = session_id
+    state["transcript_log"] = [
+        {"participant": "Asha", "text": "We chose the Friday launch.", "timestamp": 1.0},
+    ]
+
+    async def fake_answer(context, messages):
+        assert context["transcript"][0]["text"] == "We chose the Friday launch."
+        assert messages[0].content == "When are we launching?"
+        return "The team chose the Friday launch."
+
+    with patch.object(api, "_answer_meeting_chat", side_effect=fake_answer):
+        response = await api.chat_with_meeting(
+            session_id,
+            api.MeetingChatRequest(messages=[
+                api.MeetingChatMessage(role="user", content="When are we launching?"),
+            ]),
+            authorization=None,
+        )
+
+    assert response["answer"] == "The team chose the Friday launch."
+    assert response["context"]["transcript_entries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_meeting_chat_allows_independent_assessment():
+    mock_response = Mock()
+    mock_response.choices = [Mock()]
+    mock_response.choices[0].message.content = "I would challenge the plan and add a rollback gate."
+    mock_client = Mock()
+    mock_client.chat.completions.create.return_value = mock_response
+
+    context = {
+        "summary": {"summary": "The team agreed to launch on Friday.", "mom": []},
+        "transcript": [{"participant": "Asha", "text": "Let's launch Friday.", "timestamp": 1.0}],
+    }
+
+    with patch.object(api, "_get_openai_client", return_value=mock_client):
+        answer = await api._answer_meeting_chat(
+            context,
+            [api.MeetingChatMessage(role="user", content="What do you think about the launch plan?")],
+        )
+
+    assert answer == "I would challenge the plan and add a rollback gate."
+    messages = mock_client.chat.completions.create.call_args.kwargs["messages"]
+    system_text = "\n".join(message["content"] for message in messages if message["role"] == "system")
+    assert "combine the meeting context with your general knowledge" in system_text
+    assert "You may disagree with the plan" in system_text
 
 
 @pytest.mark.asyncio

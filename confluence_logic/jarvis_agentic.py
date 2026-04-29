@@ -205,6 +205,8 @@ def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
         "parallel_runners": [],
         "general_history": [],
         "last_jarvis_response": None,
+        "gap_filler_generation": None,
+        "wake_query_ack_pending": False,
         "invoker_participant": None,       # D-04: set when wake word is detected; D-03: cleared after dispatch
         "_pending_debounce_task": None,    # D-09: cancellable asyncio.Task for debounce window
         "_accumulated_query": "",          # D-07: space-joined query text from invoker segments
@@ -256,6 +258,35 @@ def get_meeting_session_state(session_id: Optional[str] = None) -> dict:
     if resolved not in _meeting_sessions:
         _meeting_sessions[resolved] = _fresh_meeting_state(resolved)
     return _meeting_sessions[resolved]
+
+
+def _append_transcript_log_entry(
+    participant: str,
+    text: str,
+    timestamp: Optional[float] = None,
+    source: str = "transcript",
+) -> Optional[dict]:
+    entry_text = (text or "").strip()
+    if not entry_text:
+        return None
+
+    log = meeting_state["transcript_log"]
+    entry = {
+        "participant": participant or "Unknown",
+        "text": entry_text,
+        "timestamp": timestamp or time.time(),
+        "source": source,
+    }
+    log.append(entry)
+    if len(log) > 500:
+        meeting_state["transcript_log"] = log[-500:]
+    return entry
+
+
+def _record_jarvis_transcript(text: str) -> None:
+    entry = _append_transcript_log_entry(BOT_NAME or "Jarvis", text, source="jarvis")
+    if entry:
+        logger.info("Transcript %s: %s", entry["participant"], entry["text"])
 
 
 def bind_bot_to_session(bot_id: str, session_id: str) -> None:
@@ -1013,6 +1044,8 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
         if not ok:
             return False
 
+        _record_jarvis_transcript(" ".join(sentences))
+
         # Wait for the exact playback duration of the combined clip
         duration = _playback_wait_seconds(combined)
         elapsed = 0.0
@@ -1102,20 +1135,24 @@ async def _speak_streaming(
         if not ok:
             return None
 
+        spoken_answer = " ".join(full_sentences) or None
+        if spoken_answer:
+            _record_jarvis_transcript(spoken_answer)
+
         duration = _playback_wait_seconds(combined)
         elapsed = 0.0
         while elapsed < duration:
             await asyncio.sleep(0.1)
             elapsed += 0.1
             if generation != meeting_state["output_generation"]:
-                return " ".join(full_sentences) or None
+                return spoken_answer
 
     await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
-    return " ".join(full_sentences) or None
+    return spoken_answer
 
 
 async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
-    """Bridge the gap between wake and answer with a pre-generated filler audio clip.
+    """Bridge the gap between wake and answer with at most one filler per generation.
 
     Fast path: plays a random pre-generated MP3 from assets/audio/gap_filler_*.mp3
     (zero TTS latency — audio is already in memory).
@@ -1124,6 +1161,22 @@ async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
     This fallback fires only when the audio cache hasn't been populated yet (e.g. the
     generate_wav_assets script hasn't been run).
     """
+    play_wake_ack = False
+    async with _get_state_lock():
+        if meeting_state.get("gap_filler_generation") == generation:
+            logger.debug("Gap filler skipped — already played for generation %s", generation)
+            return
+        meeting_state["gap_filler_generation"] = generation
+        play_wake_ack = bool(meeting_state.get("wake_query_ack_pending"))
+        meeting_state["wake_query_ack_pending"] = False
+
+    if play_wake_ack:
+        cached_ack = get_random_ack_audio()
+        if cached_ack and _get_audio_duration(cached_ack[1]) <= _MICRO_ACK_MAX_SECONDS:
+            await _speak_cached_guarded(cached_ack[1], bot_id, generation)
+        else:
+            await _speak_guarded(JARVIS_WAKE_ACK, bot_id, generation, allow_stale=True)
+
     cached = get_random_filler_audio()
     if cached:
         _, audio_bytes = cached
@@ -2067,6 +2120,7 @@ def process_transcript_event(sentence: str, timestamp: float) -> Optional[str]:
     if query is not None:
         if query:
             meeting_state["jarvis_listening"] = False
+            meeting_state["_query_from_wake_invocation"] = True
             return query
         meeting_state["jarvis_listening"] = True
         meeting_state["jarvis_listening_at"] = timestamp
@@ -2101,6 +2155,7 @@ def process_transcript_event(sentence: str, timestamp: float) -> Optional[str]:
     if meeting_state["jarvis_listening"]:
         meeting_state["jarvis_listening"] = False
         meeting_state["_query_from_listening"] = True
+        meeting_state["_query_from_wake_invocation"] = False
         return sentence or None
     return None
 
@@ -2131,7 +2186,11 @@ async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str)
             participant = data_block["participant"]["name"]
             sentence = _extract_sentence(data_block)
 
-            if not sentence or BOT_NAME.lower() in participant.lower():
+            if not sentence:
+                continue
+
+            if BOT_NAME.lower() in participant.lower():
+                logger.debug("Skipping bot transcript event from command processing: %s", sentence[:40])
                 continue
 
             # Only count speech from the active invoker toward the hold timer.
@@ -2157,19 +2216,16 @@ async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str)
             if not bot_id:
                 continue
 
-            log = meeting_state["transcript_log"]
-            log.append({
-                "participant": participant,
-                "text": sentence,
-                "timestamp": time.time(),
-            })
-            # Keep memory bounded — drop oldest entries beyond limit
-            if len(log) > 500:
-                meeting_state["transcript_log"] = log[-500:]
+            entry = _append_transcript_log_entry(
+                participant=participant,
+                text=sentence,
+                timestamp=time.time(),
+            )
 
             # Real-time graph ingestion (fire-and-forget, per D-13)
             try:
-                asyncio.create_task(graph_rag.ingest_transcript_entry(log[-1]))
+                if entry:
+                    asyncio.create_task(graph_rag.ingest_transcript_entry(entry))
             except Exception:
                 pass  # Non-fatal — graph is optional
 
@@ -2187,9 +2243,10 @@ async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str)
                     accumulated = meeting_state.get("_accumulated_query", "")
                     accumulated = (accumulated + " " + query).strip() if accumulated else query
                     meeting_state["_accumulated_query"] = accumulated
-                    # Skip micro-ack when wake+query arrive together — gap filler handles it
                     _from_listening = meeting_state.pop("_query_from_listening", False)
-                    _ = _from_listening  # consumed, not needed for this path
+                    _from_wake_invocation = meeting_state.pop("_query_from_wake_invocation", False)
+                    if _from_wake_invocation and not _from_listening:
+                        meeting_state["wake_query_ack_pending"] = True
                     # INTERRUPT-01: if TTS is currently playing (output_lock held), emit yield phrase
                     output_lock = _get_output_lock()
                     if output_lock.locked():

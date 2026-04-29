@@ -44,6 +44,42 @@ def _format_transcript(transcript_log: List[Dict[str, Any]]) -> str:
     )
 
 
+_AMBIGUOUS_OPINION_RE = re.compile(
+    r"\b(?:this|that|it|the plan|the approach|the idea|what do you think|your take|your opinion)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_ambiguous_opinion_query(query: str) -> bool:
+    normalized = (query or "").strip().lower()
+    if not normalized:
+        return True
+    explicit_topic_markers = ("about ", "regarding ", "on ", "for ", "with ")
+    has_short_deictic = any(phrase in normalized for phrase in ("this", "that", "it", "the plan", "the idea"))
+    if has_short_deictic:
+        return True
+    return bool(_AMBIGUOUS_OPINION_RE.search(normalized)) and not any(marker in normalized for marker in explicit_topic_markers)
+
+
+def _build_opinion_context(transcript_log: List[Dict[str, Any]], query: str = "") -> Dict[str, str]:
+    recent_entries = transcript_log[-10:]
+    prior_entries = transcript_log[:-10]
+
+    current_discussion = _format_transcript(recent_entries)
+    earlier_context = _format_transcript(prior_entries)
+
+    if len(current_discussion) > 5000:
+        current_discussion = current_discussion[-5000:]
+    if len(earlier_context) > 3000:
+        earlier_context = earlier_context[:1200] + "\n[... earlier meeting context omitted ...]\n" + earlier_context[-1800:]
+
+    return {
+        "current_discussion": current_discussion,
+        "earlier_context": earlier_context,
+        "is_ambiguous": "yes" if _is_ambiguous_opinion_query(query) else "no",
+    }
+
+
 async def summarize_meeting(transcript_log: List[Dict[str, Any]], detail_level: str = "brief") -> str:
     """
     Generate a spoken-language summary of everything in the meeting transcript.
@@ -124,23 +160,30 @@ async def generate_opinion(transcript_log: List[Dict[str, Any]], query: str = ""
     if not transcript_log:
         return _EMPTY_TRANSCRIPT_FALLBACK
 
-    transcript_text = _format_transcript(transcript_log)
-    max_chars = 8000
-    if len(transcript_text) > max_chars:
-        transcript_text = transcript_text[-max_chars:]
+    opinion_context = _build_opinion_context(transcript_log, query)
 
     system_prompt = (
         "You are Jarvis, an AI assistant attending a live meeting. "
-        "The user wants your opinion or recommendation based on what was discussed. "
-        "Deliver a confident, direct, first-person opinion. Pick a side — do not hedge with 'it depends' alone. "
-        "Do not use phrases like 'might', 'could potentially', or 'it depends' without committing to a clear recommendation. "
-        "Always open with a short grounding phrase such as 'Based on what I heard,' or 'From the discussion so far,' or 'Given what the team discussed,' — then immediately give your opinion. "
-        "Reference specific points, numbers, costs, or percentages from the transcript to justify your view — quote exact figures when they are relevant. "
+        "The user wants your opinion, recommendation, critique, or strategy. "
+        "Use the meeting transcript as context, but do not be limited to it. "
+        "The 'current discussion' section is the highest-priority context. "
+        "For ambiguous questions like 'what do you think about this?', answer only about the current discussion unless the user explicitly names an earlier topic. "
+        "Do not connect unrelated earlier topics to the current topic just because they appeared earlier in the meeting. "
+        "Combine what was discussed with your broader knowledge and independent reasoning. "
+        "You may respectfully disagree with the plan discussed, point out missing risks, and propose your own better plan. "
+        "Clearly separate meeting facts from your assessment when useful. "
+        "Deliver a confident, direct, first-person opinion. Pick a side when the question calls for it, while acknowledging real tradeoffs. "
+        "Reference specific points, numbers, costs, or percentages from the transcript when they matter, and add external reasoning when it improves the answer. "
         "Speak naturally as if talking aloud in the meeting. "
-        "No markdown, no bullet points, no formatting. 2 to 4 sentences maximum."
+        "Stay respectful and practical. No markdown, no bullet points, no formatting. 3 to 6 sentences maximum."
     )
 
-    user_content = f"Meeting transcript:\n\n{transcript_text}"
+    user_content = (
+        f"Current discussion (highest priority):\n\n{opinion_context['current_discussion']}\n\n"
+        f"Earlier meeting background (use only if the user explicitly asks about it or it directly clarifies the current discussion):\n\n"
+        f"{opinion_context['earlier_context'] or '[none]'}\n\n"
+        f"Ambiguous current-topic question: {opinion_context['is_ambiguous']}"
+    )
     if query:
         user_content += f"\n\nThe user asked: {query}"
     user_content += "\n\nWhat is your opinion or recommendation?"
@@ -388,11 +431,7 @@ async def generate_opinion_streaming(transcript_log: List[Dict[str, Any]], query
         yield _EMPTY_TRANSCRIPT_FALLBACK
         return
 
-    transcript_text = _format_transcript(transcript_log)
-    if len(transcript_text) > 8000:
-        head = transcript_text[:2000]
-        tail = transcript_text[-6000:]
-        transcript_text = head + "\n[... earlier content omitted for brevity ...]\n" + tail
+    opinion_context = _build_opinion_context(transcript_log, query)
 
     query_focus = (
         f" The user's specific question is: '{query}'. Address this question directly — "
@@ -401,21 +440,37 @@ async def generate_opinion_streaming(transcript_log: List[Dict[str, Any]], query
     )
     system_prompt = (
         "You are Jarvis, an AI assistant attending a live meeting. "
-        "The user wants your opinion or recommendation based on what was discussed. "
-        "Deliver a confident, direct, first-person opinion. Pick a side — do not hedge with 'it depends' alone. "
-        "Do not use phrases like 'might', 'could potentially', or 'it depends' without committing to a clear recommendation. "
-        "IMPORTANT: If the meeting participants already reached a decision or consensus on the topic, your opinion must be grounded in that decision — validate or critique it, but do not argue against what was clearly agreed upon as if the decision had not been made. "
-        "Always open with a short grounding phrase such as 'Based on what I heard,' or 'From the discussion so far,' or 'Given what the team discussed,' — then immediately give your opinion. "
-        "Reference specific points, numbers, costs, or percentages from the transcript to justify your view — quote exact figures when they are relevant. "
+        "The user wants your opinion, recommendation, critique, or strategy. "
+        "Use the meeting transcript as context, but do not be limited to it. "
+        "The 'current discussion' section is the highest-priority context. "
+        "For ambiguous questions like 'what do you think about this?', answer only about the current discussion unless the user explicitly names an earlier topic. "
+        "Do not connect unrelated earlier topics to the current topic just because they appeared earlier in the meeting. "
+        "Combine what was discussed with your broader knowledge and independent reasoning. "
+        "You may respectfully disagree with a decision or consensus from the meeting, explain why, and propose your own plan. "
+        "Do not pretend a decision was not made; acknowledge it first, then validate, critique, or improve it. "
+        "Deliver a confident, direct, first-person opinion. Pick a side when the question calls for it, while acknowledging real tradeoffs. "
+        "Reference specific points, numbers, costs, or percentages from the transcript when they matter, and add external reasoning when it improves the answer. "
         "Speak naturally as if talking aloud in the meeting. "
-        "No markdown, no bullet points, no formatting. 2 to 4 sentences maximum."
+        "Stay respectful and practical. No markdown, no bullet points, no formatting. 3 to 6 sentences maximum."
         + query_focus
     )
     # Put the specific question first in the user content so the LLM treats it as the primary task
     if query:
-        user_content = f"Question: {query}\n\nMeeting transcript:\n\n{transcript_text}\n\nAnswer the question above with a direct opinion grounded in the transcript."
+        user_content = (
+            f"Question: {query}\n\n"
+            f"Current discussion (highest priority):\n\n{opinion_context['current_discussion']}\n\n"
+            f"Earlier meeting background (use only if the user explicitly asks about it or it directly clarifies the current discussion):\n\n"
+            f"{opinion_context['earlier_context'] or '[none]'}\n\n"
+            f"Ambiguous current-topic question: {opinion_context['is_ambiguous']}\n\n"
+            "Answer the question above with a direct opinion. If the question is ambiguous, treat it as referring to the current discussion only. "
+            "Use your own reasoning and broader knowledge where helpful."
+        )
     else:
-        user_content = f"Meeting transcript:\n\n{transcript_text}\n\nWhat is your opinion or recommendation?"
+        user_content = (
+            f"Current discussion (highest priority):\n\n{opinion_context['current_discussion']}\n\n"
+            f"Earlier meeting background:\n\n{opinion_context['earlier_context'] or '[none]'}\n\n"
+            "What is your opinion or recommendation about the current discussion?"
+        )
 
     messages = [
         {"role": "system", "content": system_prompt},
