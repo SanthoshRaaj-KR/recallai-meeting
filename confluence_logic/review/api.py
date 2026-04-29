@@ -15,10 +15,12 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException
 from openai import OpenAI
 from pydantic import BaseModel
 import requests
+
+from . import supabase_store
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,28 @@ class StartBotRequest(BaseModel):
 
 class ExecuteChangesRequest(BaseModel):
     ids: List[int]
+
+
+def _bearer_token(authorization: Optional[str]) -> str:
+    if not authorization:
+        return ""
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return token.strip()
+
+
+def _auth_user_from_header(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
+    return supabase_store.user_from_bearer(_bearer_token(authorization))
+
+
+def _history_user_or_401(authorization: Optional[str]) -> Dict[str, Any]:
+    if not supabase_store.is_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured on the backend.")
+    user = _auth_user_from_header(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in with Google to view meeting history.")
+    return user
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +508,11 @@ def _refresh_session_status_from_recall(state: Dict[str, Any]) -> None:
 # POST /bot/start
 # ---------------------------------------------------------------------------
 
-async def _start_bot_for_session(body: StartBotRequest, session_id: Optional[str] = None) -> Dict[str, Any]:
+async def _start_bot_for_session(
+    body: StartBotRequest,
+    session_id: Optional[str] = None,
+    user: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Start the Recall.ai meeting bot for the given meeting URL.
 
@@ -521,6 +549,7 @@ async def _start_bot_for_session(body: StartBotRequest, session_id: Optional[str
     state["recall_status_code"] = None
     state["last_recall_status_checked_at"] = 0.0
     bind_bot_to_session(bot_id, resolved_session_id)
+    _persist_history_snapshot(state, user)
 
     logger.info("Bot started: session=%s bot_id=%s meeting=%s", resolved_session_id, bot_id, meeting_url)
     return {
@@ -533,13 +562,17 @@ async def _start_bot_for_session(body: StartBotRequest, session_id: Optional[str
 
 
 @router.post("/bot/start")
-async def start_bot(body: StartBotRequest) -> Dict[str, Any]:
-    return await _start_bot_for_session(body)
+async def start_bot(body: StartBotRequest, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    return await _start_bot_for_session(body, user=_auth_user_from_header(authorization))
 
 
 @router.post("/sessions/{session_id}/bot/start")
-async def start_bot_for_session(session_id: str, body: StartBotRequest) -> Dict[str, Any]:
-    return await _start_bot_for_session(body, session_id=session_id)
+async def start_bot_for_session(
+    session_id: str,
+    body: StartBotRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    return await _start_bot_for_session(body, session_id=session_id, user=_auth_user_from_header(authorization))
 
 
 # ---------------------------------------------------------------------------
@@ -564,20 +597,67 @@ def _build_bot_status_response(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _history_title(state: Dict[str, Any]) -> str:
+    meeting_url = state.get("meeting_url")
+    if not meeting_url:
+        return "Meeting Summary"
+    try:
+        from urllib.parse import urlparse  # noqa: PLC0415
+        parsed = urlparse(meeting_url)
+        return f"Meeting - {parsed.netloc}{parsed.path}"
+    except Exception:
+        return str(meeting_url)
+
+
+def _persist_history_snapshot(
+    state: Dict[str, Any],
+    user: Optional[Dict[str, Any]],
+    summary: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not user:
+        return
+
+    stats = summary.get("stats") if summary else None
+    supabase_store.upsert_history(
+        {
+            "user_id": user.get("id"),
+            "session_id": state.get("session_id"),
+            "title": (summary or {}).get("title") or _history_title(state),
+            "meeting_url": state.get("meeting_url"),
+            "status": _session_status(state),
+            "started_at": state.get("started_at"),
+            "ended_at": state.get("ended_at"),
+            "summary": (summary or {}).get("summary"),
+            "summary_json": summary,
+            "change_count": state.get("change_count", 0),
+            "stats": stats,
+        }
+    )
+
+
 @router.get("/bot/status")
-async def get_bot_status() -> Dict[str, Any]:
+async def get_bot_status(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     """
     Return current bot/session status.
 
     Response shape: {status, bot_id, meeting_url, change_count}
     status values: "idle" | "in_meeting" | "ended" | "error"
     """
-    return _build_bot_status_response(_get_meeting_state())
+    state = _get_meeting_state()
+    response = _build_bot_status_response(state)
+    _persist_history_snapshot(state, _auth_user_from_header(authorization))
+    return response
 
 
 @router.get("/sessions/{session_id}/bot/status")
-async def get_bot_status_for_session(session_id: str) -> Dict[str, Any]:
-    return _build_bot_status_response(_get_meeting_state(session_id))
+async def get_bot_status_for_session(
+    session_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    state = _get_meeting_state(session_id)
+    response = _build_bot_status_response(state)
+    _persist_history_snapshot(state, _auth_user_from_header(authorization))
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +724,25 @@ async def execute_review_changes_for_session(session_id: str, body: ExecuteChang
         results.append({"id": change_id, "success": True})
 
     return {"results": results}
+
+
+# ---------------------------------------------------------------------------
+# GET /history
+# ---------------------------------------------------------------------------
+
+@router.get("/history")
+async def get_history(authorization: Optional[str] = Header(default=None)) -> List[Dict[str, Any]]:
+    user = _history_user_or_401(authorization)
+    return supabase_store.list_history(user["id"])
+
+
+@router.get("/history/{session_id}")
+async def get_history_item(session_id: str, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    user = _history_user_or_401(authorization)
+    item = supabase_store.get_history_item(user["id"], session_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Meeting history item not found.")
+    return item
 
 
 # ---------------------------------------------------------------------------
@@ -722,10 +821,19 @@ async def _get_review_summary_for_state(state: Dict[str, Any], session_id: Optio
 
 
 @router.get("/review/summary")
-async def get_review_summary() -> Dict[str, Any]:
-    return await _get_review_summary_for_state(_get_meeting_state())
+async def get_review_summary(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    state = _get_meeting_state()
+    summary = await _get_review_summary_for_state(state)
+    _persist_history_snapshot(state, _auth_user_from_header(authorization), summary)
+    return summary
 
 
 @router.get("/sessions/{session_id}/review/summary")
-async def get_review_summary_for_session(session_id: str) -> Dict[str, Any]:
-    return await _get_review_summary_for_state(_get_meeting_state(session_id), session_id=session_id)
+async def get_review_summary_for_session(
+    session_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    state = _get_meeting_state(session_id)
+    summary = await _get_review_summary_for_state(state, session_id=session_id)
+    _persist_history_snapshot(state, _auth_user_from_header(authorization), summary)
+    return summary
