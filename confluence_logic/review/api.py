@@ -11,17 +11,56 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from openai import OpenAI
 from pydantic import BaseModel
+import requests
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _openai_client: Optional[OpenAI] = None
+
+_RECALL_ENDED_CODES = {
+    "call_ended",
+    "done",
+    "completed",
+    "finished",
+    "bot_left",
+    "left_call",
+    "removed_from_call",
+    "kicked",
+    "kicked_from_call",
+    "host_ended_call",
+    "meeting_ended",
+}
+_RECALL_ERROR_CODES = {
+    "fatal",
+    "error",
+    "failed",
+    "errored",
+    "call_error",
+    "joining_call_failed",
+}
+_RECALL_ACTIVE_CODES = {
+    "joining_call",
+    "in_call",
+    "recording",
+    "recording_permission_allowed",
+}
+_RECALL_STATUS_CACHE_SECONDS = float(os.getenv("RECALL_STATUS_CACHE_SECONDS", "4.0"))
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_now_iso() -> str:
+    return _utc_now().isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +353,130 @@ def _session_status(state: Dict[str, Any]) -> str:
     return "idle"
 
 
+def _normalize_recall_code(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _latest_recall_status_code(payload: Dict[str, Any]) -> str:
+    """Return the most useful Recall bot status code from a bot payload.
+
+    Recall bot payloads have changed over time, so this checks both top-level
+    fields and the latest status_changes entry.
+    """
+    direct_candidates = [
+        payload.get("status"),
+        payload.get("code"),
+        payload.get("state"),
+    ]
+    for key in ("status_changes", "statusChanges"):
+        changes = payload.get(key)
+        if isinstance(changes, list) and changes:
+            latest = changes[-1]
+            if isinstance(latest, dict):
+                direct_candidates.extend(
+                    [
+                        latest.get("code"),
+                        latest.get("status"),
+                        latest.get("state"),
+                    ]
+                )
+            else:
+                direct_candidates.append(latest)
+
+    for candidate in reversed(direct_candidates):
+        code = _normalize_recall_code(candidate)
+        if code:
+            return code
+    return ""
+
+
+def _recall_code_to_session_status(code: str, payload: Dict[str, Any]) -> Optional[str]:
+    if code in _RECALL_ENDED_CODES:
+        return "ended"
+    if code in _RECALL_ERROR_CODES:
+        return "error"
+    if code in _RECALL_ACTIVE_CODES:
+        return "in_meeting"
+
+    # Defensive fallback for payload versions that expose terminal timestamps
+    # instead of a compact status code.
+    terminal_fields = (
+        "ended_at",
+        "end_time",
+        "completed_at",
+        "recording_completed_at",
+        "left_call_at",
+        "removed_at",
+    )
+    if any(payload.get(field) for field in terminal_fields):
+        return "ended"
+    return None
+
+
+def _fetch_recall_bot_payload(bot_id: str) -> Dict[str, Any]:
+    from confluence_logic.jarvis_agentic import RECALL_API_KEY, RECALL_BASE_URL  # noqa: PLC0415
+
+    if not RECALL_API_KEY:
+        raise RuntimeError("RECALL_API_KEY is not configured")
+
+    response = requests.get(
+        f"{RECALL_BASE_URL}/bot/{bot_id}/",
+        headers={"Authorization": f"Token {RECALL_API_KEY}", "Accept": "application/json"},
+        timeout=8,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _refresh_session_status_from_recall(state: Dict[str, Any]) -> None:
+    bot_id = state.get("bot_id")
+    if not bot_id or state.get("session_status") in {"ended", "error"}:
+        return
+
+    now = time.time()
+    last_checked = float(state.get("last_recall_status_checked_at") or 0)
+    if now - last_checked < _RECALL_STATUS_CACHE_SECONDS:
+        return
+
+    state["last_recall_status_checked_at"] = now
+    try:
+        payload = _fetch_recall_bot_payload(bot_id)
+    except requests.HTTPError as exc:
+        status_code = getattr(exc.response, "status_code", None)
+        if status_code == 404:
+            state["is_active"] = False
+            state["session_status"] = "ended"
+            state["ended_at"] = _utc_now_iso()
+            state["end_reason"] = "Recall no longer returns this bot session."
+            return
+        logger.warning("Recall bot status lookup failed: %s", exc)
+        return
+    except Exception as exc:
+        logger.warning("Recall bot status lookup failed: %s", exc)
+        return
+
+    code = _latest_recall_status_code(payload)
+    mapped = _recall_code_to_session_status(code, payload)
+    state["recall_status_code"] = code
+    state["recall_status_payload"] = {
+        "status": payload.get("status"),
+        "latest_code": code,
+    }
+    if mapped == "ended":
+        state["is_active"] = False
+        state["session_status"] = "ended"
+        state["ended_at"] = _utc_now_iso()
+        state["end_reason"] = code or "Recall reported the bot left the meeting."
+    elif mapped == "error":
+        state["is_active"] = False
+        state["session_status"] = "error"
+        state["ended_at"] = _utc_now_iso()
+        state["end_reason"] = code or "Recall reported a bot error."
+    elif mapped == "in_meeting":
+        state["is_active"] = True
+        state["session_status"] = "in_meeting"
+
+
 # ---------------------------------------------------------------------------
 # POST /bot/start
 # ---------------------------------------------------------------------------
@@ -343,7 +506,11 @@ async def start_bot(body: StartBotRequest) -> Dict[str, Any]:
     meeting_state["meeting_url"] = meeting_url
     meeting_state["is_active"] = True
     meeting_state["session_status"] = "in_meeting"
-    meeting_state["started_at"] = datetime.utcnow().isoformat()
+    meeting_state["started_at"] = _utc_now_iso()
+    meeting_state["ended_at"] = None
+    meeting_state["end_reason"] = None
+    meeting_state["recall_status_code"] = None
+    meeting_state["last_recall_status_checked_at"] = 0.0
 
     logger.info("Bot started via /bot/start: bot_id=%s meeting=%s", bot_id, meeting_url)
     return {
@@ -367,6 +534,7 @@ async def get_bot_status() -> Dict[str, Any]:
     status values: "idle" | "in_meeting" | "ended" | "error"
     """
     state = _get_meeting_state()
+    _refresh_session_status_from_recall(state)
     status = _session_status(state)
 
     # change_count: number of pending changes in the queue.
@@ -378,6 +546,9 @@ async def get_bot_status() -> Dict[str, Any]:
         "bot_id": state.get("bot_id"),
         "meeting_url": state.get("meeting_url"),
         "change_count": change_count,
+        "ended_at": state.get("ended_at"),
+        "end_reason": state.get("end_reason"),
+        "recall_status_code": state.get("recall_status_code"),
     }
 
 
@@ -460,7 +631,7 @@ async def get_review_summary() -> Dict[str, Any]:
         except Exception:
             date_str = started_at
     else:
-        date_str = datetime.utcnow().strftime("%B %d, %Y")
+        date_str = _utc_now().strftime("%B %d, %Y")
 
     transcript_log: List[Dict[str, Any]] = state.get("transcript_log") or []
 
