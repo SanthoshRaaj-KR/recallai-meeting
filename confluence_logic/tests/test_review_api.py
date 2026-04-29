@@ -1,5 +1,7 @@
 from unittest.mock import Mock, patch
 
+import pytest
+
 from confluence_logic.review import api
 
 
@@ -51,3 +53,24 @@ def test_refresh_session_status_marks_missing_bot_as_ended():
     assert state["is_active"] is False
     assert state["session_status"] == "ended"
     assert state["end_reason"] == "Recall no longer returns this bot session."
+
+
+@pytest.mark.asyncio
+async def test_start_bot_uses_explicit_session_state():
+    from confluence_logic import jarvis_agentic
+
+    session_id = "test-session-review-api"
+
+    with patch.object(jarvis_agentic, "create_bot", return_value="bot-for-session"):
+        response = await api._start_bot_for_session(
+            api.StartBotRequest(meeting_url="https://meet.google.com/abc-defg-hij"),
+            session_id=session_id,
+        )
+
+    state = jarvis_agentic.get_meeting_session_state(session_id)
+
+    assert response["status"] == "in_meeting"
+    assert response["session_id"] == session_id
+    assert state["bot_id"] == "bot-for-session"
+    assert state["meeting_url"] == "https://meet.google.com/abc-defg-hij"
+    assert jarvis_agentic.get_session_id_for_bot("bot-for-session") == session_id

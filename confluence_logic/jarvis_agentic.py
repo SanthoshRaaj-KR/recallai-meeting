@@ -18,11 +18,14 @@ import re
 import sys
 import time
 from collections import deque
+from collections.abc import MutableMapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from io import BytesIO
 from itertools import count
 from threading import Thread
-from typing import Deque, Optional
+from typing import Any, Deque, Iterator, Optional
+from uuid import uuid4
 
 import requests
 import uvicorn
@@ -172,31 +175,104 @@ class VoiceTask:
     answer_future: Optional[asyncio.Future] = None
     runner: Optional[asyncio.Task] = None
 
-meeting_state = {
-    "bot_id": None,
-    "transcript_log": [],
-    "is_active": False,
-    "jarvis_listening": False,
-    "jarvis_listening_at": 0.0,
-    "current_task": None,
-    "pending_requests": deque(),
-    "pending_clarification": None,
-    "pending_general_clarification": None,  # {"question": str, "original_query": str, "bot_id": str, "expires_at": float}
-    "pending_summary_clarification": None,  # {"bot_id": str, "expires_at": float}
-    "current_task_id": None,
-    "current_phase": "idle",
-    "current_request": None,
-    "output_generation": 0,
-    "mutation_started": False,
-    "cancel_requested": False,
-    "last_user_speech_at": 0.0,
-    "parallel_runners": [],
-    "general_history": [],
-    "last_jarvis_response": None,
-    "invoker_participant": None,       # D-04: set when wake word is detected; D-03: cleared after dispatch
-    "_pending_debounce_task": None,    # D-09: cancellable asyncio.Task for debounce window
-    "_accumulated_query": "",          # D-07: space-joined query text from invoker segments
-}
+def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
+    return {
+        "session_id": session_id or "default",
+        "bot_id": None,
+        "meeting_url": None,
+        "transcript_log": [],
+        "is_active": False,
+        "session_status": "idle",
+        "started_at": None,
+        "ended_at": None,
+        "end_reason": None,
+        "recall_status_code": None,
+        "last_recall_status_checked_at": 0.0,
+        "jarvis_listening": False,
+        "jarvis_listening_at": 0.0,
+        "current_task": None,
+        "pending_requests": deque(),
+        "pending_clarification": None,
+        "pending_general_clarification": None,  # {"question": str, "original_query": str, "bot_id": str, "expires_at": float}
+        "pending_summary_clarification": None,  # {"bot_id": str, "expires_at": float}
+        "current_task_id": None,
+        "current_phase": "idle",
+        "current_request": None,
+        "output_generation": 0,
+        "mutation_started": False,
+        "cancel_requested": False,
+        "last_user_speech_at": 0.0,
+        "parallel_runners": [],
+        "general_history": [],
+        "last_jarvis_response": None,
+        "invoker_participant": None,       # D-04: set when wake word is detected; D-03: cleared after dispatch
+        "_pending_debounce_task": None,    # D-09: cancellable asyncio.Task for debounce window
+        "_accumulated_query": "",          # D-07: space-joined query text from invoker segments
+    }
+
+
+_DEFAULT_SESSION_ID = "default"
+_meeting_sessions: dict[str, dict] = {_DEFAULT_SESSION_ID: _fresh_meeting_state(_DEFAULT_SESSION_ID)}
+_bot_session_ids: dict[str, str] = {}
+_current_meeting_state: ContextVar[dict] = ContextVar(
+    "current_meeting_state",
+    default=_meeting_sessions[_DEFAULT_SESSION_ID],
+)
+
+
+class MeetingStateProxy(MutableMapping):
+    """Context-aware mapping so existing code can remain session-scoped."""
+
+    def _state(self) -> dict:
+        return _current_meeting_state.get()
+
+    def __getitem__(self, key: str) -> Any:
+        return self._state()[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._state()[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._state()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._state())
+
+    def __len__(self) -> int:
+        return len(self._state())
+
+
+meeting_state: MutableMapping[str, Any] = MeetingStateProxy()
+
+
+def create_meeting_session() -> str:
+    session_id = uuid4().hex
+    _meeting_sessions[session_id] = _fresh_meeting_state(session_id)
+    return session_id
+
+
+def get_meeting_session_state(session_id: Optional[str] = None) -> dict:
+    resolved = session_id or _DEFAULT_SESSION_ID
+    if resolved not in _meeting_sessions:
+        _meeting_sessions[resolved] = _fresh_meeting_state(resolved)
+    return _meeting_sessions[resolved]
+
+
+def bind_bot_to_session(bot_id: str, session_id: str) -> None:
+    if bot_id:
+        _bot_session_ids[bot_id] = session_id
+
+
+def get_session_id_for_bot(bot_id: str) -> Optional[str]:
+    return _bot_session_ids.get(bot_id)
+
+
+def set_current_meeting_session(session_id: Optional[str] = None):
+    return _current_meeting_state.set(get_meeting_session_state(session_id))
+
+
+def reset_current_meeting_session(token) -> None:
+    _current_meeting_state.reset(token)
 
 _openai_client: Optional[OpenAI] = None
 # WAKEALIAS-01: expanded wake word aliases with phonetic near-misses
@@ -371,10 +447,8 @@ _STATUS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _task_counter = count(1)
-_state_lock: Optional[asyncio.Lock] = None
-_state_lock_loop = None
-_output_lock: Optional[asyncio.Lock] = None
-_output_lock_loop = None
+_state_locks: dict[str, tuple[Any, asyncio.Lock]] = {}
+_output_locks: dict[str, tuple[Any, asyncio.Lock]] = {}
 
 
 def get_openai_client() -> OpenAI:
@@ -385,21 +459,23 @@ def get_openai_client() -> OpenAI:
 
 
 def _get_state_lock() -> asyncio.Lock:
-    global _state_lock, _state_lock_loop
     loop = asyncio.get_running_loop()
-    if _state_lock is None or _state_lock_loop is not loop:
-        _state_lock = asyncio.Lock()
-        _state_lock_loop = loop
-    return _state_lock
+    session_id = meeting_state.get("session_id") or _DEFAULT_SESSION_ID
+    lock_entry = _state_locks.get(session_id)
+    if lock_entry is None or lock_entry[0] is not loop:
+        lock_entry = (loop, asyncio.Lock())
+        _state_locks[session_id] = lock_entry
+    return lock_entry[1]
 
 
 def _get_output_lock() -> asyncio.Lock:
-    global _output_lock, _output_lock_loop
     loop = asyncio.get_running_loop()
-    if _output_lock is None or _output_lock_loop is not loop:
-        _output_lock = asyncio.Lock()
-        _output_lock_loop = loop
-    return _output_lock
+    session_id = meeting_state.get("session_id") or _DEFAULT_SESSION_ID
+    lock_entry = _output_locks.get(session_id)
+    if lock_entry is None or lock_entry[0] is not loop:
+        lock_entry = (loop, asyncio.Lock())
+        _output_locks[session_id] = lock_entry
+    return lock_entry[1]
 
 
 def _set_current_task(task: Optional[VoiceTask]) -> None:
@@ -539,11 +615,15 @@ def build_transcript_provider_config() -> dict:
     }
 
 
-def build_create_bot_payload(meeting_url: str) -> dict:
-    ws_url = WEBHOOK_URL.replace("https://", "wss://") + "/recall-audio-stream"
+def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None) -> dict:
+    stream_path = f"/recall-audio-stream/{session_id}" if session_id else "/recall-audio-stream"
+    ws_url = WEBHOOK_URL.replace("https://", "wss://") + stream_path
     return {
         "meeting_url": meeting_url,
         "bot_name": BOT_NAME,
+        "metadata": {
+            "session_id": session_id or _DEFAULT_SESSION_ID,
+        },
         "recording_config": {
             "transcript": {
                 "provider": build_transcript_provider_config()
@@ -559,8 +639,8 @@ def build_create_bot_payload(meeting_url: str) -> dict:
     }
 
 
-def create_bot(meeting_url: str) -> Optional[str]:
-    payload = build_create_bot_payload(meeting_url)
+def create_bot(meeting_url: str, session_id: Optional[str] = None) -> Optional[str]:
+    payload = build_create_bot_payload(meeting_url, session_id=session_id)
     try:
         response = requests.post(
             f"{RECALL_BASE_URL}/bot/",
@@ -570,6 +650,8 @@ def create_bot(meeting_url: str) -> Optional[str]:
         )
         if response.status_code in [200, 201]:
             bot_id = response.json()["id"]
+            if session_id:
+                bind_bot_to_session(bot_id, session_id)
             logger.info("Bot created: %s", bot_id)
             return bot_id
         logger.error("Bot creation failed: %s", response.text)
@@ -2025,8 +2107,18 @@ def process_transcript_event(sentence: str, timestamp: float) -> Optional[str]:
 
 @app.websocket("/recall-audio-stream")
 async def websocket_endpoint(websocket: WebSocket):
+    await _websocket_endpoint_for_session(websocket, _DEFAULT_SESSION_ID)
+
+
+@app.websocket("/recall-audio-stream/{session_id}")
+async def websocket_endpoint_for_session(websocket: WebSocket, session_id: str):
+    await _websocket_endpoint_for_session(websocket, session_id)
+
+
+async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str):
+    token = set_current_meeting_session(session_id)
     await websocket.accept()
-    logger.info("WebSocket connected")
+    logger.info("WebSocket connected for session %s", session_id)
 
     try:
         while True:
@@ -2060,6 +2152,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 with open("bot_id.txt", "r") as f:
                     bot_id = f.read().strip()
                     meeting_state["bot_id"] = bot_id
+                    bind_bot_to_session(bot_id, session_id)
 
             if not bot_id:
                 continue
@@ -2112,9 +2205,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     meeting_state["invoker_participant"] = participant
                     asyncio.create_task(_handle_bare_wake(bot_id))
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
+        logger.info("WebSocket disconnected for session %s", session_id)
     except Exception as e:
         logger.error("WebSocket error: %s", e)
+    finally:
+        reset_current_meeting_session(token)
 
 
 @app.get("/health")

@@ -69,6 +69,7 @@ def _utc_now_iso() -> str:
 
 class StartBotRequest(BaseModel):
     meeting_url: str
+    session_id: Optional[str] = None
 
 
 class ExecuteChangesRequest(BaseModel):
@@ -79,16 +80,18 @@ class ExecuteChangesRequest(BaseModel):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _get_meeting_state() -> Dict[str, Any]:
-    """Late-import meeting_state to avoid circular imports at module load time."""
+def _get_meeting_state(session_id: Optional[str] = None) -> Dict[str, Any]:
+    """Late-import session state to avoid circular imports at module load time."""
     try:
-        from confluence_logic.jarvis_agentic import meeting_state  # noqa: PLC0415
+        from confluence_logic.jarvis_agentic import get_meeting_session_state, meeting_state  # noqa: PLC0415
+        if session_id:
+            return get_meeting_session_state(session_id)
         return meeting_state
     except Exception:
         return {}
 
 
-def _get_local_nodes() -> Dict[str, Dict]:
+def _get_local_nodes(_session_id: Optional[str] = None) -> Dict[str, Dict]:
     """Late-import graph_rag._local_nodes — populated during the meeting session."""
     try:
         from confluence_logic import graph_rag  # noqa: PLC0415
@@ -481,49 +484,85 @@ def _refresh_session_status_from_recall(state: Dict[str, Any]) -> None:
 # POST /bot/start
 # ---------------------------------------------------------------------------
 
-@router.post("/bot/start")
-async def start_bot(body: StartBotRequest) -> Dict[str, Any]:
+async def _start_bot_for_session(body: StartBotRequest, session_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Start the Recall.ai meeting bot for the given meeting URL.
 
     Calls create_bot() and stores bot_id + meeting_url in meeting_state.
     Returns SessionStatus shape: {status, bot_id, meeting_url, change_count}.
     """
-    from confluence_logic.jarvis_agentic import create_bot, meeting_state  # noqa: PLC0415
+    from confluence_logic.jarvis_agentic import (
+        bind_bot_to_session,
+        create_bot,
+        create_meeting_session,
+        get_meeting_session_state,
+    )  # noqa: PLC0415
 
     meeting_url = body.meeting_url.strip()
+    resolved_session_id = session_id or body.session_id or create_meeting_session()
+    state = get_meeting_session_state(resolved_session_id)
     if not meeting_url:
-        return {"status": "error", "bot_id": None, "meeting_url": None, "change_count": 0,
+        return {"status": "error", "session_id": resolved_session_id, "bot_id": None, "meeting_url": None, "change_count": 0,
                 "error": "meeting_url is required"}
 
-    bot_id = create_bot(meeting_url)
+    bot_id = create_bot(meeting_url, session_id=resolved_session_id)
     if not bot_id:
-        return {"status": "error", "bot_id": None, "meeting_url": meeting_url,
+        return {"status": "error", "session_id": resolved_session_id, "bot_id": None, "meeting_url": meeting_url,
                 "change_count": 0, "error": "Failed to create bot — check RECALL_API_KEY and meeting URL"}
 
-    # Update shared meeting state
-    meeting_state["bot_id"] = bot_id
-    meeting_state["meeting_url"] = meeting_url
-    meeting_state["is_active"] = True
-    meeting_state["session_status"] = "in_meeting"
-    meeting_state["started_at"] = _utc_now_iso()
-    meeting_state["ended_at"] = None
-    meeting_state["end_reason"] = None
-    meeting_state["recall_status_code"] = None
-    meeting_state["last_recall_status_checked_at"] = 0.0
+    state["session_id"] = resolved_session_id
+    state["bot_id"] = bot_id
+    state["meeting_url"] = meeting_url
+    state["is_active"] = True
+    state["session_status"] = "in_meeting"
+    state["started_at"] = _utc_now_iso()
+    state["ended_at"] = None
+    state["end_reason"] = None
+    state["recall_status_code"] = None
+    state["last_recall_status_checked_at"] = 0.0
+    bind_bot_to_session(bot_id, resolved_session_id)
 
-    logger.info("Bot started via /bot/start: bot_id=%s meeting=%s", bot_id, meeting_url)
+    logger.info("Bot started: session=%s bot_id=%s meeting=%s", resolved_session_id, bot_id, meeting_url)
     return {
         "status": "in_meeting",
+        "session_id": resolved_session_id,
         "bot_id": bot_id,
         "meeting_url": meeting_url,
         "change_count": 0,
     }
 
 
+@router.post("/bot/start")
+async def start_bot(body: StartBotRequest) -> Dict[str, Any]:
+    return await _start_bot_for_session(body)
+
+
+@router.post("/sessions/{session_id}/bot/start")
+async def start_bot_for_session(session_id: str, body: StartBotRequest) -> Dict[str, Any]:
+    return await _start_bot_for_session(body, session_id=session_id)
+
+
 # ---------------------------------------------------------------------------
 # GET /bot/status
 # ---------------------------------------------------------------------------
+
+def _build_bot_status_response(state: Dict[str, Any]) -> Dict[str, Any]:
+    _refresh_session_status_from_recall(state)
+    status = _session_status(state)
+
+    change_count: int = state.get("change_count", 0)
+
+    return {
+        "status": status,
+        "session_id": state.get("session_id"),
+        "bot_id": state.get("bot_id"),
+        "meeting_url": state.get("meeting_url"),
+        "change_count": change_count,
+        "ended_at": state.get("ended_at"),
+        "end_reason": state.get("end_reason"),
+        "recall_status_code": state.get("recall_status_code"),
+    }
+
 
 @router.get("/bot/status")
 async def get_bot_status() -> Dict[str, Any]:
@@ -533,23 +572,12 @@ async def get_bot_status() -> Dict[str, Any]:
     Response shape: {status, bot_id, meeting_url, change_count}
     status values: "idle" | "in_meeting" | "ended" | "error"
     """
-    state = _get_meeting_state()
-    _refresh_session_status_from_recall(state)
-    status = _session_status(state)
+    return _build_bot_status_response(_get_meeting_state())
 
-    # change_count: number of pending changes in the queue.
-    # When the full change_queue is wired, read from DB here.
-    change_count: int = state.get("change_count", 0)
 
-    return {
-        "status": status,
-        "bot_id": state.get("bot_id"),
-        "meeting_url": state.get("meeting_url"),
-        "change_count": change_count,
-        "ended_at": state.get("ended_at"),
-        "end_reason": state.get("end_reason"),
-        "recall_status_code": state.get("recall_status_code"),
-    }
+@router.get("/sessions/{session_id}/bot/status")
+async def get_bot_status_for_session(session_id: str) -> Dict[str, Any]:
+    return _build_bot_status_response(_get_meeting_state(session_id))
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +593,13 @@ async def get_review_changes() -> List[Dict[str, Any]]:
     """
     state = _get_meeting_state()
     # When the SQLite change_queue is wired, query by session_id here.
+    pending: List[Dict[str, Any]] = state.get("pending_changes", [])
+    return pending
+
+
+@router.get("/sessions/{session_id}/review/changes")
+async def get_review_changes_for_session(session_id: str) -> List[Dict[str, Any]]:
+    state = _get_meeting_state(session_id)
     pending: List[Dict[str, Any]] = state.get("pending_changes", [])
     return pending
 
@@ -595,19 +630,33 @@ async def execute_review_changes(body: ExecuteChangesRequest) -> Dict[str, Any]:
     return {"results": results}
 
 
+@router.post("/sessions/{session_id}/review/execute")
+async def execute_review_changes_for_session(session_id: str, body: ExecuteChangesRequest) -> Dict[str, Any]:
+    state = _get_meeting_state(session_id)
+    pending: List[Dict[str, Any]] = state.get("pending_changes", [])
+
+    results = []
+    for change_id in body.ids:
+        match = next((c for c in pending if c.get("id") == change_id), None)
+        if not match:
+            results.append({"id": change_id, "success": False, "error": "Change not found"})
+            continue
+        results.append({"id": change_id, "success": True})
+
+    return {"results": results}
+
+
 # ---------------------------------------------------------------------------
 # GET /review/summary
 # ---------------------------------------------------------------------------
 
-@router.get("/review/summary")
-async def get_review_summary() -> Dict[str, Any]:
+async def _get_review_summary_for_state(state: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Return a structured meeting summary for the results page.
 
     Response matches the TypeScript MeetingSummary type used by sync-sage-bot.
     """
-    state = _get_meeting_state()
-    local_nodes = _get_local_nodes()
+    local_nodes = _get_local_nodes(session_id)
 
     meeting_url: Optional[str] = state.get("meeting_url") or os.getenv("MEETING_URL") or None
     started_at: Optional[str] = state.get("started_at") or None
@@ -654,6 +703,7 @@ async def get_review_summary() -> Dict[str, Any]:
 
     return {
         "title": title,
+        "session_id": state.get("session_id"),
         "date": date_str,
         "summary": insights["summary"],
         "key_topics": insights["key_topics"],
@@ -669,3 +719,13 @@ async def get_review_summary() -> Dict[str, Any]:
             "action_item_count": len(insights["action_items"]),
         },
     }
+
+
+@router.get("/review/summary")
+async def get_review_summary() -> Dict[str, Any]:
+    return await _get_review_summary_for_state(_get_meeting_state())
+
+
+@router.get("/sessions/{session_id}/review/summary")
+async def get_review_summary_for_session(session_id: str) -> Dict[str, Any]:
+    return await _get_review_summary_for_state(_get_meeting_state(session_id), session_id=session_id)
