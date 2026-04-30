@@ -23,6 +23,7 @@ from pydantic import BaseModel
 import requests
 
 from . import supabase_store
+from confluence_logic.agents.proposed_changes_agent import ProposedChangesAgent
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +58,13 @@ _RECALL_ACTIVE_CODES = {
     "recording_permission_allowed",
 }
 _RECALL_STATUS_CACHE_SECONDS = float(os.getenv("RECALL_STATUS_CACHE_SECONDS", "4.0"))
-JARVIS_REVIEW_MODEL = os.getenv("JARVIS_REVIEW_MODEL", "gpt-4o").strip()
+JARVIS_REVIEW_MODEL = os.getenv("JARVIS_REVIEW_MODEL", "gpt-5-mini").strip()
 JARVIS_REVIEW_MAX_INPUT_CHARS = int(os.getenv("JARVIS_REVIEW_MAX_INPUT_CHARS", "0"))
 JARVIS_REVIEW_SUMMARY_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_SUMMARY_MAX_TOKENS", "1100"))
 JARVIS_REVIEW_MOM_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_MOM_MAX_TOKENS", "900"))
 JARVIS_REVIEW_TOPICS_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_TOPICS_MAX_TOKENS", "700"))
 JARVIS_REVIEW_ACTION_ITEMS_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_ACTION_ITEMS_MAX_TOKENS", "700"))
+JARVIS_PROPOSE_CHANGES_MAX_TOKENS = int(os.getenv("JARVIS_PROPOSE_CHANGES_MAX_TOKENS", "1400"))
 
 
 def _utc_now() -> datetime:
@@ -84,6 +86,10 @@ class StartBotRequest(BaseModel):
 
 class ExecuteChangesRequest(BaseModel):
     ids: List[int]
+
+
+class ProposeChangesRequest(BaseModel):
+    query: Optional[str] = None
 
 
 class MeetingChatMessage(BaseModel):
@@ -784,6 +790,78 @@ def _coerce_chat_messages(messages: List[MeetingChatMessage]) -> List[Dict[str, 
     return coerced
 
 
+def _next_change_id(pending: List[Dict[str, Any]]) -> int:
+    existing_ids = [int(change.get("id") or 0) for change in pending if str(change.get("id") or "").isdigit()]
+    return (max(existing_ids) if existing_ids else 0) + 1
+
+
+def _replace_agent_generated_changes(
+    state: Dict[str, Any],
+    proposals: List[Dict[str, Any]],
+    session_id: Optional[str],
+    query: str,
+) -> List[Dict[str, Any]]:
+    pending = [
+        change for change in (state.get("pending_changes") or [])
+        if change.get("source") != "meeting_proposal_agent"
+    ]
+    next_id = _next_change_id(pending)
+    timestamp = _utc_now_iso()
+    generated: List[Dict[str, Any]] = []
+
+    for proposal in proposals:
+        generated.append(
+            {
+                "id": next_id,
+                "change_type": proposal.get("change_type") or "edit",
+                "page_id": proposal.get("page_id"),
+                "page_title": proposal.get("page_title") or "Confluence page",
+                "section_heading": proposal.get("section_heading"),
+                "before_content": proposal.get("before_content"),
+                "after_content": proposal.get("after_content"),
+                "timestamp": timestamp,
+                "session_id": session_id or state.get("session_id") or "",
+                "status": "pending",
+                "source": "meeting_proposal_agent",
+                "rationale": proposal.get("rationale"),
+                "generation_query": query or None,
+            }
+        )
+        next_id += 1
+
+    state["pending_changes"] = pending + generated
+    state["change_count"] = len([change for change in state["pending_changes"] if change.get("status") == "pending"])
+    return generated
+
+
+async def _propose_changes_for_state(
+    state: Dict[str, Any],
+    body: ProposeChangesRequest,
+    session_id: Optional[str] = None,
+    authorization: Optional[str] = None,
+) -> Dict[str, Any]:
+    query = (body.query or "").strip()
+    transcript_log: List[Dict[str, Any]] = state.get("transcript_log") or []
+    summary = await _get_review_summary_for_state(state, session_id=session_id)
+    transcript_text = _format_transcript(transcript_log, JARVIS_REVIEW_MAX_INPUT_CHARS)
+
+    if not transcript_text and not summary.get("summary"):
+        raise HTTPException(status_code=404, detail="No meeting context is available for this session.")
+
+    agent = ProposedChangesAgent(
+        model=JARVIS_REVIEW_MODEL,
+        client_factory=_get_openai_client,
+        max_tokens=JARVIS_PROPOSE_CHANGES_MAX_TOKENS,
+    )
+    proposals = await agent.propose(transcript_text=transcript_text, summary=summary, query=query)
+    generated = _replace_agent_generated_changes(state, proposals, session_id, query)
+    _persist_history_snapshot(state, _auth_user_from_header(authorization), summary)
+    return {
+        "changes": state.get("pending_changes", []),
+        "generated_count": len(generated),
+    }
+
+
 async def _answer_meeting_chat(context: Dict[str, Any], messages: List[MeetingChatMessage]) -> str:
     chat_messages = _coerce_chat_messages(messages)
     if not chat_messages:
@@ -891,6 +969,25 @@ async def get_review_changes_for_session(session_id: str) -> List[Dict[str, Any]
     state = _get_meeting_state(session_id)
     pending: List[Dict[str, Any]] = state.get("pending_changes", [])
     return pending
+
+
+@router.post("/review/changes/propose")
+async def propose_review_changes(
+    body: ProposeChangesRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    state = _get_meeting_state()
+    return await _propose_changes_for_state(state, body, authorization=authorization)
+
+
+@router.post("/sessions/{session_id}/review/changes/propose")
+async def propose_review_changes_for_session(
+    session_id: str,
+    body: ProposeChangesRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    state = _get_meeting_state(session_id)
+    return await _propose_changes_for_state(state, body, session_id=session_id, authorization=authorization)
 
 
 # ---------------------------------------------------------------------------

@@ -157,6 +157,54 @@ async def test_chat_with_meeting_uses_session_context():
     assert response["context"]["transcript_entries"] == 1
 
 
+def test_replace_agent_generated_changes_preserves_manual_queue_items():
+    state = {
+        "session_id": "session-1",
+        "pending_changes": [
+            {
+                "id": 3,
+                "change_type": "edit",
+                "page_id": "manual-page",
+                "page_title": "Manual page",
+                "status": "pending",
+            },
+            {
+                "id": 4,
+                "change_type": "edit",
+                "page_id": "old-agent-page",
+                "page_title": "Old generated page",
+                "status": "pending",
+                "source": "meeting_proposal_agent",
+            },
+        ],
+    }
+
+    generated = api._replace_agent_generated_changes(
+        state,
+        [
+            {
+                "change_type": "edit",
+                "page_id": "new-page",
+                "page_title": "New page",
+                "section_heading": "Decisions",
+                "before_content": None,
+                "after_content": "Add the launch decision.",
+                "rationale": "The meeting reached a launch decision.",
+            }
+        ],
+        "session-1",
+        "focus on decisions",
+    )
+
+    assert len(generated) == 1
+    assert generated[0]["id"] == 4
+    assert generated[0]["source"] == "meeting_proposal_agent"
+    assert generated[0]["generation_query"] == "focus on decisions"
+    assert state["pending_changes"][0]["page_id"] == "manual-page"
+    assert state["pending_changes"][1]["page_id"] == "new-page"
+    assert state["change_count"] == 2
+
+
 @pytest.mark.asyncio
 async def test_meeting_chat_allows_independent_assessment():
     mock_response = Mock()
