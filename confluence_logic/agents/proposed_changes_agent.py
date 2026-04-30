@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from openai import OpenAI
 
-from .tools import list_workspace_pages, search_workspace_knowledge
+from .tools import fetch_live_page, list_workspace_pages, search_workspace_knowledge
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIEVAL_QUERIES = int(os.getenv("JARVIS_PROPOSAL_RETRIEVAL_QUERIES", "6"))
+MAX_RELEVANT_PAGES = int(os.getenv("JARVIS_PROPOSAL_RELEVANT_PAGES", "6"))
+MAX_PAGE_CONTEXT_CHARS = int(os.getenv("JARVIS_PROPOSAL_PAGE_CONTEXT_CHARS", "3500"))
 
 
 class ProposedChangesAgent:
@@ -31,64 +36,131 @@ class ProposedChangesAgent:
             "You are Jarvis Confluence Proposal Agent, a specialist that proposes reviewable Confluence page updates "
             "from a meeting. You do not execute changes. You only produce a compact JSON list of proposed changes for "
             "a human to cross-check and approve later.\n\n"
-            "Inputs include the full meeting transcript, executive summary, minutes of meeting, decisions, action items, "
-            "participants, optional user guidance, and available Confluence page candidates.\n\n"
+            "Inputs include meeting context, optional user guidance, and ONLY the most relevant Confluence pages/sections "
+            "retrieved by a separate search pipeline. Treat that retrieved page context as the entire workspace view you are allowed to use.\n\n"
             "Rules:\n"
             "- Return ONLY JSON shaped as {\"changes\": [...]}.\n"
             "- Each change must have: change_type, page_id, page_title, section_heading, before_content, after_content, rationale.\n"
             "- change_type must be one of create, edit, delete, title.\n"
-            "- Prefer edit proposals for existing pages when a relevant page candidate exists.\n"
+            "- Prefer edit proposals for retrieved existing pages when a relevant page exists.\n"
             "- Use create only when the meeting clearly calls for a new page or no existing candidate fits.\n"
             "- Keep after_content concise but specific enough to paste into Confluence.\n"
             "- Never invent decisions, owners, dates, metrics, or page IDs.\n"
+            "- For existing page edits, use page_id/page_title exactly from retrieved_page_context.\n"
             "- If page_id is unknown, set it to null and use the best inferred page_title.\n"
             "- If the optional user guidance is present, prioritize it over broad transcript coverage.\n"
             "- If no useful Confluence update is supported by the meeting context, return {\"changes\": []}."
         )
 
-    def _workspace_context(self, query: str, summary: Dict[str, Any]) -> Dict[str, Any]:
-        search_terms = [
+    @staticmethod
+    def _truncate(value: str, max_chars: int = MAX_PAGE_CONTEXT_CHARS) -> str:
+        text = (value or "").strip()
+        if len(text) <= max_chars:
+            return text
+        return f"{text[: max_chars // 2]}\n[... omitted ...]\n{text[-(max_chars // 2):]}"
+
+    @staticmethod
+    def _meeting_search_queries(query: str, summary: Dict[str, Any]) -> List[str]:
+        action_items = summary.get("action_items") or []
+        action_text = " ".join(
+            str(item.get("description") if isinstance(item, dict) else item)
+            for item in action_items[:5]
+        )
+        candidates = [
             query,
-            summary.get("title") or "",
             " ".join(summary.get("key_topics") or []),
             " ".join(summary.get("decisions") or []),
+            action_text,
+            summary.get("title") or "",
+            summary.get("summary") or "",
         ]
-        search_query = " ".join(term for term in search_terms if term).strip()[:500]
 
-        pages: List[Dict[str, Any]] = []
+        queries: List[str] = []
         seen: set[str] = set()
+        for candidate in candidates:
+            normalized = " ".join(str(candidate or "").split())[:500]
+            key = normalized.lower()
+            if normalized and key not in seen:
+                seen.add(key)
+                queries.append(normalized)
+            if len(queries) >= MAX_RETRIEVAL_QUERIES:
+                break
+        return queries
 
-        def add_candidates(response: Any) -> None:
+    def _workspace_context(self, query: str, summary: Dict[str, Any]) -> Dict[str, Any]:
+        search_queries = self._meeting_search_queries(query, summary)
+        pages: List[Dict[str, Any]] = []
+        pages_by_id: Dict[str, Dict[str, Any]] = {}
+        page_scores: Dict[str, int] = {}
+
+        def add_candidates(response: Any, score: int) -> None:
             for candidate in getattr(response, "candidates", []) or []:
                 page_id = getattr(candidate, "page_id", "")
                 key = page_id or getattr(candidate, "title", "")
-                if not key or key in seen:
+                if not key:
                     continue
-                seen.add(key)
-                pages.append(
-                    {
+                existing = pages_by_id.get(key)
+                page_scores[key] = page_scores.get(key, 0) + score
+                if existing:
+                    if not existing.get("heading") and getattr(candidate, "heading", None):
+                        existing["heading"] = getattr(candidate, "heading", None)
+                    snippet = getattr(candidate, "snippet", "")
+                    if snippet and snippet not in existing.get("snippet", ""):
+                        existing["snippet"] = f"{existing.get('snippet', '')}\n{snippet}".strip()
+                    continue
+
+                pages_by_id[key] = {
                         "page_id": page_id or None,
                         "title": getattr(candidate, "title", ""),
                         "heading": getattr(candidate, "heading", None),
                         "space_key": getattr(candidate, "space_key", ""),
                         "snippet": getattr(candidate, "snippet", ""),
                     }
-                )
 
-        try:
-            add_candidates(list_workspace_pages(limit=20))
-        except Exception as exc:
-            logger.warning("Could not list workspace pages for proposal agent: %s", exc)
-
-        if search_query:
+        for index, search_query in enumerate(search_queries):
             try:
-                add_candidates(search_workspace_knowledge(search_query))
+                add_candidates(search_workspace_knowledge(search_query), score=max(1, MAX_RETRIEVAL_QUERIES - index))
             except Exception as exc:
                 logger.warning("Could not search workspace pages for proposal agent: %s", exc)
 
+        if not pages_by_id:
+            try:
+                add_candidates(list_workspace_pages(limit=20), score=1)
+            except Exception as exc:
+                logger.warning("Could not list workspace pages for proposal agent: %s", exc)
+
+        ranked_pages = sorted(
+            pages_by_id.values(),
+            key=lambda page: (
+                -page_scores.get(page.get("page_id") or page.get("title") or "", 0),
+                str(page.get("title") or "").lower(),
+            ),
+        )[:MAX_RELEVANT_PAGES]
+
+        for page in ranked_pages:
+            page_id = page.get("page_id")
+            if not page_id:
+                pages.append(page)
+                continue
+
+            try:
+                live = fetch_live_page(page_id, page.get("heading"))
+                page["available_headings"] = getattr(live, "available_headings", []) or []
+                page["expected_version"] = getattr(live, "expected_version", None)
+                section_html = getattr(live, "section_html", None)
+                if section_html:
+                    page["relevant_content"] = self._truncate(section_html)
+                else:
+                    page["relevant_content"] = self._truncate(page.get("snippet") or "")
+            except Exception as exc:
+                logger.warning("Could not fetch relevant page context for %s: %s", page_id, exc)
+                page["relevant_content"] = self._truncate(page.get("snippet") or "")
+
+            pages.append(page)
+
         return {
-            "available_pages": pages[:20],
-            "search_query": search_query,
+            "retrieval_queries": search_queries,
+            "retrieved_page_context": pages,
         }
 
     @staticmethod

@@ -2,6 +2,7 @@ import base64
 import gzip
 import json
 from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -203,6 +204,39 @@ def test_replace_agent_generated_changes_preserves_manual_queue_items():
     assert state["pending_changes"][0]["page_id"] == "manual-page"
     assert state["pending_changes"][1]["page_id"] == "new-page"
     assert state["change_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_changes_uses_existing_editor_agent_logic():
+    editor = Mock()
+    editor.handle_prepared_query = AsyncMock(return_value="Commit successful.")
+    state = {
+        "session_id": "session-1",
+        "transcript_log": [],
+        "pending_changes": [
+            {
+                "id": 7,
+                "change_type": "edit",
+                "page_id": "page-1",
+                "page_title": "Launch Plan",
+                "section_heading": "Decisions",
+                "before_content": "Old launch date",
+                "after_content": "Launch moved to Friday.",
+                "status": "pending",
+            }
+        ],
+    }
+
+    with patch.object(api, "_get_editor_agent", return_value=editor):
+        response = await api._execute_changes_for_state(state, [7])
+
+    assert response["results"] == [{"id": 7, "success": True}]
+    assert state["pending_changes"][0]["status"] == "executed"
+    prepared_query = editor.handle_prepared_query.await_args.args[0]
+    assert "Resolver context:" in prepared_query
+    assert "PAGE_ID: page-1" in prepared_query
+    assert "preview_edit" in prepared_query
+    assert editor.handle_prepared_query.await_args.kwargs["original_query"] == "Approve Confluence change 7"
 
 
 @pytest.mark.asyncio

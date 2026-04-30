@@ -834,6 +834,120 @@ def _replace_agent_generated_changes(
     return generated
 
 
+def _get_editor_agent():
+    try:
+        from confluence_logic.jarvis_agentic import session_agent  # noqa: PLC0415
+        return session_agent
+    except Exception:
+        from confluence_logic.agents.editor_agent import EditorAgent  # noqa: PLC0415
+        return EditorAgent(model=JARVIS_REVIEW_MODEL)
+
+
+def _format_approved_change_request(change: Dict[str, Any]) -> str:
+    change_type = str(change.get("change_type") or "edit").lower()
+    page_title = change.get("page_title") or "Confluence page"
+    page_id = change.get("page_id") or "NONE"
+    heading = change.get("section_heading") or "UNKNOWN"
+    before = change.get("before_content") or ""
+    after = change.get("after_content") or ""
+    rationale = change.get("rationale") or ""
+
+    action = {
+        "create": "create",
+        "delete": "delete",
+        "title": "title",
+    }.get(change_type, "edit")
+
+    if change_type == "create":
+        instruction = (
+            f"Create a new Confluence page titled '{page_title}' with the approved content below. "
+            "Use the existing create page tool and do not edit an unrelated existing page."
+        )
+    elif change_type == "delete":
+        instruction = (
+            f"Delete the approved content from the existing Confluence page '{page_title}'. "
+            "Use fetch, preview_delete, and commit_delete. Do not create a new page."
+        )
+    elif change_type == "title":
+        instruction = (
+            f"Rename the existing Confluence page '{page_title}' using the approved title/content below. "
+            "Use update_page_title. Do not create a replacement page."
+        )
+    else:
+        instruction = (
+            f"Update the existing Confluence page '{page_title}' with the approved content below. "
+            "Use fetch_live_page, preview_edit, and commit_document_edit. Do not create a new page."
+        )
+
+    return (
+        "Resolver context:\n"
+        f"ACTION: {action}\n"
+        f"PAGE_TITLE: {page_title}\n"
+        f"PAGE_ID: {page_id}\n"
+        f"HEADING: {heading}\n"
+        f"REFRAMED_REQUEST: {instruction}\n"
+        f"RATIONALE: {rationale or 'Approved from meeting proposal queue.'}\n\n"
+        "Approved Confluence change request:\n"
+        f"{instruction}\n\n"
+        f"Target page title: {page_title}\n"
+        f"Target page id: {page_id}\n"
+        f"Target section heading: {heading}\n"
+        f"Existing content or anchor excerpt:\n{before or '[none supplied]'}\n\n"
+        f"Approved new content:\n{after or '[none supplied]'}\n\n"
+        "Apply only this approved change. If the target cannot be verified with existing Confluence tools, fail clearly."
+    )
+
+
+async def _execute_single_change(
+    state: Dict[str, Any],
+    change: Dict[str, Any],
+) -> Dict[str, Any]:
+    editor_agent = _get_editor_agent()
+    context = _meeting_chat_context(state)
+    meeting_context = _format_chat_context(context)
+    prepared_query = _format_approved_change_request(change)
+    change["status"] = "approved"
+
+    try:
+        answer = await editor_agent.handle_prepared_query(
+            prepared_query,
+            original_query=f"Approve Confluence change {change.get('id')}",
+            meeting_context=meeting_context,
+        )
+    except Exception as exc:
+        change["status"] = "failed"
+        change["execution_error"] = str(exc)
+        return {"id": change.get("id"), "success": False, "error": str(exc)}
+
+    normalized_answer = (answer or "").strip()
+    if normalized_answer.lower().startswith(("error:", "the requested change did not complete", "i encountered an issue")):
+        change["status"] = "failed"
+        change["execution_error"] = normalized_answer
+        return {"id": change.get("id"), "success": False, "error": normalized_answer}
+
+    change["status"] = "executed"
+    change["execution_result"] = normalized_answer
+    return {"id": change.get("id"), "success": True}
+
+
+async def _execute_changes_for_state(state: Dict[str, Any], ids: List[int]) -> Dict[str, Any]:
+    pending: List[Dict[str, Any]] = state.get("pending_changes", [])
+    results = []
+
+    for change_id in ids:
+        match = next((c for c in pending if c.get("id") == change_id), None)
+        if not match:
+            results.append({"id": change_id, "success": False, "error": "Change not found"})
+            continue
+        if match.get("status") not in {None, "pending", "approved", "failed"}:
+            results.append({"id": change_id, "success": False, "error": f"Change is already {match.get('status')}"})
+            continue
+        results.append(await _execute_single_change(state, match))
+
+    state["change_count"] = len([change for change in pending if change.get("status") == "pending"])
+    return {"results": results}
+
+
 async def _propose_changes_for_state(
     state: Dict[str, Any],
     body: ProposeChangesRequest,
@@ -1002,34 +1116,13 @@ async def execute_review_changes(body: ExecuteChangesRequest) -> Dict[str, Any]:
     Returns per-change results: {results: [{id, success, error?}]}
     """
     state = _get_meeting_state()
-    pending: List[Dict[str, Any]] = state.get("pending_changes", [])
-
-    results = []
-    for change_id in body.ids:
-        match = next((c for c in pending if c.get("id") == change_id), None)
-        if not match:
-            results.append({"id": change_id, "success": False, "error": "Change not found"})
-            continue
-        # TODO: wire to actual Confluence commit when change_queue is implemented
-        results.append({"id": change_id, "success": True})
-
-    return {"results": results}
+    return await _execute_changes_for_state(state, body.ids)
 
 
 @router.post("/sessions/{session_id}/review/execute")
 async def execute_review_changes_for_session(session_id: str, body: ExecuteChangesRequest) -> Dict[str, Any]:
     state = _get_meeting_state(session_id)
-    pending: List[Dict[str, Any]] = state.get("pending_changes", [])
-
-    results = []
-    for change_id in body.ids:
-        match = next((c for c in pending if c.get("id") == change_id), None)
-        if not match:
-            results.append({"id": change_id, "success": False, "error": "Change not found"})
-            continue
-        results.append({"id": change_id, "success": True})
-
-    return {"results": results}
+    return await _execute_changes_for_state(state, body.ids)
 
 
 # ---------------------------------------------------------------------------
