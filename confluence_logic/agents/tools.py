@@ -1,4 +1,5 @@
 import concurrent.futures
+import asyncio
 import difflib
 import threading
 import time
@@ -10,6 +11,7 @@ from ..core.schemas import SearchResponse, CandidatePage, LivePageResponse, Prev
 from ..utils.html_parser import delete_content_in_section, edit_block_in_section, extract_headings, get_section_html
 import logging
 from agents import function_tool
+from confluence_logic import confluence_page_graph
 
 
 logger = logging.getLogger(__name__)
@@ -134,6 +136,54 @@ def _candidate_from_metadata(meta: dict) -> CandidatePage:
         snippet=(meta.get("text_summary") or meta.get("excerpt") or meta.get("title") or "")[:140],
     )
 
+
+def _run_async_blocking(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result = {}
+
+    def _runner():
+        try:
+            result["value"] = asyncio.run(coro)
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=_runner)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+def _graph_candidates(query: str) -> List[CandidatePage]:
+    user_id = confluence_page_graph.get_current_graph_user_id()
+    if not user_id:
+        return []
+    try:
+        built = _run_async_blocking(confluence_page_graph.ensure_user_confluence_graph(user_id))
+        if not built:
+            return []
+        matches = _run_async_blocking(confluence_page_graph.query_user_confluence_graph(user_id, query, limit=8))
+        return [
+            CandidatePage(
+                page_id=match.get("page_id") or "",
+                title=match.get("title") or "Unknown",
+                heading=match.get("heading") or None,
+                is_root_section=(match.get("heading") or "") == "Root",
+                space_key=match.get("space_key") or "",
+                snippet=(match.get("relevant_content") or match.get("title") or "")[:140],
+            )
+            for match in matches
+            if match.get("page_id")
+        ]
+    except Exception as exc:
+        logger.warning("Confluence graph search unavailable, falling back to live/vector search: %s", exc)
+        return []
+
 def format_page_titles_for_user(candidates: List[CandidatePage]) -> str:
     """Renders user-facing page titles without leaking internal metadata by default."""
     if not candidates:
@@ -175,6 +225,7 @@ def list_workspace_pages(limit: int = 100) -> SearchResponse:
 def search_workspace_knowledge(query: str) -> SearchResponse:
     """Searches live Confluence pages and Pinecone in parallel, then merges results."""
     try:
+        graph_results = _graph_candidates(query)
         connector = get_connector()
         store = get_store()
 
@@ -209,6 +260,10 @@ def search_workspace_knowledge(query: str) -> SearchResponse:
 
         candidates_by_page: dict[str, CandidatePage] = {}
         scored_candidates: dict[str, float] = {}
+
+        for candidate in graph_results:
+            candidates_by_page[candidate.page_id] = candidate
+            scored_candidates[candidate.page_id] = 2.0
 
         for item in live_results + recent_pages:
             page_id = item.get("page_id", "")

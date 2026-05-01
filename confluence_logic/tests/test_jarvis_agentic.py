@@ -49,6 +49,32 @@ def test_build_create_bot_payload_uses_recall_provider_by_default():
     assert endpoint["url"] == "wss://example.ngrok-free.app/recall-audio-stream"
 
 
+def test_confluence_read_query_detection_excludes_mutations():
+    assert ja._is_confluence_read_query("what does the roadmap page say about launch")
+    assert ja._is_confluence_read_query("list the Confluence pages")
+    assert not ja._is_confluence_read_query("update the roadmap page with the new launch date")
+
+
+def test_execute_editor_task_queues_proposal_instead_of_committing():
+    _reset_meeting_state()
+
+    async def run_test():
+        task = ja._new_voice_task("update the roadmap page", "bot-123")
+        task.output_generation = 1
+        task.execution_request = "Update Roadmap with Friday launch."
+
+        with patch.object(ja, "_queue_confluence_proposal", new=AsyncMock(return_value="Queued 1 proposed Confluence update for review after the meeting.")) as queue, \
+             patch.object(ja.session_agent, "handle_prepared_query", new=AsyncMock()) as editor, \
+             patch.object(ja, "_speak_guarded", new=AsyncMock()) as speak:
+            await ja._execute_editor_task(task)
+
+        queue.assert_awaited_once_with(task, "Update Roadmap with Friday launch.")
+        editor.assert_not_awaited()
+        speak.assert_awaited_once()
+
+    asyncio.run(run_test())
+
+
 def test_build_create_bot_payload_supports_assembly_provider_opt_in():
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
          patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "assembly_ai_v3_streaming"), \

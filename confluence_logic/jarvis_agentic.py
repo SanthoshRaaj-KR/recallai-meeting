@@ -46,6 +46,8 @@ from .meeting_responder import (
     extract_action_items_streaming, summarize_speaker_streaming,
 )
 from confluence_logic import graph_rag
+from confluence_logic import confluence_page_graph
+from confluence_logic.agents.proposed_changes_agent import ProposedChangesAgent
 
 load_dotenv()
 
@@ -94,7 +96,19 @@ async def lifespan(app: FastAPI):
     # Bot is started on-demand via POST /bot/start from the review UI.
     # Do not auto-join on startup — MEETING_URL in .env is ignored here.
     logger.info("Jarvis server ready — waiting for /bot/start from the UI")
-    yield
+    stop_graph_refresh = asyncio.Event()
+    graph_refresh_task = asyncio.create_task(
+        confluence_page_graph.refresh_known_user_graphs_forever(stop_graph_refresh)
+    )
+    try:
+        yield
+    finally:
+        stop_graph_refresh.set()
+        graph_refresh_task.cancel()
+        try:
+            await graph_refresh_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -112,6 +126,17 @@ if RECALL_TRANSCRIPT_PROVIDER == "assembly_ai_v3_streaming" and ASSEMBLY_API:
         "ASSEMBLY_API is set locally, but Recall BYOB transcription still requires the AssemblyAI key "
         "to be configured in the Recall transcription credentials dashboard."
     )
+
+
+_CONFLUENCE_MUTATION_PATTERN = re.compile(
+    r"\b(?:create|edit|update|delete|remove|rename|add|append|write|change|make|draft|save|put|move|replace)\b",
+    re.IGNORECASE,
+)
+
+_CONFLUENCE_READ_PATTERN = re.compile(
+    r"\b(?:what|which|who|when|where|why|how|summarize|summary|explain|tell|show|list|find|search|read|does|do|is|are)\b",
+    re.IGNORECASE,
+)
 
 _DYNAMIC_ACK_FALLBACKS = {
     "queued": "Noted, I'll handle that shortly.",
@@ -361,6 +386,132 @@ def _build_meeting_context_for_edit() -> str:
     if len(context) > 2000:
         context = context[-2000:]
     return context
+
+
+def _current_confluence_graph_user_id() -> str:
+    auth_user_id = meeting_state.get("auth_user_id")
+    if auth_user_id:
+        return f"supabase:{auth_user_id}"
+    return f"session:{meeting_state.get('session_id') or 'default'}"
+
+
+def _is_confluence_read_query(text: str) -> bool:
+    normalized = (text or "").strip()
+    if not normalized:
+        return False
+    if _CONFLUENCE_MUTATION_PATTERN.search(normalized):
+        return False
+    return bool(_CONFLUENCE_READ_PATTERN.search(normalized))
+
+
+async def _queue_confluence_proposal(task: VoiceTask, prepared_request: str) -> str:
+    from confluence_logic.review import api as review_api  # noqa: PLC0415
+
+    state = meeting_state
+    transcript_log = list(state.get("transcript_log") or [])
+    transcript_text = review_api._format_transcript(transcript_log, review_api.JARVIS_REVIEW_MAX_INPUT_CHARS)
+    meeting_context = _build_meeting_context_for_edit()
+    summary = {
+        "title": state.get("meeting_url") or "Live meeting",
+        "summary": meeting_context,
+        "key_topics": [],
+        "decisions": [],
+        "action_items": [],
+        "mom": [],
+        "participants": [],
+    }
+    proposal_query = prepared_request.strip() or task.request
+    agent = ProposedChangesAgent(
+        model=JARVIS_AGENT_MODEL,
+        client_factory=get_openai_client,
+        max_tokens=review_api.JARVIS_PROPOSE_CHANGES_MAX_TOKENS,
+    )
+    proposals = await agent.propose(
+        transcript_text=transcript_text or meeting_context,
+        summary=summary,
+        query=proposal_query,
+        graph_user_id=_current_confluence_graph_user_id(),
+    )
+    generated = review_api._append_agent_generated_changes(
+        state,
+        proposals,
+        state.get("session_id"),
+        proposal_query,
+        source="in_meeting_proposal_agent",
+    )
+    if generated:
+        return f"Queued {len(generated)} proposed Confluence update{'s' if len(generated) != 1 else ''} for review after the meeting."
+    return "I could not find a concrete Confluence change to queue from that request."
+
+
+async def _answer_confluence_question(query: str) -> str:
+    graph_user_id = _current_confluence_graph_user_id()
+    try:
+        await asyncio.wait_for(confluence_page_graph.ensure_user_confluence_graph(graph_user_id), timeout=0.7)
+    except (asyncio.TimeoutError, Exception):
+        asyncio.create_task(confluence_page_graph.ensure_user_confluence_graph(graph_user_id))
+
+    if re.search(r"\b(?:list|show|what).*(?:pages|documents|docs)\b", query, re.IGNORECASE):
+        pages = await confluence_page_graph.list_user_confluence_pages(graph_user_id, limit=10)
+        if pages:
+            titles = ", ".join(page.get("title") or "Untitled" for page in pages[:10])
+            return f"I found these Confluence pages in the graph: {titles}."
+
+    try:
+        contexts = await asyncio.wait_for(
+            confluence_page_graph.query_user_confluence_graph(graph_user_id, query, limit=6),
+            timeout=0.8,
+        )
+    except (asyncio.TimeoutError, Exception):
+        contexts = []
+
+    if not contexts:
+        return "I could not find a relevant Confluence page for that yet. The workspace graph may still be refreshing."
+
+    context_text = json.dumps(
+        [
+            {
+                "page_title": item.get("title"),
+                "heading": item.get("heading"),
+                "content": item.get("relevant_content"),
+            }
+            for item in contexts
+        ],
+        ensure_ascii=False,
+    )
+    response = await asyncio.to_thread(
+        lambda: get_openai_client().chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You answer questions about Confluence pages using only the retrieved page/section context. "
+                        "Keep the answer concise and useful for spoken delivery. If context is insufficient, say so."
+                    ),
+                },
+                {"role": "user", "content": f"Question: {query}\n\nRetrieved Confluence context:\n{context_text}"},
+            ],
+            max_tokens=220,
+            temperature=0.2,
+        )
+    )
+    return (response.choices[0].message.content or "").strip() or "I could not answer that from the Confluence graph."
+
+
+async def _handle_confluence_question(query: str, bot_id: str) -> None:
+    generation = meeting_state["output_generation"]
+    try:
+        answer_task = asyncio.create_task(_answer_confluence_question(query))
+        gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
+        answer = await answer_task
+        await gap_filler_task
+        await _speak_guarded(answer, bot_id, generation, allow_stale=True)
+        if answer:
+            meeting_state["last_jarvis_response"] = {"intent": "confluence_question", "query": query, "answer": answer}
+    except Exception as exc:
+        logger.error("Confluence question handling failed: %s", exc)
+        await _speak_guarded("I hit an issue reading the Confluence graph.", bot_id, generation, allow_stale=True)
 
 
 async def _confirm_delete_gate(task: VoiceTask) -> bool:
@@ -1423,22 +1574,8 @@ async def _execute_editor_task(task: VoiceTask) -> Optional[str]:
     try:
         meeting_state["pending_clarification"] = None
         _set_task_phase(task, "executing")
-        meeting_context = _build_meeting_context_for_edit()
         execution_request = task.execution_request or task.request
-        if execution_request:
-            answer = await session_agent.handle_prepared_query(
-                execution_request,
-                original_query=task.request,
-                meeting_context=meeting_context,
-                mutation_started_callback=lambda action: _mark_mutation_started(task, action),
-            )
-        else:
-            answer = await session_agent.handle_voice_query(
-                task.request,
-                clarification_context=_format_pending_clarification(task),
-                meeting_context=meeting_context,
-                mutation_started_callback=lambda action: _mark_mutation_started(task, action),
-            )
+        answer = await _queue_confluence_proposal(task, execution_request)
 
         if task.cancel_requested or task.superseded:
             return None
@@ -1452,8 +1589,7 @@ async def _execute_editor_task(task: VoiceTask) -> Optional[str]:
             return answer
 
         _set_task_phase(task, "speaking")
-        if _should_speak_final_answer(task, answer):
-            await _speak_guarded(answer, task.bot_id, task.output_generation)
+        await _speak_guarded(answer, task.bot_id, task.output_generation)
         return None
     except asyncio.CancelledError:
         logger.info("Editor task %s cancelled.", task.task_id)
@@ -1513,12 +1649,6 @@ async def _run_voice_task(task: VoiceTask) -> None:
                 return
 
             task.intent = decision.intent or "edit"
-
-            # Delete confirmation gate (DELGATE-01)
-            if task.intent == "delete" and JARVIS_DELETE_CONFIRM_ENABLED:
-                confirmed = await _confirm_delete_gate(task)
-                if not confirmed or task.cancel_requested:
-                    return
 
             if decision.needs_clarification:
                 _set_task_phase(task, "clarifying")
@@ -2005,6 +2135,11 @@ async def handle_spoken_request(spoken_query: str, bot_id: str) -> None:
     if intent == "speaker_query":
         logger.info("Classified as speaker query: %s", spoken_query[:60])
         asyncio.create_task(_handle_speaker_query(spoken_query, bot_id))
+        return
+
+    if intent == "confluence" and _is_confluence_read_query(spoken_query):
+        logger.info("Classified as Confluence read question: %s", spoken_query[:60])
+        asyncio.create_task(_handle_confluence_question(spoken_query, bot_id))
         return
 
     # Check if this is an answer to a pending general clarification
