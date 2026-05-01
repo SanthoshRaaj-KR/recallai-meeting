@@ -79,30 +79,46 @@ class ConfluenceConnector(DocumentFetcher, DocumentPusher):
     def list_pages(self, limit: int = 25) -> List[Dict[str, Any]]:
         """List recent Confluence pages to help vague enterprise requests resolve to likely targets."""
         url = f"{self.base_url}/content/search"
-        response = requests.get(
-            url,
-            auth=self.auth,
-            headers={"Accept": "application/json"},
-            params={
-                "cql": "type = page order by lastmodified desc",
-                "limit": max(1, min(limit, 100)),
-                "expand": "space,version",
-            },
-            timeout=15,
-        )
-        response.raise_for_status()
-
         results = []
-        for item in response.json().get("results", []):
-            results.append(
-                {
-                    "page_id": item.get("id", ""),
-                    "title": item.get("title", ""),
-                    "space_key": item.get("space", {}).get("key", ""),
-                    "version": item.get("version", {}).get("number"),
-                    "excerpt": item.get("excerpt", ""),
-                }
+        requested_limit = max(1, limit)
+        start = 0
+        page_size = min(requested_limit, 100)
+
+        while len(results) < requested_limit:
+            response = requests.get(
+                url,
+                auth=self.auth,
+                headers={"Accept": "application/json"},
+                params={
+                    "cql": "type = page order by lastmodified desc",
+                    "limit": min(page_size, requested_limit - len(results)),
+                    "start": start,
+                    "expand": "space,version",
+                },
+                timeout=15,
             )
+            response.raise_for_status()
+            payload = response.json()
+            items = payload.get("results", [])
+            if not items:
+                break
+
+            for item in items:
+                results.append(
+                    {
+                        "page_id": item.get("id", ""),
+                        "title": item.get("title", ""),
+                        "space_key": item.get("space", {}).get("key", ""),
+                        "version": item.get("version", {}).get("number"),
+                        "excerpt": item.get("excerpt", ""),
+                    }
+                )
+                if len(results) >= requested_limit:
+                    break
+
+            if len(items) < page_size:
+                break
+            start += len(items)
 
         return results
 

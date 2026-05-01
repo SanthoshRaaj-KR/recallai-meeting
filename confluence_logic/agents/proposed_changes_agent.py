@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 from openai import OpenAI
 
 from .tools import fetch_live_page, list_workspace_pages, search_workspace_knowledge
+from confluence_logic import confluence_page_graph
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +88,39 @@ class ProposedChangesAgent:
                 break
         return queries
 
-    def _workspace_context(self, query: str, summary: Dict[str, Any]) -> Dict[str, Any]:
-        search_queries = self._meeting_search_queries(query, summary)
+    async def _graph_workspace_context(
+        self,
+        graph_user_id: str,
+        search_queries: List[str],
+    ) -> List[Dict[str, Any]]:
+        if not graph_user_id or not search_queries:
+            return []
+
+        built = await confluence_page_graph.ensure_user_confluence_graph(graph_user_id)
+        if not built:
+            return []
+
+        pages_by_key: Dict[str, Dict[str, Any]] = {}
+        for search_query in search_queries:
+            matches = await confluence_page_graph.query_user_confluence_graph(
+                graph_user_id,
+                search_query,
+                limit=MAX_RELEVANT_PAGES,
+            )
+            for match in matches:
+                key = match.get("page_id") or f"{match.get('title')}::{match.get('heading')}"
+                if not key:
+                    continue
+                existing = pages_by_key.get(key)
+                if existing is None or float(match.get("score") or 0) > float(existing.get("score") or 0):
+                    pages_by_key[key] = match
+
+        return sorted(
+            pages_by_key.values(),
+            key=lambda page: (-float(page.get("score") or 0), str(page.get("title") or "").lower()),
+        )[:MAX_RELEVANT_PAGES]
+
+    def _fallback_workspace_context(self, search_queries: List[str]) -> List[Dict[str, Any]]:
         pages: List[Dict[str, Any]] = []
         pages_by_id: Dict[str, Dict[str, Any]] = {}
         page_scores: Dict[str, int] = {}
@@ -110,12 +142,12 @@ class ProposedChangesAgent:
                     continue
 
                 pages_by_id[key] = {
-                        "page_id": page_id or None,
-                        "title": getattr(candidate, "title", ""),
-                        "heading": getattr(candidate, "heading", None),
-                        "space_key": getattr(candidate, "space_key", ""),
-                        "snippet": getattr(candidate, "snippet", ""),
-                    }
+                    "page_id": page_id or None,
+                    "title": getattr(candidate, "title", ""),
+                    "heading": getattr(candidate, "heading", None),
+                    "space_key": getattr(candidate, "space_key", ""),
+                    "snippet": getattr(candidate, "snippet", ""),
+                }
 
         for index, search_query in enumerate(search_queries):
             try:
@@ -158,9 +190,20 @@ class ProposedChangesAgent:
 
             pages.append(page)
 
+        return pages
+
+    async def _workspace_context(self, query: str, summary: Dict[str, Any], graph_user_id: str = "") -> Dict[str, Any]:
+        search_queries = self._meeting_search_queries(query, summary)
+        pages = await self._graph_workspace_context(graph_user_id, search_queries)
+        source = "neo4j_confluence_graph" if pages else "live_search_fallback"
+        if not pages:
+            pages = await asyncio.to_thread(self._fallback_workspace_context, search_queries)
+
         return {
             "retrieval_queries": search_queries,
             "retrieved_page_context": pages,
+            "retrieval_source": source,
+            "graph_user_id": graph_user_id or None,
         }
 
     @staticmethod
@@ -204,8 +247,9 @@ class ProposedChangesAgent:
         transcript_text: str,
         summary: Dict[str, Any],
         query: str = "",
+        graph_user_id: str = "",
     ) -> List[Dict[str, Any]]:
-        workspace_context = await asyncio.to_thread(self._workspace_context, query, summary)
+        workspace_context = await self._workspace_context(query, summary, graph_user_id=graph_user_id)
         payload = {
             "optional_user_guidance": query or None,
             "meeting_summary": {

@@ -24,6 +24,7 @@ import requests
 
 from . import supabase_store
 from confluence_logic.agents.proposed_changes_agent import ProposedChangesAgent
+from confluence_logic import confluence_page_graph
 
 logger = logging.getLogger(__name__)
 
@@ -664,6 +665,7 @@ async def _start_bot_for_session(
                 "change_count": 0, "error": "Failed to create bot — check RECALL_API_KEY and meeting URL"}
 
     state["session_id"] = resolved_session_id
+    state["auth_user_id"] = user.get("id") if user else None
     state["bot_id"] = bot_id
     state["meeting_url"] = meeting_url
     state["is_active"] = True
@@ -795,6 +797,19 @@ def _next_change_id(pending: List[Dict[str, Any]]) -> int:
     return (max(existing_ids) if existing_ids else 0) + 1
 
 
+def _confluence_graph_user_id(user: Optional[Dict[str, Any]], session_id: Optional[str]) -> str:
+    if user and user.get("id"):
+        return f"supabase:{user['id']}"
+    return f"session:{session_id or 'default'}"
+
+
+def _state_graph_user_id(state: Dict[str, Any], session_id: Optional[str] = None) -> str:
+    auth_user_id = state.get("auth_user_id")
+    if auth_user_id:
+        return f"supabase:{auth_user_id}"
+    return _confluence_graph_user_id(None, session_id or state.get("session_id"))
+
+
 def _replace_agent_generated_changes(
     state: Dict[str, Any],
     proposals: List[Dict[str, Any]],
@@ -823,6 +838,43 @@ def _replace_agent_generated_changes(
                 "session_id": session_id or state.get("session_id") or "",
                 "status": "pending",
                 "source": "meeting_proposal_agent",
+                "rationale": proposal.get("rationale"),
+                "generation_query": query or None,
+            }
+        )
+        next_id += 1
+
+    state["pending_changes"] = pending + generated
+    state["change_count"] = len([change for change in state["pending_changes"] if change.get("status") == "pending"])
+    return generated
+
+
+def _append_agent_generated_changes(
+    state: Dict[str, Any],
+    proposals: List[Dict[str, Any]],
+    session_id: Optional[str],
+    query: str,
+    source: str = "meeting_proposal_agent",
+) -> List[Dict[str, Any]]:
+    pending = state.get("pending_changes") or []
+    next_id = _next_change_id(pending)
+    timestamp = _utc_now_iso()
+    generated: List[Dict[str, Any]] = []
+
+    for proposal in proposals:
+        generated.append(
+            {
+                "id": next_id,
+                "change_type": proposal.get("change_type") or "edit",
+                "page_id": proposal.get("page_id"),
+                "page_title": proposal.get("page_title") or "Confluence page",
+                "section_heading": proposal.get("section_heading"),
+                "before_content": proposal.get("before_content"),
+                "after_content": proposal.get("after_content"),
+                "timestamp": timestamp,
+                "session_id": session_id or state.get("session_id") or "",
+                "status": "pending",
+                "source": source,
                 "rationale": proposal.get("rationale"),
                 "generation_query": query or None,
             }
@@ -908,16 +960,24 @@ async def _execute_single_change(
     prepared_query = _format_approved_change_request(change)
     change["status"] = "approved"
 
+    graph_user_id = _confluence_graph_user_id(
+        {"id": state.get("auth_user_id")} if state.get("auth_user_id") else None,
+        state.get("session_id"),
+    )
+    graph_token = confluence_page_graph.set_current_graph_user_id(graph_user_id)
     try:
-        answer = await editor_agent.handle_prepared_query(
-            prepared_query,
-            original_query=f"Approve Confluence change {change.get('id')}",
-            meeting_context=meeting_context,
-        )
-    except Exception as exc:
-        change["status"] = "failed"
-        change["execution_error"] = str(exc)
-        return {"id": change.get("id"), "success": False, "error": str(exc)}
+        try:
+            answer = await editor_agent.handle_prepared_query(
+                prepared_query,
+                original_query=f"Approve Confluence change {change.get('id')}",
+                meeting_context=meeting_context,
+            )
+        except Exception as exc:
+            change["status"] = "failed"
+            change["execution_error"] = str(exc)
+            return {"id": change.get("id"), "success": False, "error": str(exc)}
+    finally:
+        confluence_page_graph.reset_current_graph_user_id(graph_token)
 
     normalized_answer = (answer or "").strip()
     if normalized_answer.lower().startswith(("error:", "the requested change did not complete", "i encountered an issue")):
@@ -962,14 +1022,22 @@ async def _propose_changes_for_state(
     if not transcript_text and not summary.get("summary"):
         raise HTTPException(status_code=404, detail="No meeting context is available for this session.")
 
+    user = _auth_user_from_header(authorization)
+    if user:
+        state["auth_user_id"] = user.get("id")
     agent = ProposedChangesAgent(
         model=JARVIS_REVIEW_MODEL,
         client_factory=_get_openai_client,
         max_tokens=JARVIS_PROPOSE_CHANGES_MAX_TOKENS,
     )
-    proposals = await agent.propose(transcript_text=transcript_text, summary=summary, query=query)
+    proposals = await agent.propose(
+        transcript_text=transcript_text,
+        summary=summary,
+        query=query,
+        graph_user_id=_confluence_graph_user_id(user, session_id or state.get("session_id")) if user else _state_graph_user_id(state, session_id),
+    )
     generated = _replace_agent_generated_changes(state, proposals, session_id, query)
-    _persist_history_snapshot(state, _auth_user_from_header(authorization), summary)
+    _persist_history_snapshot(state, user, summary)
     return {
         "changes": state.get("pending_changes", []),
         "generated_count": len(generated),
