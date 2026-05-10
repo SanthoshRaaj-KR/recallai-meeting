@@ -241,6 +241,12 @@ class ProposedChangesAgent:
 
         return normalized
 
+    @staticmethod
+    def _openai_completion_options(model: str, max_tokens: int) -> Dict[str, Any]:
+        if model.startswith(("gpt-5", "o1", "o3", "o4")):
+            return {"model": model, "max_completion_tokens": max_tokens}
+        return {"model": model, "max_tokens": max_tokens, "temperature": 0.2}
+
     async def propose(
         self,
         *,
@@ -267,13 +273,11 @@ class ProposedChangesAgent:
 
         response = await asyncio.to_thread(
             lambda: self.client_factory().chat.completions.create(
-                model=self.model,
+                **self._openai_completion_options(self.model, self.max_tokens),
                 messages=[
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
-                max_tokens=self.max_tokens,
-                temperature=0.2,
                 response_format={"type": "json_object"},
             )
         )

@@ -27,6 +27,9 @@ def _reset_meeting_state():
     ja.meeting_state["invoker_participant"] = None
     ja.meeting_state["_pending_debounce_task"] = None
     ja.meeting_state["_accumulated_query"] = ""
+    ja.meeting_state["gap_filler_generation"] = None
+    ja.meeting_state["active_gap_filler_task"] = None
+    ja.meeting_state["wake_query_ack_pending"] = False
 
 
 def test_build_create_bot_payload_uses_recall_provider_by_default():
@@ -533,6 +536,32 @@ async def test_debounced_dispatch_clears_state_and_calls_handle_spoken_request()
 
 
 @pytest.mark.asyncio
+async def test_inline_wake_query_starts_ack_preface_before_dispatch():
+    """FILLER-03: 'Hey Jarvis, <question>' starts the yes+filler preface immediately."""
+    _reset_meeting_state()
+    ja.meeting_state["wake_query_ack_pending"] = True
+    ja.meeting_state["invoker_participant"] = "Alice"
+    calls = []
+
+    async def mock_gap(query, bot_id, generation):
+        calls.append(("gap", query, bot_id, generation))
+
+    async def mock_dispatch(query, bot_id):
+        calls.append(("dispatch", query, bot_id))
+        await asyncio.sleep(0)
+
+    with patch.object(ja, "_speak_gap_filler", side_effect=mock_gap), \
+         patch.object(ja, "handle_spoken_request", side_effect=mock_dispatch), \
+         patch.object(ja, "JARVIS_DEBOUNCE_SECONDS", 0.0):
+        await ja._debounced_dispatch("what is money", "bot123")
+        await asyncio.sleep(0)
+
+    assert ("gap", "what is money", "bot123", 0) in calls
+    assert ("dispatch", "what is money", "bot123") in calls
+    assert calls.index(("gap", "what is money", "bot123", 0)) < calls.index(("dispatch", "what is money", "bot123"))
+
+
+@pytest.mark.asyncio
 async def test_handle_general_question_speaks_filler_before_answer():
     """FILLER-02: contextual gap filler is spoken before the LLM answer is generated."""
     _reset_meeting_state()
@@ -542,7 +571,7 @@ async def test_handle_general_question_speaks_filler_before_answer():
         call_order.append("filler_generated")
         return "Let me check that for you."
 
-    async def mock_speak(text, bot_id, generation, allow_stale=False):
+    async def mock_speak(text, bot_id, generation, allow_stale=False, **_kwargs):
         call_order.append(f"spoke:{text[:20]}")
         return True
 
@@ -553,6 +582,8 @@ async def test_handle_general_question_speaks_filler_before_answer():
     with patch.object(ja, "_generate_contextual_gap_filler", side_effect=mock_filler), \
          patch.object(ja, "_speak_guarded", side_effect=mock_speak), \
          patch.object(ja, "answer_general_question", side_effect=mock_answer), \
+         patch.object(ja, "get_random_filler_audio", return_value=None), \
+         patch.object(ja, "synthesize_speech", return_value=b"mp3"), \
          patch.object(ja, "graph_rag") as mock_graph, \
          patch.object(ja, "_looks_like_clarification_prompt", return_value=False):
         mock_graph.query_context = AsyncMock(return_value="")
@@ -560,5 +591,5 @@ async def test_handle_general_question_speaks_filler_before_answer():
 
     assert "filler_generated" in call_order, "filler was never generated"
     assert "answer_generated" in call_order, "answer was never generated"
-    assert call_order.index("filler_generated") < call_order.index("answer_generated"), \
-        f"Expected filler before answer, got: {call_order}"
+    assert call_order.index("spoke:Let me check that fo") < call_order.index("spoke:The answer is 42."), \
+        f"Expected filler audio before answer audio, got: {call_order}"

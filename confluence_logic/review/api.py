@@ -155,6 +155,16 @@ def _get_openai_client() -> OpenAI:
     return _openai_client
 
 
+def _openai_completion_options(model: str, max_tokens: int, temperature: float = 0.2) -> Dict[str, Any]:
+    opts: Dict[str, Any] = {"model": model}
+    if model.startswith(("gpt-5", "o1", "o3", "o4")):
+        opts["max_completion_tokens"] = max_tokens
+    else:
+        opts["max_tokens"] = max_tokens
+        opts["temperature"] = temperature
+    return opts
+
+
 def _extract_topics(local_nodes: Dict[str, Dict]) -> List[str]:
     """Return unique Topic names from the in-memory graph (title-cased, deduplicated)."""
     seen: set = set()
@@ -308,7 +318,8 @@ def _fallback_review_insights(
 ) -> Dict[str, Any]:
     transcript_text = _build_summary_text(transcript_log)
     summary = (
-        transcript_text
+        "AI review generation is unavailable right now. The transcript was captured, but the post-meeting "
+        "summary could not be generated. Check the OpenAI API key/model and retry."
         if transcript_text
         else "No transcript has been captured yet. Start or continue the meeting to populate this summary."
     )
@@ -375,22 +386,18 @@ async def _run_review_agent(
     max_tokens: int,
     hints: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    user_content = (
+        f"Optional hints:\n{json.dumps(hints or {}, ensure_ascii=False)}\n\n"
+        f"Full transcript:\n{transcript_text}"
+    )
     try:
         response = await asyncio.to_thread(
             lambda: _get_openai_client().chat.completions.create(
-                model=JARVIS_REVIEW_MODEL,
+                **_openai_completion_options(JARVIS_REVIEW_MODEL, max_tokens),
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Optional hints:\n{json.dumps(hints or {}, ensure_ascii=False)}\n\n"
-                            f"Full transcript:\n{transcript_text}"
-                        ),
-                    },
+                    {"role": "user", "content": user_content},
                 ],
-                max_tokens=max_tokens,
-                temperature=0.2,
                 response_format={"type": "json_object"},
             )
         )
@@ -763,6 +770,54 @@ def _meeting_chat_context(
     }
 
 
+def _hydrate_state_from_history_item(
+    state: Dict[str, Any],
+    history_item: Optional[Dict[str, Any]],
+    user: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not history_item:
+        return
+
+    summary_json = history_item.get("summary_json") or {}
+    if user and user.get("id"):
+        state["auth_user_id"] = user["id"]
+
+    for source_key, state_key in (
+        ("session_id", "session_id"),
+        ("meeting_url", "meeting_url"),
+        ("status", "session_status"),
+        ("started_at", "started_at"),
+        ("ended_at", "ended_at"),
+        ("change_count", "change_count"),
+    ):
+        value = history_item.get(source_key)
+        current = state.get(state_key)
+        is_default_status = state_key == "session_status" and current == "idle"
+        if value is not None and (not current or is_default_status):
+            state[state_key] = value
+
+    if not state.get("transcript_log"):
+        transcript_log = _decompress_transcript(history_item)
+        if transcript_log:
+            state["transcript_log"] = transcript_log
+
+    if isinstance(summary_json, dict):
+        pending_changes = summary_json.get("pending_changes")
+        if pending_changes and not state.get("pending_changes"):
+            state["pending_changes"] = pending_changes
+            state["change_count"] = len([change for change in pending_changes if change.get("status") == "pending"])
+
+
+def _history_item_for_request(
+    session_id: Optional[str],
+    authorization: Optional[str],
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    user = _auth_user_from_header(authorization)
+    if not user or not session_id:
+        return None, user
+    return supabase_store.get_history_item(user["id"], session_id), user
+
+
 def _format_chat_context(context: Dict[str, Any]) -> str:
     summary = context.get("summary") or {}
     transcript = context.get("transcript") or []
@@ -1063,14 +1118,12 @@ async def _answer_meeting_chat(context: Dict[str, Any], messages: List[MeetingCh
     )
     response = await asyncio.to_thread(
         lambda: _get_openai_client().chat.completions.create(
-            model=JARVIS_REVIEW_MODEL,
+            **_openai_completion_options(JARVIS_REVIEW_MODEL, 800),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "system", "content": _format_chat_context(context)},
                 *chat_messages,
             ],
-            max_tokens=800,
-            temperature=0.2,
         )
     )
     return (response.choices[0].message.content or "").strip() or "I could not answer that from this meeting."
@@ -1084,19 +1137,24 @@ def _persist_history_snapshot(
     if not user:
         return
 
-    stats = summary.get("stats") if summary else None
+    summary_payload = dict(summary or {})
+    pending_changes = state.get("pending_changes") or []
+    if pending_changes:
+        summary_payload["pending_changes"] = pending_changes
+
+    stats = summary_payload.get("stats") if summary_payload else None
     transcript_payload = _compress_transcript(state.get("transcript_log") or []) or {}
     supabase_store.upsert_history(
         {
             "user_id": user.get("id"),
             "session_id": state.get("session_id"),
-            "title": (summary or {}).get("title") or _history_title(state),
+            "title": summary_payload.get("title") or _history_title(state),
             "meeting_url": state.get("meeting_url"),
             "status": _session_status(state),
             "started_at": state.get("started_at"),
             "ended_at": state.get("ended_at"),
-            "summary": (summary or {}).get("summary"),
-            "summary_json": summary,
+            "summary": summary_payload.get("summary"),
+            "summary_json": summary_payload or None,
             "change_count": state.get("change_count", 0),
             "stats": stats,
             **transcript_payload,
@@ -1124,8 +1182,10 @@ async def get_bot_status_for_session(
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     state = _get_meeting_state(session_id)
+    history_item, user = _history_item_for_request(session_id, authorization)
+    _hydrate_state_from_history_item(state, history_item, user)
     response = _build_bot_status_response(state)
-    _persist_history_snapshot(state, _auth_user_from_header(authorization))
+    _persist_history_snapshot(state, user)
     return response
 
 
@@ -1147,8 +1207,13 @@ async def get_review_changes() -> List[Dict[str, Any]]:
 
 
 @router.get("/sessions/{session_id}/review/changes")
-async def get_review_changes_for_session(session_id: str) -> List[Dict[str, Any]]:
+async def get_review_changes_for_session(
+    session_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> List[Dict[str, Any]]:
     state = _get_meeting_state(session_id)
+    history_item, user = _history_item_for_request(session_id, authorization)
+    _hydrate_state_from_history_item(state, history_item, user)
     pending: List[Dict[str, Any]] = state.get("pending_changes", [])
     return pending
 
@@ -1169,6 +1234,8 @@ async def propose_review_changes_for_session(
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     state = _get_meeting_state(session_id)
+    history_item, user = _history_item_for_request(session_id, authorization)
+    _hydrate_state_from_history_item(state, history_item, user)
     return await _propose_changes_for_state(state, body, session_id=session_id, authorization=authorization)
 
 
@@ -1287,6 +1354,58 @@ async def _get_review_summary_for_state(state: Dict[str, Any], session_id: Optio
     }
 
 
+def _stored_summary_response(
+    history_item: Optional[Dict[str, Any]],
+    state: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not history_item:
+        return None
+    summary_json = history_item.get("summary_json")
+    if not isinstance(summary_json, dict) or not summary_json.get("summary"):
+        return None
+    if str(summary_json.get("summary") or "").startswith("AI review generation is unavailable right now."):
+        return None
+
+    transcript_log = state.get("transcript_log") or _decompress_transcript(history_item)
+    stored = {
+        key: value
+        for key, value in summary_json.items()
+        if key in {
+            "title",
+            "session_id",
+            "date",
+            "summary",
+            "key_topics",
+            "action_items",
+            "decisions",
+            "participants",
+            "mom",
+            "transcript_highlights",
+            "stats",
+        }
+    }
+    stored.setdefault("title", history_item.get("title") or _history_title(state))
+    stored["session_id"] = history_item.get("session_id") or state.get("session_id")
+    stored.setdefault("date", history_item.get("started_at") or history_item.get("updated_at") or "")
+    stored.setdefault("key_topics", [])
+    stored.setdefault("action_items", [])
+    stored.setdefault("decisions", [])
+    stored.setdefault("participants", [])
+    stored.setdefault("mom", [])
+    stored["transcript_highlights"] = stored.get("transcript_highlights") or _build_transcript_highlights(
+        transcript_log,
+        history_item.get("started_at") or state.get("started_at"),
+    )
+    if not stored.get("stats"):
+        stored["stats"] = {
+            "transcript_entries": len(transcript_log),
+            "topic_count": len(stored["key_topics"]),
+            "decision_count": len(stored["decisions"]),
+            "action_item_count": len(stored["action_items"]),
+        }
+    return stored
+
+
 @router.get("/review/summary")
 async def get_review_summary(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     state = _get_meeting_state()
@@ -1301,8 +1420,13 @@ async def get_review_summary_for_session(
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     state = _get_meeting_state(session_id)
+    history_item, user = _history_item_for_request(session_id, authorization)
+    _hydrate_state_from_history_item(state, history_item, user)
+    stored = _stored_summary_response(history_item, state)
+    if stored:
+        return stored
     summary = await _get_review_summary_for_state(state, session_id=session_id)
-    _persist_history_snapshot(state, _auth_user_from_header(authorization), summary)
+    _persist_history_snapshot(state, user, summary)
     return summary
 
 

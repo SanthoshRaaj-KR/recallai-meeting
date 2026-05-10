@@ -98,6 +98,91 @@ def test_persist_history_snapshot_stores_compressed_transcript():
     assert row["transcript_compressed"]
 
 
+def test_persist_history_snapshot_embeds_pending_changes_in_summary_json():
+    state = {
+        "session_id": "session-1",
+        "session_status": "ended",
+        "transcript_log": [],
+        "pending_changes": [
+            {"id": 1, "status": "pending", "page_title": "Roadmap"},
+        ],
+        "change_count": 1,
+    }
+
+    with patch.object(api.supabase_store, "upsert_history") as upsert:
+        api._persist_history_snapshot(state, {"id": "user-1"}, {"summary": "Done", "stats": {}})
+
+    row = upsert.call_args.args[0]
+    assert row["summary_json"]["pending_changes"][0]["page_title"] == "Roadmap"
+
+
+def test_hydrate_state_from_history_item_restores_transcript_and_changes():
+    transcript = [{"participant": "Asha", "text": "We chose Friday.", "timestamp": 1.0}]
+    history_item = {
+        "session_id": "session-restore",
+        "meeting_url": "https://meet.google.com/abc-defg-hij",
+        "status": "ended",
+        "started_at": "2026-05-10T10:00:00+00:00",
+        "summary_json": {
+            "summary": "The team chose Friday.",
+            "pending_changes": [{"id": 4, "status": "pending", "page_title": "Launch"}],
+        },
+        **api._compress_transcript(transcript),
+    }
+    state = {
+        "session_id": "session-restore",
+        "session_status": "idle",
+        "transcript_log": [],
+        "pending_changes": [],
+    }
+
+    api._hydrate_state_from_history_item(state, history_item, {"id": "user-1"})
+
+    assert state["session_status"] == "ended"
+    assert state["meeting_url"] == "https://meet.google.com/abc-defg-hij"
+    assert state["auth_user_id"] == "user-1"
+    assert state["transcript_log"] == transcript
+    assert state["pending_changes"][0]["page_title"] == "Launch"
+    assert state["change_count"] == 1
+
+
+def test_stored_summary_response_uses_history_summary_after_restart():
+    transcript = [{"participant": "Asha", "text": "We chose Friday.", "timestamp": 1.0}]
+    history_item = {
+        "session_id": "session-restore",
+        "title": "Meeting - restored",
+        "started_at": "2026-05-10T10:00:00+00:00",
+        "summary_json": {
+            "summary": "Stored summary",
+            "key_topics": ["Launch"],
+            "decisions": ["Launch Friday"],
+            "action_items": [],
+            "participants": ["Asha"],
+            "mom": [],
+        },
+        **api._compress_transcript(transcript),
+    }
+
+    response = api._stored_summary_response(history_item, {"session_id": "session-restore"})
+
+    assert response["summary"] == "Stored summary"
+    assert response["session_id"] == "session-restore"
+    assert response["stats"]["transcript_entries"] == 1
+    assert response["transcript_highlights"][0]["text"] == "We chose Friday."
+
+
+def test_stored_summary_response_ignores_prior_generation_failure():
+    history_item = {
+        "session_id": "session-restore",
+        "summary_json": {
+            "summary": "AI review generation is unavailable right now. The transcript was captured, but the post-meeting summary could not be generated.",
+        },
+        **api._compress_transcript([{"participant": "Asha", "text": "Retry this.", "timestamp": 1.0}]),
+    }
+
+    assert api._stored_summary_response(history_item, {"session_id": "session-restore"}) is None
+
+
 @pytest.mark.asyncio
 async def test_generate_review_insights_uses_parallel_specialists():
     transcript = [

@@ -231,6 +231,7 @@ def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
         "general_history": [],
         "last_jarvis_response": None,
         "gap_filler_generation": None,
+        "active_gap_filler_task": None,
         "wake_query_ack_pending": False,
         "invoker_participant": None,       # D-04: set when wake word is detected; D-03: cleared after dispatch
         "_pending_debounce_task": None,    # D-09: cancellable asyncio.Task for debounce window
@@ -422,7 +423,7 @@ async def _queue_confluence_proposal(task: VoiceTask, prepared_request: str) -> 
     }
     proposal_query = prepared_request.strip() or task.request
     agent = ProposedChangesAgent(
-        model=JARVIS_AGENT_MODEL,
+        model=review_api.JARVIS_REVIEW_MODEL,
         client_factory=get_openai_client,
         max_tokens=review_api.JARVIS_PROPOSE_CHANGES_MAX_TOKENS,
     )
@@ -1313,29 +1314,49 @@ async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
     generate_wav_assets script hasn't been run).
     """
     play_wake_ack = False
+    wait_for_existing: Optional[asyncio.Task] = None
+    current_task = asyncio.current_task()
     async with _get_state_lock():
         if meeting_state.get("gap_filler_generation") == generation:
-            logger.debug("Gap filler skipped — already played for generation %s", generation)
-            return
-        meeting_state["gap_filler_generation"] = generation
-        play_wake_ack = bool(meeting_state.get("wake_query_ack_pending"))
-        meeting_state["wake_query_ack_pending"] = False
-
-    if play_wake_ack:
-        cached_ack = get_random_ack_audio()
-        if cached_ack and _get_audio_duration(cached_ack[1]) <= _MICRO_ACK_MAX_SECONDS:
-            await _speak_cached_guarded(cached_ack[1], bot_id, generation)
+            existing = meeting_state.get("active_gap_filler_task")
+            if existing is not None and existing is not current_task and not existing.done():
+                wait_for_existing = existing
+            else:
+                logger.debug("Gap filler skipped — already played for generation %s", generation)
+                return
         else:
-            await _speak_guarded(JARVIS_WAKE_ACK, bot_id, generation, allow_stale=True)
+            meeting_state["gap_filler_generation"] = generation
+            meeting_state["active_gap_filler_task"] = current_task
+            play_wake_ack = bool(meeting_state.get("wake_query_ack_pending"))
+            meeting_state["wake_query_ack_pending"] = False
 
-    cached = get_random_filler_audio()
-    if cached:
-        _, audio_bytes = cached
-        await _speak_cached_guarded(audio_bytes, bot_id, generation)
+    if wait_for_existing is not None:
+        try:
+            await wait_for_existing
+        except asyncio.CancelledError:
+            pass
         return
-    # Cache miss — fall back to LLM-generated contextual filler
-    filler = await _generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name())
-    await _speak_guarded(filler, bot_id, generation, allow_stale=True)
+
+    try:
+        if play_wake_ack:
+            cached_ack = get_random_ack_audio()
+            if cached_ack and _get_audio_duration(cached_ack[1]) <= _MICRO_ACK_MAX_SECONDS:
+                await _speak_cached_guarded(cached_ack[1], bot_id, generation)
+            else:
+                await _speak_guarded(JARVIS_WAKE_ACK, bot_id, generation, allow_stale=True)
+
+        cached = get_random_filler_audio()
+        if cached:
+            _, audio_bytes = cached
+            await _speak_cached_guarded(audio_bytes, bot_id, generation)
+            return
+        # Cache miss — fall back to LLM-generated contextual filler
+        filler = await _generate_contextual_gap_filler(query, invoker_name=_get_clean_invoker_name())
+        await _speak_guarded(filler, bot_id, generation, allow_stale=True)
+    finally:
+        async with _get_state_lock():
+            if meeting_state.get("active_gap_filler_task") is current_task:
+                meeting_state["active_gap_filler_task"] = None
 
 
 _MICRO_ACK_MAX_SECONDS = 1.2  # cached clips longer than this are gap-fillers, not acks
@@ -1394,6 +1415,10 @@ async def _debounced_dispatch(query: str, bot_id: str) -> None:
     Per D-06: cancellable task. Per D-08: clears invoker_participant and _pending_debounce_task after firing.
     """
     await asyncio.sleep(JARVIS_DEBOUNCE_SECONDS)
+    if meeting_state.get("wake_query_ack_pending"):
+        generation = meeting_state["output_generation"]
+        asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
+        await asyncio.sleep(0)
     meeting_state["invoker_participant"] = None
     meeting_state["_pending_debounce_task"] = None
     meeting_state["_accumulated_query"] = ""
