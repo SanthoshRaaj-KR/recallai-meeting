@@ -50,3 +50,46 @@ create policy "Users can update their own meeting history"
   for update
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+-- ---------------------------------------------------------------------------
+-- pipeline_jobs: background pipeline execution tracking (Phase 2+)
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.pipeline_jobs (
+  job_id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  session_id text not null,
+  status text not null default 'pending',
+  stage text,
+  created_at timestamptz default now(),
+  completed_at timestamptz,
+  error text
+);
+
+-- NOTE: Run this entire block in the Supabase SQL Editor before starting Phase 2.
+-- Status values: 'pending' | 'running' | 'completed' | 'failed'
+-- Stage holds the current named pipeline stage (e.g. 'fact_extraction', 'drafting').
+
+create index if not exists pipeline_jobs_session_created_idx
+  on public.pipeline_jobs (session_id, created_at desc);
+
+alter table public.pipeline_jobs enable row level security;
+
+drop policy if exists "Users can read their own pipeline jobs" on public.pipeline_jobs;
+create policy "Users can read their own pipeline jobs"
+  on public.pipeline_jobs
+  for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own pipeline jobs" on public.pipeline_jobs;
+create policy "Users can insert their own pipeline jobs"
+  on public.pipeline_jobs
+  for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update their own pipeline jobs" on public.pipeline_jobs;
+create policy "Users can update their own pipeline jobs"
+  on public.pipeline_jobs
+  for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
