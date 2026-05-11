@@ -22,7 +22,12 @@ This milestone builds the full end-to-end pipeline from "meeting ends" to "accep
   2. `JARVIS_AGENT_MODEL` and `JARVIS_REVIEW_MODEL` default to valid model IDs so the server starts without an "unknown model" rejection from the OpenAI API
   3. A proposal card persisted to Supabase carries `transcript_evidence`, `confidence`, `risk`, and `verifier_note` fields; a card missing these fields fails Pydantic validation
   4. The TypeScript `ChangeItem` interface in sync-sage-bot compiles with the extended fields so the UI layer cannot reference a stale schema
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Fix neo4j version constraint and invalid JARVIS_REVIEW_MODEL default
+- [ ] 01-02-PLAN.md — Add ChangeItem Pydantic model with verifier fields and update proposal builders
+- [ ] 01-03-PLAN.md — Add pipeline_jobs Supabase DDL and extend TypeScript ChangeItem interface
 
 ### Phase 2: Multi-Agent Pipeline Core
 **Goal**: Calling `POST /review/pipeline/start` with a session ID launches a background job that extracts facts from the meeting transcript, retrieves candidate Confluence pages via merged RAG, drafts proposals in parallel, runs each through the VerifierAgent, and incrementally persists results to Supabase
@@ -64,7 +69,7 @@ This milestone builds the full end-to-end pipeline from "meeting ends" to "accep
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Schema & Blockers | 0/TBD | Not started | - |
+| 1. Schema & Blockers | 0/3 | Not started | - |
 | 2. Multi-Agent Pipeline Core | 0/TBD | Not started | - |
 | 3. Async Progress Streaming + Review UI | 0/TBD | Not started | - |
 | 4. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |
