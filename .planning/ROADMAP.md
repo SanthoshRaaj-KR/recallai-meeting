@@ -69,7 +69,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Schema & Blockers | 0/3 | Not started | - |
+| 1. Schema & Blockers | 0/3 | Ready to execute | - |
 | 2. Multi-Agent Pipeline Core | 0/TBD | Not started | - |
 | 3. Async Progress Streaming + Review UI | 0/TBD | Not started | - |
 | 4. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |
