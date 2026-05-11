@@ -15,7 +15,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from openai import OpenAI
@@ -59,7 +59,7 @@ _RECALL_ACTIVE_CODES = {
     "recording_permission_allowed",
 }
 _RECALL_STATUS_CACHE_SECONDS = float(os.getenv("RECALL_STATUS_CACHE_SECONDS", "4.0"))
-JARVIS_REVIEW_MODEL = os.getenv("JARVIS_REVIEW_MODEL", "gpt-5-mini").strip()
+JARVIS_REVIEW_MODEL = os.getenv("JARVIS_REVIEW_MODEL", "gpt-5.4-mini").strip()
 JARVIS_REVIEW_MAX_INPUT_CHARS = int(os.getenv("JARVIS_REVIEW_MAX_INPUT_CHARS", "0"))
 JARVIS_REVIEW_SUMMARY_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_SUMMARY_MAX_TOKENS", "1100"))
 JARVIS_REVIEW_MOM_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_MOM_MAX_TOKENS", "900"))
@@ -100,6 +100,33 @@ class MeetingChatMessage(BaseModel):
 
 class MeetingChatRequest(BaseModel):
     messages: List[MeetingChatMessage]
+
+
+class ChangeItem(BaseModel):
+    """Structured proposal for a single Confluence page change.
+
+    Fields transcript_evidence, confidence, risk, and verifier_note have safe
+    defaults so existing Supabase rows (which lack these columns) can be read
+    in Phase 1 without validation errors. Phase 2 agents will populate them.
+    """
+    id: int
+    change_type: str
+    page_id: Optional[str] = None
+    page_title: str
+    section_heading: Optional[str] = None
+    before_content: Optional[str] = None
+    after_content: Optional[str] = None
+    timestamp: str
+    session_id: str
+    status: str = "pending"
+    source: Optional[str] = None
+    rationale: Optional[str] = None
+    generation_query: Optional[str] = None
+    # --- Phase 2 verifier fields (safe defaults for Phase 1 backward-compat) ---
+    transcript_evidence: List[str] = []
+    confidence: Literal["high", "medium", "low"] = "low"
+    risk: Literal["safe", "review", "risky"] = "safe"
+    verifier_note: Optional[str] = None
 
 
 def _bearer_token(authorization: Optional[str]) -> str:
@@ -895,6 +922,10 @@ def _replace_agent_generated_changes(
                 "source": "meeting_proposal_agent",
                 "rationale": proposal.get("rationale"),
                 "generation_query": query or None,
+                "transcript_evidence": [],
+                "confidence": "low",
+                "risk": "safe",
+                "verifier_note": None,
             }
         )
         next_id += 1
@@ -932,6 +963,10 @@ def _append_agent_generated_changes(
                 "source": source,
                 "rationale": proposal.get("rationale"),
                 "generation_query": query or None,
+                "transcript_evidence": [],
+                "confidence": "low",
+                "risk": "safe",
+                "verifier_note": None,
             }
         )
         next_id += 1
