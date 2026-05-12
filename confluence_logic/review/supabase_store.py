@@ -218,16 +218,10 @@ def update_pipeline_job(
         logger.warning("Pipeline job update failed for %s: %s", job_id, exc)
 
 
-def upsert_proposal(row: Dict[str, Any]) -> None:
-    """Write one verified proposal card row to the proposals table.
-
-    NOTE: Despite the name, this is a plain INSERT with no conflict resolution — there is no
-    unique constraint on (job_id, page_id, section_heading) in the current schema, so retries
-    will create duplicate rows. If retry idempotency is required, add a unique constraint and
-    switch to on_conflict=job_id,page_id,section_heading with Prefer: resolution=merge-duplicates.
-    """
+def upsert_proposal(row: Dict[str, Any]) -> Optional[str]:
+    """Write one verified proposal card row to the proposals table. Returns the Supabase UUID on success, None on failure."""
     if not is_configured() or not row.get("job_id") or not row.get("user_id"):
-        return
+        return None
     payload = {k: v for k, v in row.items() if v is not None}
     payload["created_at"] = datetime.now(timezone.utc).isoformat()
     try:
@@ -238,5 +232,33 @@ def upsert_proposal(row: Dict[str, Any]) -> None:
             timeout=8,
         )
         response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list) and data:
+            return str(data[0].get("id") or "") or None
     except Exception as exc:
         logger.warning("Proposal upsert failed: %s", exc)
+    return None
+
+
+def get_pipeline_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single pipeline_jobs row by job_id. Returns the row dict or None.
+
+    Used by the SSE stream endpoint to verify the caller's user_id matches
+    the job's user_id before streaming events.
+    """
+    if not is_configured() or not job_id:
+        return None
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/pipeline_jobs",
+            headers=_rest_headers(),
+            params={"job_id": f"eq.{job_id}", "select": "*", "limit": "1"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list) and data:
+            return data[0]
+    except Exception as exc:
+        logger.warning("get_pipeline_job failed for %s: %s", job_id, exc)
+    return None
