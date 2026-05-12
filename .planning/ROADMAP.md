@@ -38,8 +38,13 @@ Plans:
   2. For a transcript mentioning two distinct topics, the merged RAG step surfaces candidate pages from both Pinecone and Neo4j — neither source is silently skipped when the other returns results
   3. Each candidate page is drafted by its own DrafterAgent instance running concurrently; the Supabase `proposals` table receives rows as each page completes, not all at once at the end
   4. Every persisted proposal card has a `verifier_note`, `confidence` level, and `risk` level populated by the VerifierAgent; no card reaches Supabase with those fields null
-**Plans**: TBD
-**UI hint**: no
+**Plans**: 4 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Test infrastructure: test_pipeline.py with stubs and fixtures for RETR-01 through PIPE-04 (Wave 0)
+- [ ] 02-02-PLAN.md — proposals table DDL + supabase_store helpers (create_pipeline_job, update_pipeline_job, upsert_proposal) + human checkpoint
+- [ ] 02-03-PLAN.md — FactExtractionAgent + _merged_rag_retrieval (parallel Pinecone + Neo4j)
+- [ ] 02-04-PLAN.md — DrafterAgent + VerifierAgent + POST /review/pipeline/start endpoint + _run_pipeline orchestrator
 
 ### Phase 3: Async Progress Streaming + Review UI
 **Goal**: Users can click "Generate Confluence Changes" on the MeetingSummary page, watch named pipeline stages advance in real time, and then review, accept, or reject each proposal card with full evidence context before anything touches Confluence
@@ -70,6 +75,6 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Schema & Blockers | 0/3 | Ready to execute | - |
-| 2. Multi-Agent Pipeline Core | 0/TBD | Not started | - |
+| 2. Multi-Agent Pipeline Core | 0/4 | Ready to execute | - |
 | 3. Async Progress Streaming + Review UI | 0/TBD | Not started | - |
 | 4. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |
