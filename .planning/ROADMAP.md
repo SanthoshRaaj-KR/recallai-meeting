@@ -8,7 +8,7 @@ This milestone builds the full end-to-end pipeline from "meeting ends" to "accep
 
 - [ ] **Phase 1: Schema & Blockers** - Fix broken dependencies, extend ChangeItem schema, add pipeline_jobs table
 - [x] **Phase 2: Multi-Agent Pipeline Core** - FactExtractionAgent, merged RAG retrieval, parallel DrafterAgent pool, VerifierAgent, background job endpoints (completed 2026-05-12)
-- [ ] **Phase 3: Async Progress Streaming + Review UI** - SSE stream endpoint, sync-sage-bot pipeline progress component, full proposal card review experience
+- [x] **Phase 3: Async Progress Streaming + Review UI** - SSE stream endpoint, sync-sage-bot pipeline progress component, full proposal card review experience (completed 2026-05-12)
 - [ ] **Phase 4: Safe Apply Hardening + Re-indexing** - Section anchor pre-flight, stale-version chain prevention, Neo4j + Pinecone re-index after commit
 
 ## Phase Details
@@ -61,7 +61,7 @@ Plans:
 Plans:
 - [x] 03-01-PLAN.md — Backend SSE endpoint + queue injection + upsert_proposal returns UUID (PIPE-05)
 - [x] 03-02-PLAN.md — Frontend types + api client + routing + MeetingSummary button & banner (UI-01)
-- [ ] 03-03-PLAN.md — StageIndicator + ProposalCard + ProposalCardGroup + PipelinePage with SSE wiring (UI-02 through UI-06)
+- [x] 03-03-PLAN.md — StageIndicator + ProposalCard + ProposalCardGroup + PipelinePage with SSE wiring (UI-02 through UI-06)
 
 ### Phase 4: Safe Apply Hardening + Re-indexing
 **Goal**: Accepted changes are applied to Confluence safely — section anchors are verified before any edit, multi-card sequences on the same page never use stale version numbers, and every committed page is immediately re-indexed in both Pinecone and the Neo4j confluence_page_graph so the RAG layer stays current
@@ -81,5 +81,5 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Schema & Blockers | 0/3 | Ready to execute | - |
 | 2. Multi-Agent Pipeline Core | 4/4 | Complete   | 2026-05-12 |
-| 3. Async Progress Streaming + Review UI | 2/3 | In Progress | - |
+| 3. Async Progress Streaming + Review UI | 3/3 | Complete   | 2026-05-12 |
 | 4. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |

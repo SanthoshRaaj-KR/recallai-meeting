@@ -40,11 +40,11 @@
 ### UI — Review Experience (sync-sage-bot)
 
 - [x] **UI-01**: "Generate Confluence Changes" button visible on `MeetingSummary` page after meeting ends; triggers `POST /review/pipeline/start`
-- [ ] **UI-02**: Pipeline progress component shows named stages with check/active/pending states (not just a spinner) — driven by SSE stream
-- [ ] **UI-03**: Each proposal card displays: change type badge, target page + section, before/after diff, rationale, transcript evidence blockquotes, confidence badge, risk badge, verifier note
-- [ ] **UI-04**: Each card has an explicit "Accept" and "Reject" button — reject is a distinct action, not just unchecking a checkbox
-- [ ] **UI-05**: Delete-type cards have distinct visual treatment (red border, warning text) and require a separate confirmation step before the accept action is enabled
-- [ ] **UI-06**: Proposal cards are grouped by target Confluence page — per-card accept/reject control is preserved within each group
+- [x] **UI-02**: Pipeline progress component shows named stages with check/active/pending states (not just a spinner) — driven by SSE stream
+- [x] **UI-03**: Each proposal card displays: change type badge, target page + section, before/after diff, rationale, transcript evidence blockquotes, confidence badge, risk badge, verifier note
+- [x] **UI-04**: Each card has an explicit "Accept" and "Reject" button — reject is a distinct action, not just unchecking a checkbox
+- [x] **UI-05**: Delete-type cards have distinct visual treatment (red border, warning text) and require a separate confirmation step before the accept action is enabled
+- [x] **UI-06**: Proposal cards are grouped by target Confluence page — per-card accept/reject control is preserved within each group
 
 ## v2 Requirements
 
@@ -102,11 +102,11 @@
 | PIPE-04 | Phase 2 | Complete |
 | PIPE-05 | Phase 3 | Complete |
 | UI-01 | Phase 3 | Complete |
-| UI-02 | Phase 3 | Pending |
-| UI-03 | Phase 3 | Pending |
-| UI-04 | Phase 3 | Pending |
-| UI-05 | Phase 3 | Pending |
-| UI-06 | Phase 3 | Pending |
+| UI-02 | Phase 3 | Complete |
+| UI-03 | Phase 3 | Complete |
+| UI-04 | Phase 3 | Complete |
+| UI-05 | Phase 3 | Complete |
+| UI-06 | Phase 3 | Complete |
 | APPLY-01 | Phase 4 | Pending |
 | APPLY-02 | Phase 4 | Pending |
 | APPLY-03 | Phase 4 | Pending |
