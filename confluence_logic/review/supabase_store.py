@@ -158,3 +158,79 @@ def get_history_item(user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         logger.warning("Supabase history lookup failed: %s", exc)
     return None
+
+
+def create_pipeline_job(session_id: str, user_id: str) -> Optional[str]:
+    """Create a new pipeline_jobs row and return the generated job_id."""
+    if not is_configured():
+        return None
+    try:
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/pipeline_jobs",
+            headers=_rest_headers("return=representation"),
+            json={
+                "session_id": session_id,
+                "user_id": user_id,
+                "status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list) and data:
+            return str(data[0].get("job_id") or "")
+    except Exception as exc:
+        logger.warning("Pipeline job create failed: %s", exc)
+    return None
+
+
+def update_pipeline_job(
+    job_id: str,
+    stage: Optional[str] = None,
+    status: Optional[str] = None,
+    error: Optional[str] = None,
+    completed_at: Optional[str] = None,
+) -> None:
+    """Patch a pipeline_jobs row with updated stage/status/error/completed_at."""
+    if not is_configured() or not job_id:
+        return
+    payload: Dict[str, Any] = {}
+    if stage is not None:
+        payload["stage"] = stage
+    if status is not None:
+        payload["status"] = status
+    if error is not None:
+        payload["error"] = error
+    if completed_at is not None:
+        payload["completed_at"] = completed_at
+    if not payload:
+        return
+    try:
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/pipeline_jobs?job_id=eq.{job_id}",
+            headers=_rest_headers(),
+            json=payload,
+            timeout=8,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Pipeline job update failed for %s: %s", job_id, exc)
+
+
+def upsert_proposal(row: Dict[str, Any]) -> None:
+    """Write one verified proposal card row to the proposals table."""
+    if not is_configured() or not row.get("job_id") or not row.get("user_id"):
+        return
+    payload = {k: v for k, v in row.items() if v is not None}
+    payload["created_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/proposals",
+            headers=_rest_headers("return=representation"),
+            json=payload,
+            timeout=8,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Proposal upsert failed: %s", exc)
