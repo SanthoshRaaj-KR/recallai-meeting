@@ -39,7 +39,7 @@
 
 ### UI — Review Experience (sync-sage-bot)
 
-- [ ] **UI-01**: "Generate Confluence Changes" button visible on `MeetingSummary` page after meeting ends; triggers `POST /review/pipeline/start`
+- [x] **UI-01**: "Generate Confluence Changes" button visible on `MeetingSummary` page after meeting ends; triggers `POST /review/pipeline/start`
 - [ ] **UI-02**: Pipeline progress component shows named stages with check/active/pending states (not just a spinner) — driven by SSE stream
 - [ ] **UI-03**: Each proposal card displays: change type badge, target page + section, before/after diff, rationale, transcript evidence blockquotes, confidence badge, risk badge, verifier note
 - [ ] **UI-04**: Each card has an explicit "Accept" and "Reject" button — reject is a distinct action, not just unchecking a checkbox
@@ -101,7 +101,7 @@
 | PIPE-03 | Phase 2 | Complete |
 | PIPE-04 | Phase 2 | Complete |
 | PIPE-05 | Phase 3 | Complete |
-| UI-01 | Phase 3 | Pending |
+| UI-01 | Phase 3 | Complete |
 | UI-02 | Phase 3 | Pending |
 | UI-03 | Phase 3 | Pending |
 | UI-04 | Phase 3 | Pending |

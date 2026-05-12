@@ -60,7 +60,7 @@ Plans:
 
 Plans:
 - [x] 03-01-PLAN.md — Backend SSE endpoint + queue injection + upsert_proposal returns UUID (PIPE-05)
-- [ ] 03-02-PLAN.md — Frontend types + api client + routing + MeetingSummary button & banner (UI-01)
+- [x] 03-02-PLAN.md — Frontend types + api client + routing + MeetingSummary button & banner (UI-01)
 - [ ] 03-03-PLAN.md — StageIndicator + ProposalCard + ProposalCardGroup + PipelinePage with SSE wiring (UI-02 through UI-06)
 
 ### Phase 4: Safe Apply Hardening + Re-indexing
@@ -81,5 +81,5 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Schema & Blockers | 0/3 | Ready to execute | - |
 | 2. Multi-Agent Pipeline Core | 4/4 | Complete   | 2026-05-12 |
-| 3. Async Progress Streaming + Review UI | 1/3 | In Progress|  |
+| 3. Async Progress Streaming + Review UI | 2/3 | In Progress | - |
 | 4. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |
