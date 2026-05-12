@@ -134,6 +134,10 @@ def _normalize_draft(
 
     # Zero-RAG fallback path (page_id=None) may produce create
     if page_id is None and change_type not in {"create", "edit"}:
+        logger.warning(
+            "DrafterAgent: coercing change_type %r to 'create' for zero-RAG page (page_id=None)",
+            change_type,
+        )
         change_type = "create"
 
     return {
