@@ -385,7 +385,6 @@ def mock_pipeline_queue(monkeypatch):
     yield test_queue
 
 
-@pytest.mark.xfail(reason="PIPE-05 — implementation in Task 2/3", strict=False)
 def test_sse_stream_returns_events(mock_pipeline_queue):
     """PIPE-05: GET /review/pipeline/{job_id}/stream returns text/event-stream with auth + ownership."""
     if _pipeline_client is None:
@@ -431,7 +430,6 @@ def test_sse_stream_returns_events(mock_pipeline_queue):
         assert resp.headers.get("x-accel-buffering") == "no"
 
 
-@pytest.mark.xfail(reason="PIPE-05 — implementation in Task 2/3", strict=False)
 def test_stage_events_emitted(mock_pipeline_queue):
     """PIPE-05: _emit() puts events into the registered queue, silently no-ops otherwise."""
     from confluence_logic.review import api as _api
@@ -444,10 +442,9 @@ def test_stage_events_emitted(mock_pipeline_queue):
     _api._emit("nonexistent-job-id-xyz", {"type": "stage_start", "stage": "drafting"})
 
 
-@pytest.mark.asyncio
-@pytest.mark.xfail(reason="PIPE-05 — implementation in Task 2/3", strict=False)
-async def test_proposal_ready_includes_id(mock_pipeline_queue):
+def test_proposal_ready_includes_id(mock_pipeline_queue):
     """PIPE-05: proposal_ready event carries the Supabase-assigned UUID under 'id'."""
+    import asyncio as _asyncio
     from confluence_logic.review import api as _api
 
     fake_verified = {
@@ -474,14 +471,14 @@ async def test_proposal_ready_includes_id(mock_pipeline_queue):
         "confluence_logic.review.supabase_store.upsert_proposal",
         return_value="supabase-uuid-xyz",
     ):
-        await _api._draft_verify_persist(
+        _asyncio.run(_api._draft_verify_persist(
             page={"page_id": "page-1", "page_title": "Launch Plan", "relevant_content": ""},
             facts=None,
             transcript_text="",
             job_id="test-job-pipe05",
             session_id="sess-1",
             user_id="user-owner",
-        )
+        ))
 
     item = mock_pipeline_queue.get_nowait()
     assert item["type"] == "proposal_ready"
@@ -491,25 +488,27 @@ async def test_proposal_ready_includes_id(mock_pipeline_queue):
         assert field in item, f"proposal_ready event missing field: {field}"
 
 
-@pytest.mark.asyncio
-@pytest.mark.xfail(reason="PIPE-05 — implementation in Task 2/3", strict=False)
-async def test_pipeline_error_event(mock_pipeline_queue):
+def test_pipeline_error_event(mock_pipeline_queue):
     """PIPE-05: exception in _run_pipeline emits pipeline_error event then _SENTINEL."""
+    import asyncio as _asyncio
     from confluence_logic.review import api as _api
 
     with patch(
-        "confluence_logic.review.api._extract_facts",
+        "confluence_logic.review.api._run_fact_extraction",
         new=AsyncMock(side_effect=RuntimeError("simulated")),
     ), patch(
         "confluence_logic.review.supabase_store.update_pipeline_job",
         return_value=None,
+    ), patch(
+        "confluence_logic.review.supabase_store.get_history_item",
+        return_value={},
     ):
-        await _api._run_pipeline(
-            job_id="test-job-pipe05",
+        _asyncio.run(_api._run_pipeline(
             session_id="sess-1",
+            job_id="test-job-pipe05",
             user_id="user-owner",
             graph_user_id="user-owner",
-        )
+        ))
 
     events = []
     while True:

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from openai import OpenAI
 from pydantic import BaseModel
 import requests
@@ -40,6 +41,29 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _openai_client: Optional[OpenAI] = None
+
+# NOTE: The SSE `stage` field uses UI-SPEC names (fact_extraction, rag_retrieval,
+# drafting, verification). The Supabase `update_pipeline_job` calls may use
+# different internal labels — that mapping is intentional and the divergence
+# is documented in RESEARCH.md Pitfall 5.
+
+# --- SSE infrastructure for PIPE-05 ---
+# One asyncio.Queue per active pipeline job. Keyed by job_id (str).
+# Created by the SSE endpoint when the consumer connects (NOT by _emit).
+# Per RESEARCH.md Pitfall 1, _emit is a no-op if the consumer has not connected yet —
+# the StageIndicator handles this by advancing to the latest received stage.
+# Cleanup: event_generator's `finally` block removes the entry; a 300s call_later
+# is scheduled by _run_pipeline on terminal events to clean up unclaimed queues.
+_job_queues: dict[str, asyncio.Queue] = {}
+
+_SENTINEL = object()  # Signals event_generator to break out of its loop.
+
+
+def _emit(job_id: str, event: dict) -> None:
+    """Put an SSE event into the job's queue. No-op if no consumer is connected."""
+    q = _job_queues.get(job_id)
+    if q is not None:
+        q.put_nowait(event)
 
 _RECALL_ENDED_CODES = {
     "call_ended",
@@ -1526,7 +1550,7 @@ async def _draft_verify_persist(
             transcript_text,
             page.get("relevant_content") or "",
         )
-        await asyncio.to_thread(
+        row_id = await asyncio.to_thread(
             supabase_store.upsert_proposal,
             {
                 **verified,
@@ -1537,6 +1561,15 @@ async def _draft_verify_persist(
                 "status": "pending",
             },
         )
+        # Emit AFTER upsert so the event carries the Supabase-assigned UUID (Pitfall 2).
+        _emit(job_id, {
+            "type": "proposal_ready",
+            "id": row_id,
+            "job_id": job_id,
+            "session_id": session_id,
+            "status": "pending",
+            **verified,
+        })
     except Exception as exc:
         logger.warning(
             "Draft-verify-persist failed for page %s: %s",
@@ -1569,6 +1602,7 @@ async def _run_pipeline(
             supabase_store.update_pipeline_job,
             job_id, "fact_extraction", "running", None, None,
         )
+        _emit(job_id, {"type": "stage_start", "stage": "fact_extraction"})
         state = _get_meeting_state(session_id)
         transcript_log = state.get("transcript_log") or []
 
@@ -1606,6 +1640,7 @@ async def _run_pipeline(
             supabase_store.update_pipeline_job,
             job_id, "retrieval", "running", None, None,
         )
+        _emit(job_id, {"type": "stage_start", "stage": "rag_retrieval"})
         candidate_pages = await _merged_rag_retrieval(graph_user_id, facts.query_terms)
 
         # D-06: Zero-RAG fallback — generate create proposals from doc_worthy_updates
@@ -1636,6 +1671,7 @@ async def _run_pipeline(
             supabase_store.update_pipeline_job,
             job_id, "drafting", "running", None, None,
         )
+        _emit(job_id, {"type": "stage_start", "stage": "drafting"})
         tasks = [
             _draft_verify_persist(page, facts, transcript_text, job_id, session_id, user_id)
             for page in candidate_pages
@@ -1646,10 +1682,14 @@ async def _run_pipeline(
                 logger.warning("Pipeline task failed (non-fatal): %s", r)
 
         # Stage 4: Complete
+        _emit(job_id, {"type": "stage_start", "stage": "verification"})
         await asyncio.to_thread(
             supabase_store.update_pipeline_job,
             job_id, "complete", "completed", None, _utc_now_iso(),
         )
+        _emit(job_id, {"type": "pipeline_complete", "proposal_count": len(tasks)})
+        asyncio.get_event_loop().call_later(300, _job_queues.pop, job_id, None)
+        _emit(job_id, _SENTINEL)
 
     except Exception as exc:
         logger.error("Pipeline %s failed: %s", job_id, exc)
@@ -1660,6 +1700,9 @@ async def _run_pipeline(
             )
         except Exception:
             pass  # Supabase update failure is non-fatal
+        _emit(job_id, {"type": "pipeline_error", "detail": str(exc)})
+        asyncio.get_event_loop().call_later(300, _job_queues.pop, job_id, None)
+        _emit(job_id, _SENTINEL)
 
 
 @router.post("/review/pipeline/start", status_code=202)
@@ -1688,3 +1731,57 @@ async def start_pipeline(
         _run_pipeline(body.session_id, job_id, user["id"], graph_user_id)
     )
     return {"job_id": job_id, "status": "accepted"}
+
+
+@router.get("/review/pipeline/{job_id}/stream")
+async def stream_pipeline_events(
+    job_id: str,
+    token: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+) -> StreamingResponse:
+    """SSE endpoint for live pipeline progress. PIPE-05.
+
+    Auth: Bearer token via Authorization header OR ?token= query param
+    (EventSource cannot send custom headers — see RESEARCH.md Pattern 3).
+    Ownership: caller's user_id must match pipeline_jobs.user_id.
+    """
+    bearer = _bearer_token(authorization) or (token or "").strip()
+    if not bearer:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    user = supabase_store.user_from_bearer(bearer)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    job_row = supabase_store.get_pipeline_job(job_id)
+    if not job_row:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if str(job_row.get("user_id") or "") != str(user.get("id") or ""):
+        raise HTTPException(status_code=403, detail="Not authorized for this job.")
+
+    if job_id not in _job_queues:
+        _job_queues[job_id] = asyncio.Queue()
+    queue = _job_queues[job_id]
+
+    async def event_generator():
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
+                if item is _SENTINEL:
+                    break
+                yield f"event: {item['type']}\ndata: {json.dumps(item)}\n\n"
+        finally:
+            _job_queues.pop(job_id, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
