@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
@@ -1679,10 +1680,11 @@ async def start_pipeline(
         supabase_store.create_pipeline_job,
         body.session_id,
         user["id"],
-    )
-    # job_id may be None if Supabase is not configured — pipeline still runs, just not tracked
+    ) or str(uuid.uuid4())
+    # job_id is always a non-null string — falls back to an in-process UUID when Supabase is
+    # unavailable so the client can still poll (pipeline runs untracked but response is valid)
     graph_user_id = _confluence_graph_user_id(user, body.session_id)
     asyncio.create_task(
-        _run_pipeline(body.session_id, job_id or "", user["id"], graph_user_id)
+        _run_pipeline(body.session_id, job_id, user["id"], graph_user_id)
     )
     return {"job_id": job_id, "status": "accepted"}
