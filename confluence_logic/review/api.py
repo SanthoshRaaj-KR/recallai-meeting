@@ -1555,6 +1555,13 @@ async def _run_pipeline(
     Exceptions are caught and recorded in pipeline_jobs; never propagated to the event loop.
     graph_user_id is passed explicitly — do NOT rely on ContextVar inheritance (Pitfall 4).
     """
+    if not user_id:
+        logger.error("Pipeline %s: user_id is required but was None — aborting", job_id)
+        await asyncio.to_thread(
+            supabase_store.update_pipeline_job,
+            job_id, None, "failed", "user_id is required", _utc_now_iso(),
+        )
+        return
     try:
         # Stage 1: Fact Extraction
         await asyncio.to_thread(
