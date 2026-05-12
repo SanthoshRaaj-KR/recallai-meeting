@@ -140,7 +140,14 @@ drop policy if exists "Users can insert their own proposals" on public.proposals
 create policy "Users can insert their own proposals"
   on public.proposals
   for insert
-  with check (auth.uid() = user_id);
+  with check (
+    auth.uid() = user_id
+    AND EXISTS (
+      SELECT 1 FROM public.pipeline_jobs pj
+      WHERE pj.job_id = proposals.job_id
+        AND pj.user_id = auth.uid()
+    )
+  );
 
 drop policy if exists "Users can update their own proposals" on public.proposals;
 create policy "Users can update their own proposals"
