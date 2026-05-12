@@ -55,8 +55,13 @@ Plans:
   2. When the pipeline completes, proposal cards appear grouped by target Confluence page; each card shows change-type badge, before/after diff, rationale, transcript evidence blockquotes, confidence badge, risk badge, and verifier note
   3. Each card has distinct "Accept" and "Reject" buttons; a delete-type card additionally requires a confirmation step before Accept is enabled, and is visually distinct (red border, warning text)
   4. Rejecting a card does not affect other cards; accepting a card triggers the apply flow for that card only
-**Plans**: TBD
+**Plans**: 3 plans
 **UI hint**: yes
+
+Plans:
+- [ ] 03-01-PLAN.md — Backend SSE endpoint + queue injection + upsert_proposal returns UUID (PIPE-05)
+- [ ] 03-02-PLAN.md — Frontend types + api client + routing + MeetingSummary button & banner (UI-01)
+- [ ] 03-03-PLAN.md — StageIndicator + ProposalCard + ProposalCardGroup + PipelinePage with SSE wiring (UI-02 through UI-06)
 
 ### Phase 4: Safe Apply Hardening + Re-indexing
 **Goal**: Accepted changes are applied to Confluence safely — section anchors are verified before any edit, multi-card sequences on the same page never use stale version numbers, and every committed page is immediately re-indexed in both Pinecone and the Neo4j confluence_page_graph so the RAG layer stays current
@@ -76,5 +81,5 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Schema & Blockers | 0/3 | Ready to execute | - |
 | 2. Multi-Agent Pipeline Core | 4/4 | Complete   | 2026-05-12 |
-| 3. Async Progress Streaming + Review UI | 0/TBD | Not started | - |
+| 3. Async Progress Streaming + Review UI | 0/3 | Ready to execute | - |
 | 4. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |

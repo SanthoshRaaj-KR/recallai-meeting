@@ -368,3 +368,157 @@ async def test_incremental_proposal_writes(mock_supabase, mock_openai_runner):
         f"Expected upsert_proposal called twice (once per page), "
         f"got {mock_supabase.upsert_proposal.call_count}"
     )
+
+
+# ---------------------------------------------------------------------------
+# PIPE-05 SSE tests (Phase 3, Plan 01)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_pipeline_queue(monkeypatch):
+    """Patches _job_queues with a real asyncio.Queue under test-job-pipe05."""
+    import asyncio as _asyncio
+    from confluence_logic.review import api as _api
+    test_queue = _asyncio.Queue()
+    monkeypatch.setattr(_api, "_job_queues", {"test-job-pipe05": test_queue})
+    yield test_queue
+
+
+@pytest.mark.xfail(reason="PIPE-05 — implementation in Task 2/3", strict=False)
+def test_sse_stream_returns_events(mock_pipeline_queue):
+    """PIPE-05: GET /review/pipeline/{job_id}/stream returns text/event-stream with auth + ownership."""
+    if _pipeline_client is None:
+        raise ImportError("_pipeline_client not constructed")
+
+    # 401 — no token at all
+    resp = _pipeline_client.get("/review/pipeline/test-job-pipe05/stream")
+    assert resp.status_code == 401
+
+    # 403 — authenticated but does not own the job
+    with patch(
+        "confluence_logic.review.supabase_store.user_from_bearer",
+        return_value={"id": "user-other"},
+    ), patch(
+        "confluence_logic.review.supabase_store.get_pipeline_job",
+        return_value={"job_id": "test-job-pipe05", "user_id": "user-owner"},
+    ):
+        resp = _pipeline_client.get(
+            "/review/pipeline/test-job-pipe05/stream",
+            headers={"Authorization": "Bearer fake-token"},
+        )
+        assert resp.status_code == 403
+
+    # 200 + text/event-stream — owner with valid token
+    with patch(
+        "confluence_logic.review.supabase_store.user_from_bearer",
+        return_value={"id": "user-owner"},
+    ), patch(
+        "confluence_logic.review.supabase_store.get_pipeline_job",
+        return_value={"job_id": "test-job-pipe05", "user_id": "user-owner"},
+    ):
+        # Put a sentinel into the queue BEFORE the request so the generator terminates quickly.
+        from confluence_logic.review import api as _api
+        mock_pipeline_queue.put_nowait(_api._SENTINEL)
+
+        resp = _pipeline_client.get(
+            "/review/pipeline/test-job-pipe05/stream",
+            headers={"Authorization": "Bearer fake-token"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.headers.get("cache-control") == "no-cache"
+        assert resp.headers.get("x-accel-buffering") == "no"
+
+
+@pytest.mark.xfail(reason="PIPE-05 — implementation in Task 2/3", strict=False)
+def test_stage_events_emitted(mock_pipeline_queue):
+    """PIPE-05: _emit() puts events into the registered queue, silently no-ops otherwise."""
+    from confluence_logic.review import api as _api
+
+    _api._emit("test-job-pipe05", {"type": "stage_start", "stage": "fact_extraction"})
+    item = mock_pipeline_queue.get_nowait()
+    assert item == {"type": "stage_start", "stage": "fact_extraction"}
+
+    # No raise when job_id absent
+    _api._emit("nonexistent-job-id-xyz", {"type": "stage_start", "stage": "drafting"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(reason="PIPE-05 — implementation in Task 2/3", strict=False)
+async def test_proposal_ready_includes_id(mock_pipeline_queue):
+    """PIPE-05: proposal_ready event carries the Supabase-assigned UUID under 'id'."""
+    from confluence_logic.review import api as _api
+
+    fake_verified = {
+        "change_type": "edit",
+        "page_id": "page-1",
+        "page_title": "Launch Plan",
+        "section_heading": "Decisions",
+        "before_content": "old",
+        "after_content": "new",
+        "rationale": "decision was made",
+        "transcript_evidence": ["evidence quote"],
+        "confidence": "high",
+        "risk": "safe",
+        "verifier_note": "ok",
+    }
+
+    with patch(
+        "confluence_logic.review.api._run_drafter",
+        new=AsyncMock(return_value={"change_type": "edit", "page_id": "page-1", "page_title": "Launch Plan"}),
+    ), patch(
+        "confluence_logic.review.api._run_verifier",
+        new=AsyncMock(return_value=fake_verified),
+    ), patch(
+        "confluence_logic.review.supabase_store.upsert_proposal",
+        return_value="supabase-uuid-xyz",
+    ):
+        await _api._draft_verify_persist(
+            page={"page_id": "page-1", "page_title": "Launch Plan", "relevant_content": ""},
+            facts=None,
+            transcript_text="",
+            job_id="test-job-pipe05",
+            session_id="sess-1",
+            user_id="user-owner",
+        )
+
+    item = mock_pipeline_queue.get_nowait()
+    assert item["type"] == "proposal_ready"
+    assert item["id"] == "supabase-uuid-xyz"
+    for field in ("change_type", "page_id", "page_title", "before_content", "after_content",
+                  "rationale", "transcript_evidence", "confidence", "risk", "verifier_note"):
+        assert field in item, f"proposal_ready event missing field: {field}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(reason="PIPE-05 — implementation in Task 2/3", strict=False)
+async def test_pipeline_error_event(mock_pipeline_queue):
+    """PIPE-05: exception in _run_pipeline emits pipeline_error event then _SENTINEL."""
+    from confluence_logic.review import api as _api
+
+    with patch(
+        "confluence_logic.review.api._extract_facts",
+        new=AsyncMock(side_effect=RuntimeError("simulated")),
+    ), patch(
+        "confluence_logic.review.supabase_store.update_pipeline_job",
+        return_value=None,
+    ):
+        await _api._run_pipeline(
+            job_id="test-job-pipe05",
+            session_id="sess-1",
+            user_id="user-owner",
+            graph_user_id="user-owner",
+        )
+
+    events = []
+    while True:
+        try:
+            events.append(mock_pipeline_queue.get_nowait())
+        except Exception:
+            break
+
+    error_events = [e for e in events if isinstance(e, dict) and e.get("type") == "pipeline_error"]
+    assert len(error_events) == 1
+    assert "simulated" in error_events[0]["detail"]
+    assert _api._SENTINEL in events
