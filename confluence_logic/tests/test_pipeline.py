@@ -53,6 +53,9 @@ def mock_pinecone_store(monkeypatch):
         {"page_id": "p2", "title": "Page 2", "score": 0.8, "relevant_content": "content2"},
     ]
     mock_search = MagicMock(return_value=fake_results)
+    # Reset the singleton so a fresh mock instance is used — prevents a pre-initialized _store
+    # from bypassing the class-level patch when the module was imported with real credentials
+    monkeypatch.setattr("confluence_logic.agents.fact_extraction_agent._store", None)
     monkeypatch.setattr(
         "confluence_logic.db.vector_store.PineconeStore.search",
         mock_search,
