@@ -263,12 +263,13 @@ def _format_transcript(transcript_log: List[Dict[str, Any]], max_chars: Optional
         if entry.get("text")
     ]
     text = "\n".join(lines)
-    if max_chars is None or max_chars <= 0:
+    if max_chars is None or max_chars <= 0 or len(text) <= max_chars:
         return text
-    if len(text) <= max_chars:
-        return text
-    head = text[:2000]
-    tail = text[-(max_chars - 2000):]
+    # Guard: head_size must not exceed max_chars itself (fixes negative tail_size when max_chars < 2000)
+    head_size = min(2000, max_chars // 2)
+    tail_size = max_chars - head_size
+    head = text[:head_size]
+    tail = text[-tail_size:] if tail_size > 0 else ""
     return f"{head}\n[... middle transcript omitted ...]\n{tail}"
 
 
