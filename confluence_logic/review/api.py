@@ -1604,7 +1604,7 @@ async def _run_pipeline(
         # Stage 2: Merged RAG Retrieval
         await asyncio.to_thread(
             supabase_store.update_pipeline_job,
-            job_id, "retrieval", None, None, None,
+            job_id, "retrieval", "running", None, None,
         )
         candidate_pages = await _merged_rag_retrieval(graph_user_id, facts.query_terms)
 
@@ -1634,7 +1634,7 @@ async def _run_pipeline(
         # Stage 3: Parallel Draft + Verify + Persist
         await asyncio.to_thread(
             supabase_store.update_pipeline_job,
-            job_id, "drafting", None, None, None,
+            job_id, "drafting", "running", None, None,
         )
         tasks = [
             _draft_verify_persist(page, facts, transcript_text, job_id, session_id, user_id)
