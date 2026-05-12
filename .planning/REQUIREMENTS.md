@@ -12,16 +12,16 @@
 
 ### Pipeline — Retrieval
 
-- [ ] **RETR-01**: RAG retrieval always runs both Neo4j graph and Pinecone in parallel and merges results — neither source is skipped when the other returns hits
-- [ ] **RETR-02**: `FactExtractionAgent` extracts structured facts from transcript: decisions, action items, new/changed requirements, owners, deadlines, doc-worthy updates
-- [ ] **RETR-03**: Candidate Confluence pages are identified automatically via merged RAG retrieval — no user input required for page selection
+- [x] **RETR-01**: RAG retrieval always runs both Neo4j graph and Pinecone in parallel and merges results — neither source is skipped when the other returns hits
+- [x] **RETR-02**: `FactExtractionAgent` extracts structured facts from transcript: decisions, action items, new/changed requirements, owners, deadlines, doc-worthy updates
+- [x] **RETR-03**: Candidate Confluence pages are identified automatically via merged RAG retrieval — no user input required for page selection
 
 ### Pipeline — Proposal Generation
 
-- [ ] **PIPE-01**: `POST /review/pipeline/start` endpoint accepts `{session_id}` and returns `{job_id}` immediately (HTTP 202) — pipeline runs in background
-- [ ] **PIPE-02**: One `DrafterAgent` per candidate page runs in parallel via `asyncio.gather`, each with its own bounded context (not one mega-prompt for all pages)
-- [ ] **PIPE-03**: `VerifierAgent` (using `gpt-5.4-mini`) reviews each draft card against transcript evidence and current Confluence content — adds `confidence`, `risk`, `verifier_note` but never drops a card
-- [ ] **PIPE-04**: Proposals are written to Supabase incrementally as each page's draft+verify completes — pipeline is resumable if server restarts
+- [x] **PIPE-01**: `POST /review/pipeline/start` endpoint accepts `{session_id}` and returns `{job_id}` immediately (HTTP 202) — pipeline runs in background
+- [x] **PIPE-02**: One `DrafterAgent` per candidate page runs in parallel via `asyncio.gather`, each with its own bounded context (not one mega-prompt for all pages)
+- [x] **PIPE-03**: `VerifierAgent` (using `gpt-5.4-mini`) reviews each draft card against transcript evidence and current Confluence content — adds `confidence`, `risk`, `verifier_note` but never drops a card
+- [x] **PIPE-04**: Proposals are written to Supabase incrementally as each page's draft+verify completes — pipeline is resumable if server restarts
 - [ ] **PIPE-05**: `GET /review/pipeline/{job_id}/stream` SSE endpoint emits typed progress events: `stage_start`, `proposal_ready`, `verification_complete`, `pipeline_complete`
 
 ### Schema
@@ -93,13 +93,13 @@
 | SCHEMA-02 | Phase 1 | Pending |
 | SCHEMA-03 | Phase 1 | Pending |
 | SCHEMA-04 | Phase 1 | Pending |
-| RETR-01 | Phase 2 | Pending |
-| RETR-02 | Phase 2 | Pending |
-| RETR-03 | Phase 2 | Pending |
-| PIPE-01 | Phase 2 | Pending |
-| PIPE-02 | Phase 2 | Pending |
-| PIPE-03 | Phase 2 | Pending |
-| PIPE-04 | Phase 2 | Pending |
+| RETR-01 | Phase 2 | Complete |
+| RETR-02 | Phase 2 | Complete |
+| RETR-03 | Phase 2 | Complete |
+| PIPE-01 | Phase 2 | Complete |
+| PIPE-02 | Phase 2 | Complete |
+| PIPE-03 | Phase 2 | Complete |
+| PIPE-04 | Phase 2 | Complete |
 | PIPE-05 | Phase 3 | Pending |
 | UI-01 | Phase 3 | Pending |
 | UI-02 | Phase 3 | Pending |

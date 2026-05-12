@@ -41,7 +41,7 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — Test infrastructure: test_pipeline.py with stubs and fixtures for RETR-01 through PIPE-04 (Wave 0)
+- [x] 02-01-PLAN.md — Test infrastructure: test_pipeline.py with stubs and fixtures for RETR-01 through PIPE-04 (Wave 0)
 - [ ] 02-02-PLAN.md — proposals table DDL + supabase_store helpers (create_pipeline_job, update_pipeline_job, upsert_proposal) + human checkpoint
 - [ ] 02-03-PLAN.md — FactExtractionAgent + _merged_rag_retrieval (parallel Pinecone + Neo4j)
 - [ ] 02-04-PLAN.md — DrafterAgent + VerifierAgent + POST /review/pipeline/start endpoint + _run_pipeline orchestrator
@@ -75,6 +75,6 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Schema & Blockers | 0/3 | Ready to execute | - |
-| 2. Multi-Agent Pipeline Core | 0/4 | Ready to execute | - |
+| 2. Multi-Agent Pipeline Core | 1/4 | In Progress|  |
 | 3. Async Progress Streaming + Review UI | 0/TBD | Not started | - |
 | 4. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |
