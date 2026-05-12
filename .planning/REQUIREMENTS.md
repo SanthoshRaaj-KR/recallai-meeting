@@ -22,7 +22,7 @@
 - [x] **PIPE-02**: One `DrafterAgent` per candidate page runs in parallel via `asyncio.gather`, each with its own bounded context (not one mega-prompt for all pages)
 - [x] **PIPE-03**: `VerifierAgent` (using `gpt-5.4-mini`) reviews each draft card against transcript evidence and current Confluence content — adds `confidence`, `risk`, `verifier_note` but never drops a card
 - [x] **PIPE-04**: Proposals are written to Supabase incrementally as each page's draft+verify completes — pipeline is resumable if server restarts
-- [ ] **PIPE-05**: `GET /review/pipeline/{job_id}/stream` SSE endpoint emits typed progress events: `stage_start`, `proposal_ready`, `verification_complete`, `pipeline_complete`
+- [x] **PIPE-05**: `GET /review/pipeline/{job_id}/stream` SSE endpoint emits typed progress events: `stage_start`, `proposal_ready`, `verification_complete`, `pipeline_complete`
 
 ### Schema
 
@@ -100,7 +100,7 @@
 | PIPE-02 | Phase 2 | Complete |
 | PIPE-03 | Phase 2 | Complete |
 | PIPE-04 | Phase 2 | Complete |
-| PIPE-05 | Phase 3 | Pending |
+| PIPE-05 | Phase 3 | Complete |
 | UI-01 | Phase 3 | Pending |
 | UI-02 | Phase 3 | Pending |
 | UI-03 | Phase 3 | Pending |
