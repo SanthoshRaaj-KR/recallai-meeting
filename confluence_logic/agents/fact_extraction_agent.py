@@ -29,8 +29,8 @@ class ExtractedFacts(BaseModel):
     decisions: List[str] = []
     action_items: List[str] = []
     new_requirements: List[str] = []
-    owners: List[str] = []
-    deadlines: List[str] = []
+    owners: Dict[str, str] = {}      # task_description -> owner_name
+    deadlines: Dict[str, str] = {}   # task_description -> deadline_string
     doc_worthy_updates: List[str] = []
     query_terms: List[str] = []
 
@@ -47,8 +47,12 @@ FACT_EXTRACTION_PROMPT = (
     "2. action_items: Tasks assigned or committed to, with owner and deadline if mentioned "
     "(e.g. 'Ben will prepare the rollout checklist by Friday')\n"
     "3. new_requirements: New or changed requirements discussed (e.g. 'API must support pagination')\n"
-    "4. owners: People mentioned as responsible for work items (e.g. 'Asha', 'Ben')\n"
-    "5. deadlines: Explicit deadlines or dates mentioned (e.g. 'next Friday', '2024-Q2')\n"
+    "4. owners: A JSON object mapping task description to owner name "
+    "(e.g. {\"Prepare rollout checklist\": \"Ben\", \"Write API docs\": \"Asha\"}). "
+    "Use {} if none mentioned.\n"
+    "5. deadlines: A JSON object mapping task description to deadline string "
+    "(e.g. {\"Prepare rollout checklist\": \"next Friday\", \"API migration\": \"2024-Q2\"}). "
+    "Use {} if none mentioned.\n"
     "6. doc_worthy_updates: Items worth adding or updating in documentation — new processes, "
     "changed procedures, architectural decisions, API changes, launch timelines, configuration changes, "
     "and anything else that should be reflected in team knowledge bases\n"
@@ -56,7 +60,9 @@ FACT_EXTRACTION_PROMPT = (
     "most relevant Confluence pages to update based on the meeting content\n\n"
     "IMPORTANT: Businesses rely on these facts for documentation — do not omit items. "
     "Be thorough and complete. Return valid JSON matching the ExtractedFacts schema with all fields. "
-    "If a category has no items, return an empty list for that field. "
+    "For list fields (decisions, action_items, new_requirements, doc_worthy_updates, query_terms): "
+    "return an empty list [] if no items. "
+    "For dict fields (owners, deadlines): return an empty object {} if none mentioned. "
     "Return JSON only — no markdown, no explanation."
 )
 
