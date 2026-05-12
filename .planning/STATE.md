@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-11)
 
 **Core value:** Users never manually update Confluence after a meeting — the system proposes the right changes to the right pages and the user just approves or rejects.
-**Current focus:** Phase 1 — Schema & Blockers
+**Current focus:** Phase 3 — Async Progress Streaming + Review UI
 
 ## Current Position
 
-Phase: 1 of 4 (Schema & Blockers)
-Plan: 3 of 3 complete (01-01 ✓, 01-02 ✓, 01-03 ⏳ pending Supabase checkpoint)
-Status: Phase complete — ready for verification
+Phase: 2 of 4 complete (Multi-Agent Pipeline Core)
+Plan: 4 of 4 complete (02-01 ✓, 02-02 ✓, 02-03 ✓, 02-04 ✓)
+Status: Phase 2 verified — ready for Phase 3 planning
 Last activity: 2026-05-12
 
-Progress: [██████████] 100%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
@@ -71,11 +71,12 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-- Run pipeline_jobs SQL in Supabase Dashboard (01-03 checkpoint) before starting Phase 2
+- Apply proposals DDL (supabase_schema.sql proposals block) in Supabase Dashboard before Phase 3 E2E testing
+- Run end-to-end pipeline test: POST /review/pipeline/start with real session + Bearer token (02-HUMAN-UAT.md)
 
 ### Blockers/Concerns
 
-- 01-03 pending: pipeline_jobs table not yet created in Supabase — must run SQL from supabase_schema.sql before Phase 2
+- Supabase proposals table not yet confirmed in live DB (human UAT item from Phase 2 — code is correct, table application deferred)
 
 ## Deferred Items
 
@@ -85,6 +86,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-12T01:32:46.801Z
-Stopped at: Phase 2 planned — 4 plans (02-01 through 02-04), 2 waves + Wave 0, plan check PASS; ready for /gsd-execute-phase 2
-Resume file: None
+Last session: 2026-05-12
+Stopped at: Phase 2 executed and verified (4/4 plans, all requirements met). Code review fixes applied (5 critical, 5 warning). Human UAT items saved to 02-HUMAN-UAT.md. Ready for Phase 3 planning.
+Resume file: .planning/phases/02-multi-agent-pipeline-core/02-HUMAN-UAT.md
