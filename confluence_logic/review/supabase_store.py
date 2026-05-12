@@ -219,7 +219,13 @@ def update_pipeline_job(
 
 
 def upsert_proposal(row: Dict[str, Any]) -> None:
-    """Write one verified proposal card row to the proposals table."""
+    """Write one verified proposal card row to the proposals table.
+
+    NOTE: Despite the name, this is a plain INSERT with no conflict resolution — there is no
+    unique constraint on (job_id, page_id, section_heading) in the current schema, so retries
+    will create duplicate rows. If retry idempotency is required, add a unique constraint and
+    switch to on_conflict=job_id,page_id,section_heading with Prefer: resolution=merge-duplicates.
+    """
     if not is_configured() or not row.get("job_id") or not row.get("user_id"):
         return
     payload = {k: v for k, v in row.items() if v is not None}
