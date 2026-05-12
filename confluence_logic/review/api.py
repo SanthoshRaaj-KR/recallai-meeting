@@ -25,6 +25,15 @@ import requests
 from . import supabase_store
 from confluence_logic.agents.proposed_changes_agent import ProposedChangesAgent
 from confluence_logic import confluence_page_graph
+from confluence_logic.agents.fact_extraction_agent import (
+    ExtractedFacts,
+    _run_fact_extraction,
+    _merged_rag_retrieval,
+    JARVIS_FACT_INPUT_MAX_CHARS,
+    JARVIS_PIPELINE_MAX_PAGES,
+)
+from confluence_logic.agents.drafter_agent import _run_drafter
+from confluence_logic.agents.verifier_agent import _run_verifier
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +100,10 @@ class ExecuteChangesRequest(BaseModel):
 
 class ProposeChangesRequest(BaseModel):
     query: Optional[str] = None
+
+
+class PipelineStartRequest(BaseModel):
+    session_id: str
 
 
 class MeetingChatMessage(BaseModel):
@@ -1488,3 +1501,180 @@ async def chat_with_meeting(
             "has_summary": bool((context.get("summary") or {}).get("summary")),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent pipeline helpers and endpoint (PIPE-01 through PIPE-04)
+# ---------------------------------------------------------------------------
+
+
+async def _draft_verify_persist(
+    page: Dict[str, Any],
+    facts: ExtractedFacts,
+    transcript_text: str,
+    job_id: str,
+    session_id: str,
+    user_id: Optional[str],
+) -> None:
+    """Draft, verify, and immediately persist one page's proposal. Errors are isolated."""
+    try:
+        draft = await _run_drafter(page, facts, transcript_text)
+        verified = await _run_verifier(
+            draft,
+            transcript_text,
+            page.get("relevant_content") or "",
+        )
+        await asyncio.to_thread(
+            supabase_store.upsert_proposal,
+            {
+                **verified,
+                "job_id": job_id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "source": "pipeline",
+                "status": "pending",
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "Draft-verify-persist failed for page %s: %s",
+            page.get("page_id"),
+            exc,
+        )
+
+
+async def _run_pipeline(
+    session_id: str,
+    job_id: str,
+    user_id: Optional[str],
+    graph_user_id: str,
+) -> None:
+    """Background pipeline orchestrator. Detached via asyncio.create_task.
+
+    Exceptions are caught and recorded in pipeline_jobs; never propagated to the event loop.
+    graph_user_id is passed explicitly — do NOT rely on ContextVar inheritance (Pitfall 4).
+    """
+    try:
+        # Stage 1: Fact Extraction
+        await asyncio.to_thread(
+            supabase_store.update_pipeline_job,
+            job_id, "fact_extraction", "running", None, None,
+        )
+        state = _get_meeting_state(session_id)
+        transcript_log = state.get("transcript_log") or []
+
+        # D-12: fetch history_item for summary_json enrichment; also fallback transcript source
+        history_item = await asyncio.to_thread(
+            supabase_store.get_history_item, user_id, session_id
+        ) or {}
+        if not transcript_log:
+            # D-12: in-memory state gone — decompress from Supabase
+            transcript_log = _decompress_transcript(history_item)
+
+        transcript_text = _format_transcript(transcript_log, JARVIS_FACT_INPUT_MAX_CHARS)
+
+        # D-02: prepend stored summary_json metadata (decisions/action_items/key_topics)
+        # above the transcript so FactExtractionAgent has full meeting context
+        summary_json = history_item.get("summary_json") or {}
+        metadata_parts: list = []
+        if summary_json.get("decisions"):
+            metadata_parts.append("Prior decisions: " + "; ".join(summary_json["decisions"][:10]))
+        if summary_json.get("action_items"):
+            items_str = "; ".join(
+                (a.get("description") or str(a)) for a in summary_json["action_items"][:10]
+            )
+            metadata_parts.append("Action items: " + items_str)
+        if summary_json.get("key_topics"):
+            metadata_parts.append("Key topics: " + "; ".join(summary_json["key_topics"][:10]))
+        if metadata_parts:
+            metadata_prefix = "[Meeting Context]\n" + "\n".join(metadata_parts) + "\n\n[Transcript]\n"
+            transcript_text = metadata_prefix + transcript_text
+
+        facts = await _run_fact_extraction(transcript_text)
+
+        # Stage 2: Merged RAG Retrieval
+        await asyncio.to_thread(
+            supabase_store.update_pipeline_job,
+            job_id, "retrieval", None, None, None,
+        )
+        candidate_pages = await _merged_rag_retrieval(graph_user_id, facts.query_terms)
+
+        # D-06: Zero-RAG fallback — generate create proposals from doc_worthy_updates
+        if not candidate_pages and facts.doc_worthy_updates:
+            candidate_pages = [
+                {
+                    "page_id": None,
+                    "title": f"New page: {item[:60]}",
+                    "relevant_content": "",
+                    "score": 0.0,
+                }
+                for item in facts.doc_worthy_updates[:3]
+            ]
+
+        # D-09: Deduplicate by page_id; cap at JARVIS_PIPELINE_MAX_PAGES
+        seen_ids: set = set()
+        deduplicated: list = []
+        for p in candidate_pages:
+            pid = p.get("page_id")
+            key = pid if pid else id(p)  # None page_ids (create proposals) each get own key
+            if key not in seen_ids:
+                seen_ids.add(key)
+                deduplicated.append(p)
+        candidate_pages = deduplicated[:JARVIS_PIPELINE_MAX_PAGES]
+
+        # Stage 3: Parallel Draft + Verify + Persist
+        await asyncio.to_thread(
+            supabase_store.update_pipeline_job,
+            job_id, "drafting", None, None, None,
+        )
+        tasks = [
+            _draft_verify_persist(page, facts, transcript_text, job_id, session_id, user_id)
+            for page in candidate_pages
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning("Pipeline task failed (non-fatal): %s", r)
+
+        # Stage 4: Complete
+        await asyncio.to_thread(
+            supabase_store.update_pipeline_job,
+            job_id, "complete", "completed", None, _utc_now_iso(),
+        )
+
+    except Exception as exc:
+        logger.error("Pipeline %s failed: %s", job_id, exc)
+        try:
+            await asyncio.to_thread(
+                supabase_store.update_pipeline_job,
+                job_id, None, "failed", str(exc), _utc_now_iso(),
+            )
+        except Exception:
+            pass  # Supabase update failure is non-fatal
+
+
+@router.post("/review/pipeline/start", status_code=202)
+async def start_pipeline(
+    body: PipelineStartRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Start the multi-agent proposal pipeline for a session. Returns 202 immediately.
+
+    The pipeline runs as a background asyncio task. Poll /review/pipeline/{job_id}
+    or stream /review/pipeline/{job_id}/stream (Phase 3) for progress.
+    """
+    user = _auth_user_from_header(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required to start pipeline.")
+
+    job_id = await asyncio.to_thread(
+        supabase_store.create_pipeline_job,
+        body.session_id,
+        user["id"],
+    )
+    # job_id may be None if Supabase is not configured — pipeline still runs, just not tracked
+    graph_user_id = _confluence_graph_user_id(user, body.session_id)
+    asyncio.create_task(
+        _run_pipeline(body.session_id, job_id or "", user["id"], graph_user_id)
+    )
+    return {"job_id": job_id, "status": "accepted"}
