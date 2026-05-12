@@ -93,3 +93,58 @@ create policy "Users can update their own pipeline jobs"
   for update
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+-- ---------------------------------------------------------------------------
+-- proposals: incremental per-card proposal storage (Phase 2+)
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.proposals (
+  id uuid primary key default gen_random_uuid(),
+  job_id uuid not null references public.pipeline_jobs(job_id) on delete cascade,
+  session_id text not null,
+  user_id uuid not null,
+  change_type text not null,
+  page_id text,
+  page_title text not null,
+  section_heading text,
+  before_content text,
+  after_content text,
+  rationale text,
+  transcript_evidence jsonb default '[]',
+  confidence text not null default 'low',
+  risk text not null default 'safe',
+  verifier_note text,
+  status text not null default 'pending',
+  source text default 'pipeline',
+  created_at timestamptz default now()
+);
+
+-- NOTE: Run this entire block in the Supabase SQL Editor before executing Phase 2.
+-- Requires pipeline_jobs table to already exist (Phase 1 checkpoint).
+-- confidence values: 'high' | 'medium' | 'low'
+-- risk values: 'safe' | 'review' | 'risky'
+-- status values: 'pending' | 'accepted' | 'rejected'
+
+create index if not exists proposals_job_created_idx
+  on public.proposals (job_id, created_at desc);
+
+alter table public.proposals enable row level security;
+
+drop policy if exists "Users can read their own proposals" on public.proposals;
+create policy "Users can read their own proposals"
+  on public.proposals
+  for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own proposals" on public.proposals;
+create policy "Users can insert their own proposals"
+  on public.proposals
+  for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update their own proposals" on public.proposals;
+create policy "Users can update their own proposals"
+  on public.proposals
+  for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
