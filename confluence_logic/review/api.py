@@ -1026,63 +1026,139 @@ def _get_editor_agent():
         return EditorAgent(model=JARVIS_REVIEW_MODEL)
 
 
+async def _fetch_live_page_content(page_id: Optional[str], page_title: str, heading: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Search Confluence for a page, fetch its content, and return (verified_page_id, content_text).
+
+    Returns (None, None) on any error so callers can fall back gracefully.
+    """
+    try:
+        connector = _get_connector()
+        actual_id = page_id
+
+        if not actual_id:
+            results = await asyncio.to_thread(connector.search_pages, page_title, 5)
+            for r in results:
+                if r.get("title", "").strip().lower() == page_title.strip().lower():
+                    actual_id = r["page_id"]
+                    break
+            if not actual_id and results:
+                actual_id = results[0]["page_id"]
+
+        if not actual_id:
+            return None, None
+
+        html = await asyncio.to_thread(connector.fetch_page_html, actual_id)
+        if not html:
+            return actual_id, None
+
+        full_text = _html_to_text(html)
+
+        if heading:
+            lines = full_text.split("\n")
+            in_section, section_lines = False, []
+            for line in lines:
+                if heading.strip().lower() in line.strip().lower():
+                    in_section = True
+                elif in_section and line.strip().startswith("#"):
+                    break
+                if in_section:
+                    section_lines.append(line)
+            if section_lines:
+                return actual_id, "\n".join(section_lines[:20])
+
+        return actual_id, full_text[:2000]
+
+    except Exception as exc:
+        logger.debug("_fetch_live_page_content failed (non-fatal): %s", exc)
+        return None, None
+
+
 def _format_approved_change_request(change: Dict[str, Any]) -> str:
+    """Build a precise, step-by-step instruction for the EditorAgent using real Confluence data."""
     change_type = str(change.get("change_type") or "edit").lower()
     page_title = change.get("page_title") or "Confluence page"
     page_id = change.get("page_id") or "NONE"
-    heading = change.get("section_heading") or "UNKNOWN"
+    heading = change.get("section_heading") or None
     before = change.get("before_content") or ""
     after = change.get("after_content") or ""
     rationale = change.get("rationale") or ""
-
-    action = {
-        "create": "create",
-        "delete": "delete",
-        "title": "title",
-    }.get(change_type, "edit")
+    template_content = change.get("_template_content") or ""
+    template_title = change.get("_template_page_title") or ""
 
     if change_type == "create":
-        instruction = (
-            f"Create a new Confluence page titled '{page_title}' with the approved content below. "
-            "Use the existing create page tool and do not edit an unrelated existing page."
-        )
-    elif change_type == "delete":
-        instruction = (
-            f"Delete the approved content from the existing Confluence page '{page_title}'. "
-            "Use fetch, preview_delete, and commit_delete. Do not create a new page."
-        )
-    elif change_type == "title":
-        instruction = (
-            f"Rename the existing Confluence page '{page_title}' using the approved title/content below. "
-            "Use update_page_title. Do not create a replacement page."
-        )
-    else:
-        instruction = (
-            f"Update the existing Confluence page '{page_title}' with the approved content below. "
-            "Use fetch_live_page, preview_edit, and commit_document_edit. Do not create a new page."
+        template_block = ""
+        if template_content:
+            template_block = (
+                f"\n\nTEMPLATE (fetched live from '{template_title}'):\n"
+                f"Copy this structure and replace every reference to '{template_title}' with '{page_title}':\n\n"
+                f"{template_content}"
+            )
+        return (
+            f"Create a new Confluence page.\n\n"
+            f"TITLE (exact): {page_title}\n"
+            f"HEADING: {heading or page_title}\n\n"
+            f"PAGE BODY:\n{after or f'## {page_title}'}\n"
+            f"{template_block}\n\n"
+            f"RATIONALE: {rationale}\n\n"
+            f"Steps:\n"
+            f"1. Search for '{page_title}' — if it already exists, do NOT create a duplicate.\n"
+            f"2. Use create_new_page with title exactly: {page_title}\n"
+            f"3. Use the PAGE BODY above as content.\n"
+            f"4. Do NOT edit any existing page. Only create."
         )
 
-    return (
-        "Resolver context:\n"
-        f"ACTION: {action}\n"
-        f"PAGE_TITLE: {page_title}\n"
-        f"PAGE_ID: {page_id}\n"
-        f"HEADING: {heading}\n"
-        f"REFRAMED_REQUEST: {instruction}\n"
-        f"RATIONALE: {rationale or 'Approved from meeting proposal queue.'}\n\n"
-        "Approved Confluence change request:\n"
-        f"{instruction}\n\n"
-        f"Target page title: {page_title}\n"
-        f"Target page id: {page_id}\n"
-        f"Target section heading: {heading}\n"
-        f"Existing content or anchor excerpt:\n{before or '[none supplied]'}\n\n"
-        f"Approved new content:\n{after or '[none supplied]'}\n\n"
-        "Apply only this approved change. If the target cannot be verified with existing Confluence tools, fail clearly."
-    )
+    elif change_type == "delete":
+        scope = f"section '{heading}'" if heading else "entire page content"
+        return (
+            f"Delete content from Confluence.\n\n"
+            f"TARGET PAGE: {page_title} (id: {page_id})\n"
+            f"SCOPE: {scope}\n\n"
+            f"CONTENT TO REMOVE:\n{before or '[see live page]'}\n\n"
+            f"RATIONALE: {rationale}\n\n"
+            f"Steps:\n"
+            f"1. Search for '{page_title}' to verify it exists.\n"
+            f"2. Fetch the live page.\n"
+            f"3. {'Delete the section: ' + heading if heading else 'Delete the entire page body.'}\n"
+            f"4. Commit the deletion.\n"
+            f"Do NOT create any pages."
+        )
+
+    elif change_type == "title":
+        return (
+            f"Rename a Confluence page.\n\n"
+            f"CURRENT TITLE: {page_title} (id: {page_id})\n"
+            f"NEW TITLE: {after}\n\n"
+            f"RATIONALE: {rationale}\n\n"
+            f"Steps:\n"
+            f"1. Search for '{page_title}' to find the exact page.\n"
+            f"2. Call update_page_title to rename it to exactly: {after}\n"
+            f"3. Do NOT create a new page — rename the existing one."
+        )
+
+    else:  # edit
+        section_ref = f"section '{heading}'" if heading else "main content"
+        return (
+            f"Update an existing Confluence page.\n\n"
+            f"TARGET PAGE: {page_title} (id: {page_id})\n"
+            f"TARGET SECTION: {section_ref}\n\n"
+            f"CURRENT CONTENT (from live page):\n{before or '[fetch live page — page_id above is verified]'}\n\n"
+            f"REPLACEMENT CONTENT:\n{after}\n\n"
+            f"RATIONALE: {rationale}\n\n"
+            f"Steps:\n"
+            f"1. Fetch live page '{page_title}' (id: {page_id}).\n"
+            f"2. Locate {section_ref}.\n"
+            f"3. Replace the current content with the REPLACEMENT CONTENT above.\n"
+            f"4. Use preview_edit then commit_document_edit.\n"
+            f"Apply only this change. Do not touch other sections."
+        )
 
 
 async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[str, Any]:
-    """Execute a Supabase-backed pipeline proposal by UUID (Phase 3 path)."""
+    """Execute a Supabase-backed pipeline proposal.
+
+    Re-fetches live Confluence content at execution time so the EditorAgent
+    receives the actual current page text, not the stale LLM-generated summary.
+    """
     proposal = supabase_store.get_proposal_by_id(proposal_id)
     if not proposal:
         return {"success": False, "message": "Proposal not found."}
@@ -1095,17 +1171,45 @@ async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[
 
     supabase_store.update_proposal_status(proposal_id, "accepted")
 
+    change_type = proposal.get("change_type", "edit")
+    page_title = proposal.get("page_title") or ""
+    page_id = proposal.get("page_id")
+    heading = proposal.get("section_heading")
+
     change = {
         "id": proposal_id,
-        "change_type": proposal.get("change_type", "edit"),
-        "page_id": proposal.get("page_id"),
-        "page_title": proposal.get("page_title"),
-        "section_heading": proposal.get("section_heading"),
+        "change_type": change_type,
+        "page_id": page_id,
+        "page_title": page_title,
+        "section_heading": heading,
         "before_content": proposal.get("before_content"),
         "after_content": proposal.get("after_content"),
         "rationale": proposal.get("rationale"),
         "status": "pending",
     }
+
+    # Re-fetch live content at execution time — page may have changed since proposal was created.
+    # This gives the EditorAgent real, current content to target precisely.
+    if change_type in ("edit", "delete", "title"):
+        verified_id, live_text = await _fetch_live_page_content(page_id, page_title, heading)
+        if verified_id:
+            change["page_id"] = verified_id
+        if live_text:
+            change["before_content"] = live_text
+
+    elif change_type == "create":
+        # Re-fetch template if referenced in after_content/rationale
+        combined = f"{proposal.get('rationale', '')} {proposal.get('after_content', '')}"
+        import re as _re
+        bold_refs = _re.findall(r'\*\*([^*]+)\*\*', combined)
+        for ref in bold_refs:
+            if ref.strip() and ref.strip().lower() != page_title.lower():
+                t_id, t_content = await _fetch_live_page_content(None, ref.strip(), None)
+                if t_content:
+                    change["_template_page_id"] = t_id
+                    change["_template_page_title"] = ref.strip()
+                    change["_template_content"] = t_content
+                    break
 
     state = _get_meeting_state(session_id)
     if proposal.get("user_id") and not state.get("auth_user_id"):
@@ -1626,28 +1730,51 @@ async def _verify_and_persist(
     session_id: str,
     user_id: Optional[str],
 ) -> None:
-    """Verify one proposal from the comprehensive proposal agent, then persist to Supabase."""
+    """Enrich with real Confluence content, verify, then persist so cards show actual page text."""
     try:
+        change_type = draft.get("change_type", "edit")
+
+        # Fetch real Confluence content so before_content shows actual page text, not LLM guess.
+        # This makes the card reviewable: the user sees exactly what exists now vs what will change.
+        if change_type in ("edit", "delete", "title"):
+            verified_id, live_text = await _fetch_live_page_content(
+                draft.get("page_id"), draft.get("page_title", ""), draft.get("section_heading")
+            )
+            if verified_id:
+                draft["page_id"] = verified_id
+            if live_text:
+                draft["before_content"] = live_text
+
+        elif change_type == "create":
+            # For creates: try to find a template page and store its content for execution
+            combined = f"{draft.get('rationale', '')} {draft.get('after_content', '')}"
+            import re as _re
+            bold_refs = _re.findall(r'\*\*([^*]+)\*\*', combined)
+            page_title = draft.get("page_title", "")
+            for ref in bold_refs:
+                if ref.strip() and ref.strip().lower() != page_title.lower():
+                    t_id, t_content = await _fetch_live_page_content(None, ref.strip(), None)
+                    if t_content:
+                        draft["_template_page_id"] = t_id
+                        draft["_template_page_title"] = ref.strip()
+                        draft["_template_content"] = t_content
+                        break
+
         page_content = draft.get("before_content") or ""
         verified = await _run_verifier(draft, transcript_text, page_content)
-        row_id = await asyncio.to_thread(
-            supabase_store.upsert_proposal,
-            {
-                **verified,
-                "job_id": job_id,
-                "session_id": session_id,
-                "user_id": user_id,
-                "source": "pipeline",
-                "status": "pending",
-            },
-        )
+
+        # Strip internal enrichment keys before persisting to Supabase
+        row = {k: v for k, v in verified.items() if not k.startswith("_")}
+        row.update({"job_id": job_id, "session_id": session_id, "user_id": user_id, "source": "pipeline", "status": "pending"})
+
+        row_id = await asyncio.to_thread(supabase_store.upsert_proposal, row)
         _emit(job_id, {
             "type": "proposal_ready",
             "id": row_id,
             "job_id": job_id,
             "session_id": session_id,
             "status": "pending",
-            **verified,
+            **row,
         })
     except Exception as exc:
         logger.warning("_verify_and_persist failed for draft %s: %s", draft.get("page_title"), exc)
