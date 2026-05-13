@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import OpenAI
@@ -1618,6 +1619,59 @@ async def _draft_verify_persist(
         )
 
 
+def _html_to_text(html: str) -> str:
+    """Strip HTML tags and return plain text for the proposal agent."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    return soup.get_text(separator="\n", strip=True)[:4000]
+
+
+async def _live_confluence_search(query_terms: List[str]) -> List[Dict[str, Any]]:
+    """Search the user's Confluence workspace live via CQL for each query term.
+
+    No ingestion required — uses the ConfluenceConnector's search_pages + fetch_page_html
+    directly so pages are always fresh. Falls back silently when credentials are absent.
+    """
+    try:
+        connector = _get_connector()
+    except Exception:
+        logger.debug("Confluence connector not configured — skipping live search")
+        return []
+
+    seen_ids: set = set()
+    pages: List[Dict[str, Any]] = []
+
+    for term in (query_terms or [])[:6]:
+        if len(pages) >= JARVIS_PIPELINE_MAX_PAGES:
+            break
+        try:
+            results = await asyncio.to_thread(connector.search_pages, term, 5)
+            for r in results:
+                page_id = r.get("page_id")
+                if not page_id or page_id in seen_ids:
+                    continue
+                seen_ids.add(page_id)
+                # Fetch full page content so the drafter has real context
+                try:
+                    html = await asyncio.to_thread(connector.fetch_page_html, page_id)
+                    relevant_content = _html_to_text(html)
+                except Exception as fetch_exc:
+                    logger.debug("Could not fetch content for page %s: %s", page_id, fetch_exc)
+                    relevant_content = r.get("excerpt") or ""
+                pages.append({
+                    "page_id": page_id,
+                    "title": r.get("title", ""),
+                    "space_key": r.get("space_key", ""),
+                    "relevant_content": relevant_content,
+                    "score": 1.0,
+                })
+                if len(pages) >= JARVIS_PIPELINE_MAX_PAGES:
+                    break
+        except Exception as exc:
+            logger.warning("Live Confluence search failed for term '%s': %s", term, exc)
+
+    return pages
+
+
 async def _run_pipeline(
     session_id: str,
     job_id: str,
@@ -1675,13 +1729,38 @@ async def _run_pipeline(
 
         facts = await _run_fact_extraction(transcript_text)
 
-        # Stage 2: Merged RAG Retrieval
+        # Stage 2: Retrieval — live Confluence search + graph/vector RAG in parallel
         await asyncio.to_thread(
             supabase_store.update_pipeline_job,
             job_id, "retrieval", "running", None, None,
         )
         _emit(job_id, {"type": "stage_start", "stage": "rag_retrieval"})
-        candidate_pages = await _merged_rag_retrieval(graph_user_id, facts.query_terms)
+
+        # Run live Confluence CQL search and graph/vector RAG concurrently.
+        # Live search always works — no ingestion needed; credentials in .env are enough.
+        rag_results, live_results = await asyncio.gather(
+            _merged_rag_retrieval(graph_user_id, facts.query_terms),
+            _live_confluence_search(facts.query_terms),
+            return_exceptions=True,
+        )
+        if isinstance(rag_results, Exception):
+            logger.warning("RAG retrieval error (non-fatal): %s", rag_results)
+            rag_results = []
+        if isinstance(live_results, Exception):
+            logger.warning("Live search error (non-fatal): %s", live_results)
+            live_results = []
+
+        # Merge: prefer RAG entries (have scored relevance); fill in live results for new page_ids
+        rag_ids = {p.get("page_id") for p in rag_results if p.get("page_id")}
+        extra_live = [p for p in live_results if p.get("page_id") not in rag_ids]
+
+        # For RAG pages missing relevant_content, backfill from live results
+        live_by_id = {p["page_id"]: p for p in live_results if p.get("page_id")}
+        for p in rag_results:
+            if not p.get("relevant_content") and p.get("page_id") in live_by_id:
+                p["relevant_content"] = live_by_id[p["page_id"]].get("relevant_content", "")
+
+        candidate_pages = list(rag_results) + extra_live
 
         # D-06: Zero-RAG fallback — generate create proposals from doc_worthy_updates
         if not candidate_pages and facts.doc_worthy_updates:
