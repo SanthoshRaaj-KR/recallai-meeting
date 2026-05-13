@@ -240,6 +240,45 @@ def upsert_proposal(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def get_proposal_by_id(proposal_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single proposals row by its UUID primary key."""
+    if not is_configured() or not proposal_id:
+        return None
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/proposals",
+            headers=_rest_headers(),
+            params={"id": f"eq.{proposal_id}", "select": "*", "limit": "1"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list) and data:
+            return data[0]
+    except Exception as exc:
+        logger.warning("get_proposal_by_id failed for %s: %s", proposal_id, exc)
+    return None
+
+
+def update_proposal_status(proposal_id: str, status: str) -> bool:
+    """Patch the status field of a proposals row by UUID."""
+    if not is_configured() or not proposal_id:
+        return False
+    try:
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/proposals",
+            headers=_rest_headers(),
+            params={"id": f"eq.{proposal_id}"},
+            json={"status": status},
+            timeout=8,
+        )
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        logger.warning("update_proposal_status failed for %s: %s", proposal_id, exc)
+    return False
+
+
 def get_pipeline_job(job_id: str) -> Optional[Dict[str, Any]]:
     """Fetch a single pipeline_jobs row by job_id. Returns the row dict or None.
 

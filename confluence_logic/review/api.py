@@ -120,7 +120,8 @@ class StartBotRequest(BaseModel):
 
 
 class ExecuteChangesRequest(BaseModel):
-    ids: List[int]
+    ids: Optional[List[int]] = None
+    proposal_id: Optional[str] = None  # UUID from Supabase (Phase 3 pipeline proposals)
 
 
 class ProposeChangesRequest(BaseModel):
@@ -1079,6 +1080,43 @@ def _format_approved_change_request(change: Dict[str, Any]) -> str:
     )
 
 
+async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[str, Any]:
+    """Execute a Supabase-backed pipeline proposal by UUID (Phase 3 path)."""
+    proposal = supabase_store.get_proposal_by_id(proposal_id)
+    if not proposal:
+        return {"success": False, "message": "Proposal not found."}
+
+    current_status = proposal.get("status", "pending")
+    if current_status in ("accepted", "executed"):
+        return {"success": False, "message": "This change has already been applied."}
+    if current_status == "rejected":
+        return {"success": False, "message": "This change has been rejected."}
+
+    supabase_store.update_proposal_status(proposal_id, "accepted")
+
+    change = {
+        "id": proposal_id,
+        "change_type": proposal.get("change_type", "edit"),
+        "page_id": proposal.get("page_id"),
+        "page_title": proposal.get("page_title"),
+        "section_heading": proposal.get("section_heading"),
+        "before_content": proposal.get("before_content"),
+        "after_content": proposal.get("after_content"),
+        "rationale": proposal.get("rationale"),
+        "status": "pending",
+    }
+
+    state = _get_meeting_state(session_id)
+    if proposal.get("user_id") and not state.get("auth_user_id"):
+        state["auth_user_id"] = proposal["user_id"]
+
+    result = await _execute_single_change(state, change)
+    final_status = "executed" if result.get("success") else "failed"
+    supabase_store.update_proposal_status(proposal_id, final_status)
+
+    return {"success": result.get("success", False), "message": result.get("error")}
+
+
 async def _execute_single_change(
     state: Dict[str, Any],
     change: Dict[str, Any],
@@ -1330,8 +1368,10 @@ async def execute_review_changes(body: ExecuteChangesRequest) -> Dict[str, Any]:
 
 @router.post("/sessions/{session_id}/review/execute")
 async def execute_review_changes_for_session(session_id: str, body: ExecuteChangesRequest) -> Dict[str, Any]:
+    if body.proposal_id:
+        return await _execute_pipeline_proposal(body.proposal_id, session_id)
     state = _get_meeting_state(session_id)
-    return await _execute_changes_for_state(state, body.ids)
+    return await _execute_changes_for_state(state, body.ids or [])
 
 
 # ---------------------------------------------------------------------------
