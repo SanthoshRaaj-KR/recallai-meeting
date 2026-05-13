@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
-from agents import Agent, Runner
+from agents import Agent, AgentOutputSchema, Runner
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ _fact_agent = Agent(
     name="FactExtractionAgent",
     model=JARVIS_AGENT_MODEL,
     instructions=FACT_EXTRACTION_PROMPT,
-    output_type=ExtractedFacts,
+    output_type=AgentOutputSchema(ExtractedFacts, strict_json_schema=False),
 )
 
 # ---------------------------------------------------------------------------
