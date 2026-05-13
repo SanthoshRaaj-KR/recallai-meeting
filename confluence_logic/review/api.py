@@ -1723,6 +1723,30 @@ async def _draft_verify_persist(
         )
 
 
+async def _auto_index_pinecone_background(graph_user_id: str) -> None:
+    """Fire-and-forget: index new/changed Confluence pages into Pinecone.
+
+    Runs per-page version checks — already-indexed pages are skipped instantly.
+    First run is slow (embeds all pages). Every run after skips unchanged pages.
+    Never blocks the pipeline — called via asyncio.create_task.
+    """
+    try:
+        from confluence_logic.ingestion.doc_pipeline import IngestionPipeline
+        connector = _get_connector()
+        pages = await asyncio.to_thread(connector.list_pages, JARVIS_PIPELINE_MAX_PAGES)
+        pipeline = IngestionPipeline()
+        for page in pages:
+            page_id = page.get("page_id")
+            if not page_id:
+                continue
+            try:
+                await asyncio.to_thread(pipeline.process_page, page_id)
+            except Exception as exc:
+                logger.debug("Pinecone auto-index skipped page %s: %s", page_id, exc)
+    except Exception as exc:
+        logger.warning("Pinecone auto-index background task failed (non-fatal): %s", exc)
+
+
 async def _verify_and_persist(
     draft: Dict[str, Any],
     transcript_text: str,
@@ -1890,15 +1914,24 @@ async def _run_pipeline(
 
         facts = await _run_fact_extraction(transcript_text)
 
-        # Stage 2: Retrieval — live Confluence search + graph/vector RAG in parallel
+        # Stage 2: Retrieval — auto-index + live search + RAG
         await asyncio.to_thread(
             supabase_store.update_pipeline_job,
             job_id, "retrieval", "running", None, None,
         )
         _emit(job_id, {"type": "stage_start", "stage": "rag_retrieval"})
 
-        # Run live Confluence CQL search and graph/vector RAG concurrently.
-        # Live search always works — no ingestion needed; credentials in .env are enough.
+        # Step 2a: Build / refresh Neo4j Confluence graph for this user.
+        # Has a 2-hour cache — first run fetches all pages from Confluence and
+        # writes them to Neo4j; every subsequent run within 2 hours returns instantly.
+        await confluence_page_graph.ensure_user_confluence_graph(graph_user_id)
+
+        # Step 2b: Kick off Pinecone auto-index as a fire-and-forget background task.
+        # Uses per-page version checks so only changed pages are re-embedded.
+        # Does NOT block the current pipeline — indexes for future runs.
+        asyncio.create_task(_auto_index_pinecone_background(graph_user_id))
+
+        # Step 2c: RAG (now populated) + live CQL search in parallel.
         rag_results, live_results = await asyncio.gather(
             _merged_rag_retrieval(graph_user_id, facts.query_terms),
             _live_confluence_search(facts.query_terms),
