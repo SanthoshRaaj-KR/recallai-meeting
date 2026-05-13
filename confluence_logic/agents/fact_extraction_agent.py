@@ -25,6 +25,22 @@ JARVIS_PIPELINE_MAX_PAGES = int(os.getenv("JARVIS_PIPELINE_MAX_PAGES", "20"))
 # ---------------------------------------------------------------------------
 
 
+class ChangeIntent(BaseModel):
+    """A single structured documentation change extracted from the meeting.
+
+    Each change_intent represents ONE thing that must be updated in Confluence.
+    The pipeline uses these to drive per-intent retrieval and per-(intent, page) drafting,
+    so subtle/contextual changes never get lost in a single sweep.
+    """
+    instruction: str = ""        # human-readable: "Reduce Akshat's gym plan to 9 weeks"
+    subject: str = ""            # what is being changed: "Akshat's gym plan", "OpenAI Agents SDK"
+    target_hint: str = ""        # where it likely lives: "Akshat plan page", "framework docs"
+    old_value: str = ""          # specific old string on the page (empty if unknown)
+    new_value: str = ""          # specific new value to write
+    action: str = "replace"      # replace | add | remove | rename | create
+    rationale: str = ""          # why: "Akshat is busy", "migration to Claude SDK"
+
+
 class ExtractedFacts(BaseModel):
     """Structured facts extracted from a meeting transcript."""
 
@@ -37,6 +53,7 @@ class ExtractedFacts(BaseModel):
     query_terms: List[str] = []
     mentioned_page_titles: List[str] = []  # exact Confluence page/doc names spoken in the meeting
     content_phrases: List[str] = []        # specific strings to find verbatim in page content (e.g. "OpenAI Agents SDK")
+    change_intents: List[ChangeIntent] = []  # structured per-change extraction — primary signal for the drafter
 
 
 # ---------------------------------------------------------------------------
@@ -73,11 +90,65 @@ FACT_EXTRACTION_PROMPT = (
     "if they say 'change all references to the old API endpoint' capture the endpoint string; "
     "if they say 'rename the team lead in all docs from Alice to Bob' capture 'Alice'. "
     "Only include concrete strings that would appear verbatim in existing pages. "
-    "Use [] if no specific content replacements were discussed.\n\n"
+    "Use [] if no specific content replacements were discussed.\n"
+    "10. change_intents: The MOST IMPORTANT field. A structured list of every distinct change that must be "
+    "made to documentation. EACH change spoken about in the meeting must produce ONE intent — no skipping.\n"
+    "    Each ChangeIntent has these fields:\n"
+    "    - instruction: human-readable description of what to change. Example: "
+    "\"Reduce Akshat's gym plan duration from the documented value to 9 weeks because he is busy\"\n"
+    "    - subject: WHAT is being changed. Example: \"Akshat's gym plan\", \"OpenAI Agents SDK usage\", "
+    "\"team lead role\", \"deployment process for service X\"\n"
+    "    - target_hint: WHERE on Confluence this likely lives. Use a short phrase that would match page titles "
+    "or content. Example: \"Akshat plan\", \"framework SDK\", \"team roster\", \"deployment runbook\". Empty string if unsure.\n"
+    "    - old_value: the SPECIFIC old string that probably appears in the page TODAY and needs replacing. "
+    "Example: \"12 months\", \"OpenAI Agents SDK\", \"Alice\". Empty string if not explicitly stated "
+    "or if the new value is purely additive.\n"
+    "    - new_value: the SPECIFIC new value to apply. Example: \"9 weeks\", \"Claude SDK\", \"Bob\". "
+    "Empty string only if action is remove/delete.\n"
+    "    - action: one of \"replace\", \"add\", \"remove\", \"rename\", \"create\". "
+    "Use \"replace\" for most edits, \"rename\" for page-title changes, \"create\" for new pages, "
+    "\"remove\" for deletions, \"add\" for purely-additive new sections/bullets.\n"
+    "    - rationale: WHY this change. Example: \"Akshat is now busy with other commitments\", "
+    "\"Team migrated to Claude SDK\". Empty if no reason was given.\n"
+    "    EXAMPLES (technical / business scenarios):\n"
+    "    A. Transcript: \"We're migrating from PostgreSQL 13 to PostgreSQL 16 across all services next quarter.\"\n"
+    "       → {instruction: \"Update PostgreSQL version references from 13 to 16\", "
+    "subject: \"PostgreSQL version\", target_hint: \"PostgreSQL, database, infrastructure\", "
+    "old_value: \"PostgreSQL 13\", new_value: \"PostgreSQL 16\", action: \"replace\", "
+    "rationale: \"Quarterly database upgrade\"}\n"
+    "    B. Transcript: \"The on-call rotation owner for the payments service changed — it's now Priya, was Marcus.\"\n"
+    "       → {instruction: \"Update payments service on-call owner from Marcus to Priya\", "
+    "subject: \"payments on-call owner\", target_hint: \"payments runbook, on-call rotation\", "
+    "old_value: \"Marcus\", new_value: \"Priya\", action: \"replace\", "
+    "rationale: \"Ownership handover\"}\n"
+    "    C. Transcript: \"Deployment SLA is being tightened from 99.9% to 99.95% across all production services.\"\n"
+    "       → {instruction: \"Update production deployment SLA from 99.9% to 99.95%\", "
+    "subject: \"production SLA\", target_hint: \"SLA, deployment, production services\", "
+    "old_value: \"99.9%\", new_value: \"99.95%\", action: \"replace\", "
+    "rationale: \"Tightened reliability target\"}\n"
+    "    D. Transcript: \"We need a new architecture overview page for the Inventory Service we just launched.\"\n"
+    "       → {instruction: \"Create a new Confluence page documenting the Inventory Service architecture\", "
+    "subject: \"Inventory Service architecture\", target_hint: \"Inventory Service\", "
+    "old_value: \"\", new_value: \"\", action: \"create\", rationale: \"New service launched\"}\n"
+    "    E. Transcript: \"The legacy /v1 checkout endpoint is deprecated; clients should move to /v2/checkout.\"\n"
+    "       → {instruction: \"Replace /v1/checkout endpoint references with /v2/checkout\", "
+    "subject: \"checkout API endpoint\", target_hint: \"checkout API, endpoints\", "
+    "old_value: \"/v1/checkout\", new_value: \"/v2/checkout\", action: \"replace\", "
+    "rationale: \"v1 deprecation\"}\n"
+    "    F. Transcript: \"We've reduced the order fulfillment SLA from 48 hours to 24 hours because the new "
+    "warehouse routing went live.\"\n"
+    "       → {instruction: \"Update order fulfillment SLA from 48h to 24h\", "
+    "subject: \"order fulfillment SLA\", target_hint: \"fulfillment, order processing\", "
+    "old_value: \"48 hours\", new_value: \"24 hours\", action: \"replace\", "
+    "rationale: \"New warehouse routing reduces processing time\"}\n"
+    "    Use [] only if no documentation changes were discussed.\n"
+    "    Be EXHAUSTIVE — if a meeting decision implies a documentation update, capture an intent. "
+    "Capture both explicit changes (numbers, names, versions) and contextual ones "
+    "(process changes, ownership changes, scope changes).\n\n"
     "IMPORTANT: Businesses rely on these facts for documentation — do not omit items. "
     "Be thorough and complete. Return valid JSON matching the ExtractedFacts schema with all fields. "
-    "For list fields (decisions, action_items, new_requirements, doc_worthy_updates, query_terms, mentioned_page_titles, content_phrases): "
-    "return an empty list [] if no items. "
+    "For list fields (decisions, action_items, new_requirements, doc_worthy_updates, query_terms, "
+    "mentioned_page_titles, content_phrases, change_intents): return an empty list [] if no items. "
     "For dict fields (owners, deadlines): return an empty object {} if none mentioned. "
     "Return JSON only — no markdown, no explanation."
 )
@@ -122,6 +193,7 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
     query_terms: List[str] = []
     mentioned_page_titles: List[str] = []
     content_phrases: List[str] = []
+    change_intents: List[ChangeIntent] = []
     owners: Dict[str, str] = {}
     deadlines: Dict[str, str] = {}
 
@@ -132,6 +204,7 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
     seen_terms: set = set()
     seen_page_titles: set = set()
     seen_phrases: set = set()
+    seen_intents: set = set()
 
     for chunk in chunks:
         for item in chunk.decisions:
@@ -169,6 +242,16 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
             if key and key not in seen_phrases:
                 seen_phrases.add(key)
                 content_phrases.append(item)
+        for intent in chunk.change_intents:
+            # Dedup by subject+new_value+action (instruction-level uniqueness)
+            key = (
+                intent.subject.strip().lower(),
+                intent.new_value.strip().lower(),
+                intent.action.strip().lower(),
+            )
+            if any(key) and key not in seen_intents:
+                seen_intents.add(key)
+                change_intents.append(intent)
         owners.update(chunk.owners)
         deadlines.update(chunk.deadlines)
 
@@ -180,6 +263,7 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
         query_terms=query_terms[:12],
         mentioned_page_titles=mentioned_page_titles[:20],
         content_phrases=content_phrases[:20],
+        change_intents=change_intents[:30],
         owners=owners,
         deadlines=deadlines,
     )
@@ -273,18 +357,81 @@ def _get_store() -> PineconeStore:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_pinecone_match(match: Any) -> Optional[Dict[str, Any]]:
+    """Flatten a raw Pinecone match into the shared {page_id, title, ...} shape.
+
+    Pinecone returns matches where the chunk id is at the top level (e.g. 'pageX_3')
+    and the real page_id, title, heading, content all live under 'metadata'. Without
+    this normalization, _merged_rag_retrieval was grouping chunks by chunk-id instead
+    of page-id — causing duplicates and "wrong page" selection downstream.
+
+    Returns None if the match has no real page_id (can't be merged safely).
+    """
+    if match is None:
+        return None
+    # Pinecone match objects may be dicts or have attribute-style access; handle both
+    if isinstance(match, dict):
+        metadata = match.get("metadata") or {}
+        score = match.get("score")
+        chunk_id = match.get("id") or ""
+    else:
+        metadata = getattr(match, "metadata", None) or {}
+        score = getattr(match, "score", None)
+        chunk_id = getattr(match, "id", "") or ""
+
+    if not isinstance(metadata, dict):
+        return None
+
+    page_id = (metadata.get("page_id") or "").strip()
+    if not page_id:
+        return None
+
+    return {
+        "page_id": page_id,
+        "title": metadata.get("title") or "",
+        "space_key": metadata.get("space_key") or "",
+        "heading": metadata.get("heading") or None,
+        "relevant_content": (
+            metadata.get("markdown_content")
+            or metadata.get("text_summary")
+            or ""
+        ),
+        "score": float(score) if score is not None else 0.0,
+        "source": "pinecone_rag",
+        "_chunk_id": chunk_id,  # kept for debug only
+    }
+
+
+def _normalize_rag_item(item: Any) -> Optional[Dict[str, Any]]:
+    """Normalize a single RAG result (from Neo4j or Pinecone) to the shared shape.
+
+    Neo4j results come back already shaped {page_id, title, score, relevant_content, ...}.
+    Pinecone matches need the flatten step above. Anything that doesn't yield a real
+    page_id is dropped here so downstream code never has to guess.
+    """
+    if item is None:
+        return None
+    if isinstance(item, dict) and item.get("page_id"):
+        # Already in our shape (Neo4j path)
+        return item
+    # Otherwise assume it's a Pinecone match — flatten it
+    return _normalize_pinecone_match(item)
+
+
 async def _merged_rag_retrieval(
     graph_user_id: Optional[str] = None,
     query_terms: Optional[List[str]] = None,
     *,
     user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Query Neo4j and Pinecone in parallel and merge results by page_id.
+    """Query Neo4j and Pinecone in parallel and merge results by REAL page_id.
 
     Both sources are always queried regardless of whether either returns results (RETR-01).
     Pinecone.search is synchronous and must be wrapped in asyncio.to_thread.
 
-    Accepts either graph_user_id (positional) or user_id (keyword) for the user identifier.
+    All matches are normalized through _normalize_rag_item so chunk IDs never end up
+    being treated as page IDs. Multiple chunks of the same page collapse to one entry
+    keyed by real page_id; the chunk with the best score (and longest content) wins.
     """
     from confluence_logic import confluence_page_graph  # deferred to avoid circular imports
 
@@ -312,32 +459,32 @@ async def _merged_rag_retrieval(
         return_exceptions=True,
     )
 
-    # Merge by page_id — prefer result with relevant_content; prefer higher score on tie
+    # Merge by REAL page_id. Multiple Pinecone chunks from the same page collapse to one,
+    # keeping the highest-score / longest-content entry so the drafter gets the best snippet.
     pages_by_id: Dict[str, Dict[str, Any]] = {}
     for result in all_results:
         if isinstance(result, Exception):
             logger.warning("RAG source returned error (non-fatal): %s", result)
             continue
-        for item in (result or []):
-            if not isinstance(item, dict):
+        for raw in (result or []):
+            item = _normalize_rag_item(raw)
+            if not item:
                 continue
-            page_id = item.get("page_id") or item.get("id") or ""
+            page_id = item.get("page_id") or ""
             if not page_id:
                 continue
             existing = pages_by_id.get(page_id)
             if existing is None:
                 pages_by_id[page_id] = item
             else:
-                # Prefer the entry with relevant_content; break tie by higher score
                 existing_score = float(existing.get("score") or 0)
                 new_score = float(item.get("score") or 0)
-                existing_has_content = bool(existing.get("relevant_content"))
-                new_has_content = bool(item.get("relevant_content"))
-                if new_has_content and not existing_has_content:
+                existing_content_len = len(existing.get("relevant_content") or "")
+                new_content_len = len(item.get("relevant_content") or "")
+                # Prefer: longer content first, then higher score on near-ties
+                if new_content_len > existing_content_len * 1.1:
                     pages_by_id[page_id] = item
-                elif new_has_content and existing_has_content and new_score > existing_score:
-                    pages_by_id[page_id] = item
-                elif not existing_has_content and new_score > existing_score:
+                elif new_score > existing_score and new_content_len >= existing_content_len * 0.8:
                     pages_by_id[page_id] = item
 
     sorted_pages = sorted(

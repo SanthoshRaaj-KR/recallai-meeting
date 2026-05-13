@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from openai import OpenAI
@@ -16,6 +17,31 @@ logger = logging.getLogger(__name__)
 MAX_RETRIEVAL_QUERIES = int(os.getenv("JARVIS_PROPOSAL_RETRIEVAL_QUERIES", "6"))
 MAX_RELEVANT_PAGES = int(os.getenv("JARVIS_PROPOSAL_RELEVANT_PAGES", "6"))
 MAX_PAGE_CONTEXT_CHARS = int(os.getenv("JARVIS_PROPOSAL_PAGE_CONTEXT_CHARS", "3500"))
+
+# Patterns that indicate after_content is editorial/planning text, not real page content.
+# These must never be written to Confluence.
+_INSTRUCTION_SENTENCE_RE = re.compile(
+    r"(?:^|\.\s+|\n)[-*•]?\s*(?:"
+    r"keep \S.{1,40}(?:as|the) (?:primary|main|central)|"
+    r"include \S.{1,40} only as|"
+    r"add (?:a |an )?(?:clear |new |detailed |proper )?(?:differentiation |comparison |overview |)?section\b|"
+    # 'maintain a professional [and neutral] tone' — allow optional ' and <adj>' between adjective and noun
+    r"maintain (?:a |an )?(?:professional|neutral|formal|consistent)(?:\s+and\s+(?:professional|neutral|formal|consistent))?\s+(?:tone|voice|style)|"
+    r"use (?:a |an )?(?:professional|structured|formal|neutral)(?:\s+and\s+(?:professional|structured|formal|neutral))?\s+(?:tone|format|style)|"
+    r"(?:this page|this section|the content) should (?:focus|include|contain|cover|highlight|emphasize)|"
+    r"ensure (?:that |the )?(?:content|page|information|tone)|"
+    r"rewrite (?:the |this |it)\b.{0,30}(?:so that|to (?:be|reflect|include|cover))|"
+    r"do not (?:include|mention|reference|use|paste|copy|add)\b"
+    r")",
+    re.I,
+)
+
+
+def _is_instruction_after_content(text: str) -> bool:
+    """Return True if text looks like editorial instructions rather than final page content."""
+    if not text:
+        return False
+    return bool(_INSTRUCTION_SENTENCE_RE.search(text))
 
 
 class ProposedChangesAgent:
@@ -38,61 +64,100 @@ class ProposedChangesAgent:
             "structured facts already extracted from it, and a list of relevant Confluence pages. "
             "Propose clear, specific changes for a human to review and approve.\n\n"
             "Your input contains: full_transcript, extracted_facts (decisions, action_items, doc_worthy_updates), "
-            "meeting_summary, and retrieved_page_context (Confluence pages with their current content).\n\n"
+            "meeting_summary, and retrieved_page_context (Confluence pages with their current content and selection_reason).\n\n"
+
+            "═══════════════════════════════════════════════════════\n"
+            "STEP 1 — PAGE SUITABILITY CHECK (do this before drafting)\n"
+            "═══════════════════════════════════════════════════════\n"
+            "For EACH page in retrieved_page_context, ask:\n"
+            "  a) Does this page's title directly relate to the change being proposed?\n"
+            "  b) Does this page's relevant_content contain information about the same subject?\n"
+            "  c) If the change is about 'Santos going to the gym', does this page actually cover Santos or gym attendance?\n"
+            "If the answers are mostly 'no', DO NOT propose a change for that page.\n"
+            "A page with selection_reason='rag_retrieval' or 'keyword_search' may be a loose match — scrutinize it.\n"
+            "A page with selection_reason='direct_title_match' or 'content_phrase_match' is a strong candidate.\n"
+            "PREFER NO PROPOSAL over a wrong proposal. Quality over quantity.\n\n"
+
             "OUTPUT STRUCTURE RULES — critical:\n"
             "- Return ONLY JSON shaped as {\"changes\": [...]}.\n"
-            "- Produce ONE change object per DISTINCT action. Never merge multiple actions into one change.\n"
-            "- Cover EVERY distinct action mentioned in the transcript — including actions for pages NOT in retrieved_page_context.\n"
-            "- Do NOT produce duplicate or near-identical change objects. Each must address a different page or action.\n\n"
+            "- Produce ONE change object per DISTINCT (page, action) pair. Never merge multiple pages into one change.\n"
+            "- If the SAME fact applies to MULTIPLE pages (e.g. a name appears in page A AND page B), "
+            "generate a SEPARATE change for EACH page only if the page actually contains relevant content to update.\n"
+            "- Do NOT produce duplicate or near-duplicate changes for the same page.\n"
+            "- Cover actions mentioned in the transcript — but only for pages where the change clearly belongs.\n\n"
+
             "change_type values — choose carefully:\n"
             "- edit: modify existing content on a page that IS in retrieved_page_context (use the real page_id).\n"
             "- create: create a brand-new Confluence page that does not exist yet (set page_id to null).\n"
-            "- delete: permanently remove an entire page OR a section. For full-page delete: set section_heading to null, after_content to null.\n"
-            "  For section-only delete: set section_heading to the heading, after_content to null.\n"
-            "- title: RENAME an existing page. Use this when the transcript says to rename/retitle a page.\n"
+            "- delete: permanently remove an entire page OR a section. For full-page delete: section_heading=null, after_content=null.\n"
+            "  For section-only delete: set section_heading to the heading, after_content=null.\n"
+            "- title: RENAME an existing page. after_content = the NEW title string only.\n"
             "  For pages IN retrieved_page_context: use the real page_id.\n"
-            "  For pages NOT in retrieved_page_context but mentioned by name: set page_id to null, page_title to the CURRENT name, "
-            "  after_content to the NEW name, before_content to null.\n\n"
-            "IMPORTANT — when to use 'create' vs 'edit'/'title':\n"
-            "- 'create' ONLY when: (a) the transcript explicitly says 'create a new page', 'add a new page', 'make a page' for X, "
-            "OR (b) the topic has no related page anywhere in retrieved_page_context.\n"
-            "- If the transcript says something should change in docs but does NOT explicitly say 'create a page': "
-            "look in retrieved_page_context for a page covering the same topic. If found, use 'edit' or 'title' on that page.\n"
-            "- If the transcript says 'rename X to Y' or 'change the title of X to Y' → change_type: title (page_title=X, after_content=Y).\n"
-            "- EXAMPLE: transcript says 'update the team lead from Alice to Bob in our docs' → "
-            "find a page about team roles in retrieved_page_context → edit that page. Do NOT create a new page.\n"
-            "- EXAMPLE: transcript says 'create a new MS Dhoni page' → change_type: create, page_id: null.\n"
-            "- Do NOT use 'create' for renaming existing pages or updating existing content.\n\n"
-            "CONTENT RULES — read carefully:\n\n"
+            "  For pages NOT in retrieved_page_context: set page_id to null, page_title to the CURRENT name.\n\n"
+
+            "CRITICAL — title + content both wrong:\n"
+            "- If BOTH the page title AND body content are wrong (e.g. page titled 'Akshat doesn't go to gym' AND body says the same), "
+            "generate TWO separate change objects:\n"
+            "  1. change_type: 'title' — page_title: current title, after_content: new title\n"
+            "  2. change_type: 'edit' — page_title: current title, section_heading: relevant heading, "
+            "before_content: the wrong text in body, after_content: the corrected body text\n"
+            "- Never fix both in a single change object.\n\n"
+
+            "IMPORTANT — 'create' vs 'edit'/'title':\n"
+            "- 'create' ONLY when: (a) transcript explicitly says 'create a new page' for X, "
+            "OR (b) no related page exists in retrieved_page_context.\n"
+            "- If a related page exists → use 'edit' or 'title', not 'create'.\n\n"
+
+            "═══════════════════════════════════════════════════════\n"
+            "CONTENT RULES — after_content MUST be final page documentation\n"
+            "═══════════════════════════════════════════════════════\n\n"
+
+            "CRITICAL — after_content format rule:\n"
+            "after_content must ALWAYS be final, publishable page content — facts, structured descriptions, or specifications.\n"
+            "It is written DIRECTLY to Confluence. A real user will read it as documentation.\n\n"
+
+            "FORBIDDEN patterns in after_content — NEVER produce these:\n"
+            "- 'Keep X as the primary subject of the page'\n"
+            "- 'Include X only as comparison or fan-interest content'\n"
+            "- 'Add a clear differentiation section explaining why...'\n"
+            "- 'Maintain a professional and neutral tone throughout'\n"
+            "- 'Use a structured format'\n"
+            "- 'This page should focus on...'\n"
+            "- 'Ensure the content covers...'\n"
+            "- 'Rewrite the section so that...'\n"
+            "- Any text that reads as instructions to a writer rather than content for a reader\n\n"
+
+            "CORRECT after_content examples (these are final documentation):\n"
+            "- 'MS Dhoni is a former Indian cricket captain renowned for his calm leadership and finishing ability. "
+            "He led India to victory in the 2007 T20 World Cup, 2011 ODI World Cup, and 2013 Champions Trophy.'\n"
+            "- 'Santos attends the gym three times per week and focuses on strength training.'\n"
+            "- '## Tech Stack\\n**Frontend:** React 18 with TypeScript\\n**Backend:** FastAPI (Python)'\n\n"
+
+            "If you do not have enough factual details to write proper documentation, write a short stub:\n"
+            "- '<h2>Overview</h2><p>[Name] is [one sentence about what they are/do].</p>'\n"
+            "Never pad with invented facts, and never use editorial instructions as a substitute.\n\n"
+
             "before_content:\n"
-            "- Copy the EXACT relevant excerpt (3–8 lines max) from the retrieved Confluence page that will be changed.\n"
-            "- Do NOT paste the entire page. Only the specific paragraph, bullet, or section being modified.\n"
-            "- Format with markdown: ## headings, **bold**, bullet points.\n"
-            "- For creates: set to null. For title changes: set to null or the current page title.\n\n"
-            "after_content:\n"
-            "- For edit: write the replacement content — formal, third-person English, max 10 lines.\n"
-            "- For create: write a brief description of what facts/decisions the page should capture "
-            "(2–4 sentences max). Keep it factual — no step-by-step instructions, no meta-commentary "
-            "like 'create a new page'. Just the subject matter: who/what/why this page documents.\n"
-            "- For title: the exact new title string only.\n"
-            "- For delete: set to null.\n"
-            "- Use markdown: ## for headings, **bold** for key names/terms, - for bullet lists.\n"
-            "- Be specific: real names, exact page titles, decisions from the transcript.\n"
-            "- No filler phrases like 'as discussed' or 'the team decided'.\n\n"
+            "- Copy the EXACT short excerpt (1–5 lines) from relevant_content that is WRONG and needs replacing.\n"
+            "- Short and specific — used to locate the exact wrong text on the page.\n"
+            "- Do NOT paste entire sections. Only the specific sentence or bullet being corrected.\n"
+            "- For creates: null. For title-only changes: null.\n\n"
+
             "section_heading:\n"
-            "- Use the ACTUAL heading name from the retrieved page content (do not invent one).\n"
+            "- Use the ACTUAL heading name from the retrieved page content. Do not invent one.\n"
             "- For creates: a clear descriptive heading for the primary section.\n"
-            "- For full-page deletes: set to null.\n\n"
+            "- For full-page deletes: null.\n\n"
+
             "rationale:\n"
             "- One sentence: why this change is needed, citing the specific meeting decision.\n\n"
+
             "OTHER RULES:\n"
             "- Each change must have: change_type, page_id, page_title, section_heading, before_content, after_content, rationale.\n"
             "- For edits/deletes on retrieved pages: use page_id and page_title exactly from retrieved_page_context.\n"
-            "- For creates: set page_id to null.\n"
-            "- extracted_facts.mentioned_page_titles lists pages explicitly named in the meeting. "
-            "If any of these appear in retrieved_page_context, use the real page_id. "
-            "If they do NOT appear in retrieved_page_context, still propose the change with page_id: null "
-            "and page_title set to the mentioned title — the execution agent will search for it by name.\n"
+            "- For creates: page_id = null.\n"
+            "- extracted_facts.mentioned_page_titles: pages explicitly named in the meeting. "
+            "If found in retrieved_page_context, use the real page_id. "
+            "If NOT found, propose with page_id=null and page_title=mentioned title.\n"
             "- Never invent page IDs, decisions, names, or metrics not in the transcript.\n"
             "- If no changes are warranted, return {\"changes\": []}."
         )
@@ -257,7 +322,9 @@ class ProposedChangesAgent:
             return []
 
         normalized: List[Dict[str, Any]] = []
-        for raw in raw_changes[:12]:
+        seen_keys: set = set()
+
+        for raw in raw_changes[:20]:
             if not isinstance(raw, dict):
                 continue
 
@@ -268,8 +335,31 @@ class ProposedChangesAgent:
             page_title = str(raw.get("page_title") or "").strip()
             after_content = str(raw.get("after_content") or "").strip()
             before_content = str(raw.get("before_content") or "").strip()
+
             if not page_title or (change_type != "delete" and not after_content):
                 continue
+
+            # Drop proposals where after_content is editorial instructions, not real page content.
+            # This is a fast pre-filter before the verifier sees the card.
+            if change_type in ("edit", "create") and after_content and _is_instruction_after_content(after_content):
+                logger.warning(
+                    "ProposedChangesAgent: dropping '%s' proposal for '%s' — after_content looks like instruction text",
+                    change_type, page_title,
+                )
+                continue
+
+            # Deduplicate by (page_id, change_type, section_heading) so the same edit
+            # doesn't appear twice when multiple retrieval paths surface the same page.
+            page_id_key = str(raw.get("page_id") or page_title).lower()
+            heading_key = str(raw.get("section_heading") or "").lower()[:50]
+            dedup_key = f"{page_id_key}|{change_type}|{heading_key}"
+            if dedup_key in seen_keys:
+                logger.debug(
+                    "ProposedChangesAgent: deduplicating '%s' for page '%s' section '%s'",
+                    change_type, page_title, heading_key,
+                )
+                continue
+            seen_keys.add(dedup_key)
 
             normalized.append(
                 {
@@ -315,6 +405,10 @@ class ProposedChangesAgent:
                 "space_key": p.get("space_key", ""),
                 "heading": p.get("section_heading") or p.get("heading"),
                 "relevant_content": self._truncate(p.get("relevant_content") or ""),
+                # selection_reason tells the agent HOW this page was retrieved:
+                # "direct_title_match" / "content_phrase_match" = strong signal (page explicitly named or contains the exact old string)
+                # "rag_retrieval" / "keyword_search" = looser semantic match — require higher suitability before proposing
+                "selection_reason": p.get("source") or "rag_retrieval",
             }
             for p in candidate_pages
         ]

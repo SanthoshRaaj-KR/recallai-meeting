@@ -1181,13 +1181,31 @@ def _format_approved_change_request(change: Dict[str, Any]) -> str:
 
 
 async def _resolve_page_id(page_id: Optional[str], page_title: str) -> Optional[str]:
-    """Return a verified page_id: use the one we have if set, otherwise search by title."""
-    if page_id:
-        return page_id
-    if not page_title:
-        return None
+    """Return a verified page_id: verify the stored ID still exists, otherwise search by title."""
+    connector = None
     try:
         connector = _get_connector()
+    except Exception:
+        pass
+
+    # If we have a page_id, verify it actually exists on Confluence before trusting it.
+    # Stale IDs (page deleted, wrong workspace, bad graph data) cause 404s downstream.
+    if page_id and connector:
+        try:
+            await asyncio.to_thread(connector.get_page_metadata, page_id)
+            return page_id  # Exists — use it
+        except Exception as exc:
+            logger.warning(
+                "_resolve_page_id: stored page_id '%s' is stale (title='%s'): %s — falling back to title search",
+                page_id, page_title, exc,
+            )
+            # Fall through to title-based search below
+
+    if not page_title:
+        return None
+    if not connector:
+        return None
+    try:
         results = await asyncio.to_thread(connector.search_pages, page_title, 5)
         for r in results:
             if r.get("title", "").strip().lower() == page_title.strip().lower():
@@ -1207,27 +1225,35 @@ def _completion_opts(model: str, max_tokens: int) -> Dict[str, Any]:
 
 
 async def _generate_page_content(title: str, context: str, rationale: str) -> str:
-    """Ask the LLM to write proper Confluence documentation content for a new page.
+    """Write real Confluence page content for a new page.
 
-    The proposal's after_content is a change description for human review — not page body.
-    This function turns the description into actual documentation HTML.
+    `context` and `rationale` are meeting-level descriptions — the LLM uses them
+    only to extract factual information about the subject, never as page body text.
     """
     from openai import OpenAI as _OpenAI  # noqa: PLC0415
     from confluence_logic.utils.html_builder import markdown_to_html  # noqa: PLC0415
     prompt = (
-        f"Write professional Confluence documentation content for a page titled \"{title}\".\n\n"
-        f"Meeting context (what was decided):\n{context}\n\n"
-        f"Rationale:\n{rationale}\n\n"
-        "Requirements:\n"
-        "- Write ACTUAL documentation — not a description of what to write\n"
-        "- Use Confluence Storage Format HTML: <h2>, <p>, <strong>, <ul>, <li>\n"
-        "- Be specific, factual, third-person, professional\n"
-        "- 3-6 paragraphs or sections appropriate for team documentation\n"
-        "- Return ONLY the HTML body content, no <html>/<body> wrapper, no explanation"
+        f"You are writing a Confluence documentation page titled \"{title}\".\n\n"
+        f"Facts known about this subject from the meeting:\n{context}\n\n"
+        "STRICT RULES — violating any of these makes the output unusable:\n"
+        "1. Write ONLY factual content about the subject — things that are true about it.\n"
+        "2. NEVER mention why this page was created, why it replaces another, or any meeting rationale.\n"
+        "3. NEVER include phrases like 'This page was created because...', "
+        "'As discussed in the meeting...', 'This replaces...', 'The team decided...'.\n"
+        "4. NEVER write editorial instructions or writing guidelines. Forbidden examples:\n"
+        "   - 'Keep X as the primary subject'\n"
+        "   - 'Include X only as comparison'\n"
+        "   - 'Add a differentiation section'\n"
+        "   - 'Maintain a professional tone'\n"
+        "   - 'Use a structured format'\n"
+        "5. If the facts above are thin (only a name or one sentence), write a short stub: "
+        "<h2>Overview</h2> with 1-2 factual sentences. Do NOT pad with invented details.\n"
+        "6. Use Confluence Storage Format HTML only: <h2>, <p>, <strong>, <ul>, <li>.\n"
+        "7. Return ONLY the HTML body — no <html>/<body> wrapper, no explanation, no preamble."
     )
     try:
         client = _OpenAI()
-        opts = _completion_opts(JARVIS_REVIEW_MODEL, 800)
+        opts = _completion_opts(JARVIS_REVIEW_MODEL, 600)
         response = await asyncio.to_thread(
             lambda: client.chat.completions.create(
                 **opts,
@@ -1241,7 +1267,7 @@ async def _generate_page_content(title: str, context: str, rationale: str) -> st
     except Exception as exc:
         logger.warning("_generate_page_content LLM call failed: %s", exc)
         from confluence_logic.utils.html_builder import markdown_to_html as _mth  # noqa: PLC0415
-        return _mth(context) or f"<h2>{title}</h2><p>{rationale}</p>"
+        return f"<h2>Overview</h2>{_mth(context) or f'<p>{title}</p>'}"
 
 
 _EXPLICIT_CREATE_PHRASES = (
@@ -1256,28 +1282,46 @@ def _is_explicit_create(text: str) -> bool:
     return any(phrase in lowered for phrase in _EXPLICIT_CREATE_PHRASES)
 
 
+_GENERIC_TITLE_WORDS = {
+    "", "a", "an", "the", "of", "in", "for", "and", "or", "to", "with",
+    "my", "our", "team", "page", "doc", "docs", "notes", "update", "updates",
+    "meeting", "report", "report", "summary", "overview", "guide", "info",
+}
+
+
 async def _find_editable_page_for_topic(title: str, context: str) -> Optional[Dict[str, Any]]:
     """Search for an existing page that covers the same topic before creating a new one.
 
-    Returns a page dict {page_id, title, relevant_content} if a relevant page is found,
-    or None if nothing close exists and a new page should be created.
+    Only returns a match when the overlap is strong (majority of MEANINGFUL title words
+    match) to avoid accidentally targeting the wrong page.
+
+    Returns {"page_id", "title", "existing": True} for exact match (update content),
+            {"page_id", "title", "existing": False} for close match (replace + rename),
+            or None if no close match exists (proceed to create).
     """
     try:
         connector = _get_connector()
-        # Search with page title words as query terms
         words = [w for w in re.split(r"\W+", title) if len(w) > 2]
         query = " ".join(words[:6]) if words else title
-        results = await asyncio.to_thread(connector.search_pages, query, 5)
+        results = await asyncio.to_thread(connector.search_pages, query, 8)
         for r in results:
             r_title = (r.get("title") or "").strip()
-            # Exact or very close title match = the page already exists
+
+            # Exact match — page already exists
             if r_title.lower() == title.lower():
                 return {"page_id": r["page_id"], "title": r_title, "existing": True}
-            # Overlapping title words = related page that could be edited instead
-            r_words = set(re.split(r"\W+", r_title.lower()))
-            t_words = set(re.split(r"\W+", title.lower()))
-            overlap = r_words & t_words - {"", "a", "an", "the", "of", "in", "for"}
-            if len(overlap) >= max(1, len(t_words) // 2):
+
+            # Meaningful-word overlap — only match if ALL non-generic words in the
+            # shorter title appear in the longer one. Prevents "Sales Notes" from
+            # matching "Engineering Notes" just because "notes" overlaps.
+            r_words = {w for w in re.split(r"\W+", r_title.lower()) if w not in _GENERIC_TITLE_WORDS and len(w) > 2}
+            t_words = {w for w in re.split(r"\W+", title.lower()) if w not in _GENERIC_TITLE_WORDS and len(w) > 2}
+            if not t_words or not r_words:
+                continue
+            shorter = t_words if len(t_words) <= len(r_words) else r_words
+            overlap = r_words & t_words
+            # Require ALL words of the shorter set to appear in the other (very strict)
+            if overlap == shorter and len(overlap) >= 1:
                 return {"page_id": r["page_id"], "title": r_title, "existing": False}
     except Exception as exc:
         logger.debug("_find_editable_page_for_topic failed for '%s': %s", title, exc)
@@ -1295,7 +1339,7 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
     """
     from confluence_logic.utils.html_builder import markdown_to_html  # noqa: PLC0415
     from confluence_logic.utils.html_parser import (  # noqa: PLC0415
-        edit_block_in_section, delete_content_in_section, extract_headings,
+        edit_block_in_section, delete_content_in_section, extract_headings, get_section_html,
     )
 
     change_type = (proposal.get("change_type") or "edit").lower()
@@ -1311,49 +1355,55 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": f"Confluence connector unavailable: {exc}"}
 
     # ── CREATE ────────────────────────────────────────────────────────────────
+    # Conservative semantics:
+    #   1. Exact title match (case-insensitive) → APPEND new content to existing page.
+    #      Never overwrite an existing page's body via a create proposal.
+    #   2. No exact match → create a brand-new page.
+    # The previous behavior of replacing/renaming "related" pages via create proposals was
+    # too aggressive — a single ambiguous fuzzy title match could destroy unrelated docs.
+    # If the user really wants to edit or rename an existing page, the pipeline produces
+    # an explicit 'edit' or 'title' proposal — that's the right path for those actions.
     if change_type == "create":
         html_content = await _generate_page_content(page_title, after_content, rationale)
         if heading:
             html_content = f"<h2>{heading}</h2>\n{html_content}"
 
-        explicit = _is_explicit_create(rationale) or _is_explicit_create(after_content)
+        # Look for an EXACT title match only (no fuzzy related-page replacement)
+        existing_id: Optional[str] = None
+        try:
+            search_results = await asyncio.to_thread(connector.search_pages, page_title, 8)
+            target_lower = page_title.strip().lower()
+            for r in search_results:
+                if (r.get("title") or "").strip().lower() == target_lower:
+                    existing_id = r.get("page_id")
+                    break
+        except Exception as exc:
+            logger.debug("Exact-title lookup failed during create for '%s': %s", page_title, exc)
 
-        # Look for: (a) exact page match → update it; (b) related page → edit it (unless explicit create)
-        related = await _find_editable_page_for_topic(page_title, after_content)
-
-        if related and related.get("existing"):
-            # Page already exists — overwrite its content with proper generated HTML
-            existing_id = related["page_id"]
-            logger.info("Page '%s' already exists (%s) — updating content", page_title, existing_id)
+        if existing_id:
+            # Exact title match exists — APPEND new content rather than overwriting,
+            # so any documentation already on the page is preserved.
+            logger.info(
+                "Create proposal for '%s' — exact-match page already exists (%s); appending new content",
+                page_title, existing_id,
+            )
             try:
                 meta = await asyncio.to_thread(connector.get_page_metadata, existing_id)
                 version = meta.get("version", {}).get("number", 1)
-                success = await asyncio.to_thread(connector.push_update, existing_id, html_content, version)
-                return {"success": success, "note": "Updated existing page with proper content"}
+                live_html = await asyncio.to_thread(connector.fetch_page_html, existing_id)
+                merged_html = (live_html or "").rstrip() + "\n" + html_content
+                success = await asyncio.to_thread(
+                    connector.push_update, existing_id, merged_html, version
+                )
+                return {
+                    "success": success,
+                    "note": "Page already existed — new content appended (original body preserved).",
+                    "page_id": existing_id,
+                }
             except Exception as exc:
-                return {"success": False, "error": f"Update of existing page failed: {exc}"}
+                return {"success": False, "error": f"Append to existing page failed: {exc}"}
 
-        if related and not related.get("existing") and not explicit:
-            # A related page exists and we weren't explicitly told to create — edit that page
-            rel_id = related["page_id"]
-            rel_title = related["title"]
-            logger.info(
-                "Found related page '%s' (%s) — editing it instead of creating '%s'",
-                rel_title, rel_id, page_title,
-            )
-            try:
-                live_html = await asyncio.to_thread(connector.fetch_page_html, rel_id)
-                meta = await asyncio.to_thread(connector.get_page_metadata, rel_id)
-                version = meta.get("version", {}).get("number", 1)
-                # Append the new content at the end of the existing page
-                combined_html = live_html.rstrip() + "\n" + html_content
-                success = await asyncio.to_thread(connector.push_update, rel_id, combined_html, version)
-                return {"success": success, "note": f"Appended to related page '{rel_title}'"}
-            except Exception as exc:
-                logger.warning("Edit of related page failed, falling back to create: %s", exc)
-                # Fall through to create
-
-        # No suitable existing page — create a new one
+        # No exact match — create a brand-new page
         try:
             result = await asyncio.to_thread(connector.create_page, None, page_title, html_content, None)
             new_id = result.get("id")
@@ -1397,7 +1447,7 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:
             return {"success": False, "error": f"Delete failed: {exc}"}
 
-    # ── TITLE (rename) ────────────────────────────────────────────────────────
+    # ── TITLE (rename, optionally also fix body content) ─────────────────────
     if change_type == "title":
         new_title = after_content.strip()
         if not new_title:
@@ -1406,83 +1456,365 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
             meta = await asyncio.to_thread(connector.get_page_metadata, resolved_id)
             version = meta.get("version", {}).get("number", 1)
             live_html = await asyncio.to_thread(connector.fetch_page_html, resolved_id)
-            success = await asyncio.to_thread(connector.push_update, resolved_id, live_html, version, new_title)
+
+            # If the page body also contains the wrong text (same wrong info in title
+            # AND content), fix the body in the same push_update call so the user
+            # doesn't need a separate edit proposal for this case.
+            # We scan the live HTML for the old title text and replace all occurrences.
+            old_title = page_title.strip()
+            updated_html = live_html
+            if old_title and old_title.lower() in _html_to_text(live_html).lower():
+                # Replace visible occurrences of old title text in the HTML body
+                from confluence_logic.utils.html_builder import markdown_to_html as _mth  # noqa: PLC0415
+                new_content_html = _mth(new_title)
+                # Use BeautifulSoup to find and replace text nodes containing the old title
+                from bs4 import BeautifulSoup as _BS  # noqa: PLC0415
+                soup = _BS(live_html, "html.parser")
+                old_lower = old_title.lower()
+                for tag in soup.find_all(string=True):
+                    if old_lower in (tag.string or "").lower():
+                        tag.replace_with(tag.string.replace(old_title, new_title))
+                updated_html = str(soup)
+
+            success = await asyncio.to_thread(connector.push_update, resolved_id, updated_html, version, new_title)
             return {"success": success}
         except Exception as exc:
             return {"success": False, "error": f"Rename failed: {exc}"}
 
     # ── EDIT ──────────────────────────────────────────────────────────────────
-    try:
-        live_html = await asyncio.to_thread(connector.fetch_page_html, resolved_id)
-        meta = await asyncio.to_thread(connector.get_page_metadata, resolved_id)
-        version = meta.get("version", {}).get("number", 1)
+    # STRICT execution semantics. The drafter sets edit_mode explicitly, and we
+    # dispatch on it deterministically — no LLM judgment at this layer.
+    #
+    #   edit_mode == "replace"        → targeted find-and-replace using before_content.
+    #                                    If the text cannot be located, FAIL — do NOT
+    #                                    fall back to a destructive section overwrite.
+    #   edit_mode == "append"         → append new_block to the existing section.
+    #                                    Existing content is always preserved.
+    #   edit_mode == "create_section" → add a new heading + new_block at the end of
+    #                                    the page or under the page root. Existing
+    #                                    headings/content are never overwritten.
+    #   edit_mode missing/legacy      → infer from before_content (compat fallback).
+    #
 
-        new_block_html = markdown_to_html(after_content)
+    # Final execution-time sanity check: if after_content looks like instruction text,
+    # refuse to write it to Confluence even if the user accepted the card.
+    # Import lazily to avoid circular dependency at module load time.
+    from confluence_logic.agents.proposed_changes_agent import _is_instruction_after_content  # noqa: PLC0415
+    if _is_instruction_after_content(after_content):
+        logger.error(
+            "_direct_apply_change: REFUSING to write instruction-text content for '%s'. "
+            "after_content starts with: %s",
+            page_title, after_content[:120],
+        )
+        return {"success": False, "error": "after_content is editorial instructions, not page documentation. Proposal rejected at execution time."}
 
-        # Resolve the target section heading (fuzzy match against the live page)
-        target_heading = "FULL_PAGE"
-        if heading:
-            available = extract_headings(live_html)
-            h_lower = heading.lower()
-            for h in available:
-                if h_lower in h.lower() or h.lower() in h_lower:
-                    target_heading = h
-                    break
+    _MAX_EDIT_RETRIES = 3
+    before_content = (proposal.get("before_content") or "").strip()
+    edit_mode = (proposal.get("edit_mode") or "").strip().lower()
+
+    # Backward-compat: legacy proposals without edit_mode — infer it from before_content.
+    if edit_mode not in {"replace", "append", "create_section"}:
+        edit_mode = "replace" if before_content else "append"
+
+    # SAFETY: replace mode requires before_content. If it's empty here, fail closed
+    # rather than guess (the drafter normalizer should already have caught this).
+    if edit_mode == "replace" and not before_content:
+        return {
+            "success": False,
+            "error": "edit_mode='replace' but no before_content provided — refusing to overwrite section. "
+                     "Regenerate the proposal as append or supply the exact text to replace.",
+        }
+
+    is_replacement = edit_mode == "replace"
+    is_targeted = is_replacement and len(before_content) <= 300
+
+    for _attempt in range(_MAX_EDIT_RETRIES):
+        try:
+            live_html = await asyncio.to_thread(connector.fetch_page_html, resolved_id)
+            meta = await asyncio.to_thread(connector.get_page_metadata, resolved_id)
+            version = meta.get("version", {}).get("number", 1)
+
+            new_block_html = markdown_to_html(after_content)
+
+            # Fuzzy heading match against live headings
+            target_heading = "FULL_PAGE"
+            if heading:
+                available = extract_headings(live_html)
+                h_lower = heading.lower().strip()
+
+                # Strategy 1: substring match (existing logic)
+                matched = False
+                for h in available:
+                    if h_lower in h.lower() or h.lower() in h_lower:
+                        target_heading = h
+                        matched = True
+                        break
+
+                # Strategy 2: word-level overlap — e.g. drafter says "Goals" but
+                # the real heading is "Fitness Goals" or "Goals and Milestones"
+                if not matched:
+                    h_words = set(h_lower.split())
+                    best_overlap = 0
+                    best_h = None
+                    for h in available:
+                        av_words = set(h.lower().split())
+                        overlap = len(h_words & av_words)
+                        if overlap > best_overlap:
+                            best_overlap = overlap
+                            best_h = h
+                    if best_h and best_overlap >= 1 and best_overlap >= len(h_words) * 0.5:
+                        target_heading = best_h
+                        matched = True
+                        logger.info(
+                            "Heading fuzzy-word match: '%s' → '%s' on '%s'",
+                            heading, best_h, page_title,
+                        )
+
+                # Strategy 3: if we have before_content, find which section it actually
+                # lives in on the page — the drafter's heading guess might just be wrong
+                if not matched and before_content:
+                    real_heading = _find_section_for_content(live_html, before_content)
+                    if real_heading:
+                        target_heading = real_heading
+                        matched = True
+                        logger.info(
+                            "Heading resolved via content scan: '%s' → '%s' on '%s'",
+                            heading, real_heading, page_title,
+                        )
+
+                # If still unmatched, use FULL_PAGE rather than trusting the LLM's
+                # guessed heading. This prevents ValueError → EditorAgent fallback.
+                if not matched:
+                    logger.warning(
+                        "Heading '%s' not found on '%s' (available: %s) — using FULL_PAGE",
+                        heading, page_title, available[:8],
+                    )
+                    target_heading = "FULL_PAGE"
+
+            if is_targeted:
+                # Short, specific before_content: find the exact old text and replace it.
+                # Tries three strategies in order:
+                #   1. Exact match (edit_block_in_section already does visible-text matching)
+                #   2. Whitespace-normalized match against a candidate sentence/line on the page
+                #   3. LLM-assisted "find this text" using the live HTML
+                # Only falls back to full-section replace if all three strategies fail.
+                new_html = None
+                try:
+                    new_html = edit_block_in_section(
+                        live_html, target_heading, before_content, new_block_html
+                    )
+                except ValueError:
+                    # Strategy 2: whitespace-normalized scan of the section text
+                    try:
+                        from confluence_logic.utils.html_parser import get_section_html  # noqa: PLC0415
+                        section_html = (
+                            get_section_html(live_html, target_heading)
+                            if target_heading != "FULL_PAGE" else live_html
+                        )
+                        section_text = _html_to_text(section_html)
+                        norm_before = _normalize_for_fuzzy(before_content)
+                        # Find the line in the section whose normalized form contains norm_before
+                        fuzzy_match: Optional[str] = None
+                        for line in section_text.split("\n"):
+                            line_str = line.strip()
+                            if not line_str:
+                                continue
+                            if norm_before in _normalize_for_fuzzy(line_str):
+                                fuzzy_match = line_str
+                                break
+                        if fuzzy_match:
+                            logger.info(
+                                "Fuzzy match found '%s...' in '%s' — using it for targeted replace",
+                                fuzzy_match[:60], page_title,
+                            )
+                            try:
+                                new_html = edit_block_in_section(
+                                    live_html, target_heading, fuzzy_match, new_block_html
+                                )
+                            except ValueError:
+                                new_html = None
+                    except Exception as fuzzy_exc:
+                        logger.debug("Fuzzy match step failed for '%s': %s", page_title, fuzzy_exc)
+
+                    # Strategy 3: LLM-assisted location
+                    if new_html is None:
+                        llm_match = await _llm_locate_text_on_page(before_content, live_html)
+                        if llm_match:
+                            logger.info(
+                                "LLM-assisted location found '%s...' for '%s'",
+                                llm_match[:60], page_title,
+                            )
+                            try:
+                                new_html = edit_block_in_section(
+                                    live_html, target_heading, llm_match, new_block_html
+                                )
+                            except ValueError:
+                                new_html = None
+
+                    # Final safety: if all three targeted strategies failed, the text we were
+                    # told to replace is NOT on the page. Per the strict edit_mode contract,
+                    # we FAIL CLOSED rather than fall back to a destructive section overwrite
+                    # or a silent append. The user explicitly asked for a replacement of
+                    # text that isn't there — surface that to them with a clear error.
+                    if new_html is None:
+                        logger.error(
+                            "All targeted-replace strategies failed for '%s' section '%s' — "
+                            "before_content not on page. Returning failure rather than guess.",
+                            page_title, target_heading,
+                        )
+                        return {
+                            "success": False,
+                            "error": (
+                                f"Text to replace was not found on '{page_title}'. "
+                                "The page may have been edited since the proposal was generated. "
+                                "Regenerate the proposal or apply manually."
+                            ),
+                        }
+
+            elif is_replacement:
+                # Long before_content (>300 chars). Treat as a paragraph/section replacement
+                # but ONLY when we can confirm the text is actually on the page. Otherwise
+                # append rather than perform a destructive overwrite.
+                current_section_html = get_section_html(live_html, target_heading) if target_heading != "FULL_PAGE" else ""
+                existing_text = _html_to_text(current_section_html)
+                existing_len = len(existing_text.strip())
+                new_len = len(new_block_html.strip())
+
+                norm_existing = _normalize_for_fuzzy(existing_text)
+                norm_before = _normalize_for_fuzzy(before_content)
+                probe = norm_before[:80]
+                contains_target = bool(probe) and probe in norm_existing
+
+                # Stricter than before: size ratio < 50% OR text not present → APPEND.
+                # Full-section replace is now reserved for cases where before_content is
+                # actually inside the section AND the new content is comparable in size.
+                size_unsafe = existing_len > 300 and new_len < existing_len * 0.5
+
+                if (not contains_target and existing_len > 200) or size_unsafe:
+                    logger.warning(
+                        "Overwrite safety: long before_content does NOT confidently locate inside "
+                        "section '%s' on '%s' (contains_target=%s, existing=%d, new=%d) — appending",
+                        target_heading, page_title, contains_target, existing_len, new_len,
+                    )
+                    merged = current_section_html.rstrip() + "\n" + new_block_html
+                    new_html = edit_block_in_section(live_html, target_heading, "", merged)
+                else:
+                    # Try a targeted replace using the leading paragraph of before_content
+                    # as the anchor, rather than blindly wiping the whole section.
+                    anchor = before_content[:200].strip()
+                    try:
+                        new_html = edit_block_in_section(live_html, target_heading, anchor, new_block_html)
+                    except ValueError:
+                        # Anchor not unique — append rather than overwrite
+                        logger.warning(
+                            "Long-before-content anchor not unique on '%s'/'%s' — appending instead",
+                            page_title, target_heading,
+                        )
+                        merged = current_section_html.rstrip() + "\n" + new_block_html
+                        new_html = edit_block_in_section(live_html, target_heading, "", merged)
+
+            elif edit_mode == "create_section":
+                # Add a brand-new section with its own heading. NEVER overwrite an existing
+                # heading. If `heading` is the name of an existing section, fall back to append.
+                section_label = (proposal.get("section_heading") or "").strip() or "New Section"
+                # Reject if the page already has a section with this name
+                existing_headings = extract_headings(live_html)
+                if section_label.lower() in {h.lower() for h in existing_headings}:
+                    logger.info(
+                        "create_section: heading '%s' already exists on '%s' — appending under it instead",
+                        section_label, page_title,
+                    )
+                    current_section_html = get_section_html(live_html, section_label)
+                    merged = current_section_html.rstrip() + "\n" + new_block_html
+                    new_html = edit_block_in_section(live_html, section_label, "", merged)
+                else:
+                    # Append a new <h2> + content block at the end of the page body
+                    new_section_block = f"<h2>{section_label}</h2>\n{new_block_html}"
+                    new_html = live_html.rstrip() + "\n" + new_section_block
+
             else:
-                target_heading = heading  # keep as-is; html_parser will raise if not found
+                # Pure APPEND mode. Existing section content is preserved; new block is added.
+                current_section_html = get_section_html(live_html, target_heading) if target_heading != "FULL_PAGE" else ""
+                if current_section_html.strip():
+                    merged = current_section_html.rstrip() + "\n" + new_block_html
+                    new_html = edit_block_in_section(live_html, target_heading, "", merged)
+                else:
+                    new_html = edit_block_in_section(live_html, target_heading, "", new_block_html)
 
-        new_html = edit_block_in_section(live_html, target_heading, "", new_block_html)
-        success = await asyncio.to_thread(connector.push_update, resolved_id, new_html, version)
-        return {"success": success, "error": None if success else "push_update returned false"}
-    except ValueError as exc:
-        # Heading not found or ambiguous — fall through to EditorAgent
-        logger.warning("Direct edit failed for '%s' (heading issue): %s — will try EditorAgent", page_title, exc)
-        return {"success": False, "error": str(exc), "_try_agent": True}
-    except Exception as exc:
-        return {"success": False, "error": f"Edit failed: {exc}"}
+            success = await asyncio.to_thread(connector.push_update, resolved_id, new_html, version)
+            if success:
+                return {"success": True}
+            return {"success": False, "error": "push_update returned false"}
+
+        except ValueError as exc:
+            msg = str(exc)
+            if "Version Conflict" in msg:
+                if _attempt < _MAX_EDIT_RETRIES - 1:
+                    logger.warning(
+                        "Version conflict on edit attempt %d/%d for '%s', retrying…",
+                        _attempt + 1, _MAX_EDIT_RETRIES, page_title,
+                    )
+                    continue
+                return {"success": False, "error": f"Version conflict after {_MAX_EDIT_RETRIES} retries"}
+            logger.warning("Direct edit failed for '%s': %s", page_title, exc)
+            return {"success": False, "error": f"Edit failed: {msg}. Please regenerate the proposal."}
+        except Exception as exc:
+            return {"success": False, "error": f"Edit failed: {exc}"}
+    return {"success": False, "error": "Edit failed after max retries"}
 
 
 async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[str, Any]:
-    """Execute a pipeline proposal: direct API call first, EditorAgent fallback for complex edits."""
+    """Execute a pipeline proposal via direct Confluence API calls."""
     proposal = supabase_store.get_proposal_by_id(proposal_id)
     if not proposal:
         return {"success": False, "message": "Proposal not found."}
 
     current_status = proposal.get("status", "pending")
-    if current_status in ("accepted", "executed"):
+    if current_status == "executed":
         return {"success": False, "message": "This change has already been applied."}
     if current_status == "rejected":
         return {"success": False, "message": "This change has been rejected."}
 
-    supabase_store.update_proposal_status(proposal_id, "accepted")
+    supabase_store.update_proposal_status(proposal_id, "executing")
 
-    # Attempt direct execution first — deterministic, no AI re-reasoning needed.
+    # Direct execution — deterministic, no AI re-reasoning needed.
     result = await _direct_apply_change(proposal)
-
-    # If direct edit failed because of a heading mismatch, fall back to the EditorAgent
-    # which can use search + fetch to locate the right section dynamically.
-    if not result.get("success") and result.get("_try_agent"):
-        logger.info("Falling back to EditorAgent for proposal %s", proposal_id)
-        change = {
-            "id": proposal_id,
-            "change_type": proposal.get("change_type", "edit"),
-            "page_id": proposal.get("page_id"),
-            "page_title": proposal.get("page_title") or "",
-            "section_heading": proposal.get("section_heading"),
-            "before_content": proposal.get("before_content"),
-            "after_content": proposal.get("after_content"),
-            "rationale": proposal.get("rationale"),
-            "status": "pending",
-        }
-        state = _get_meeting_state(session_id)
-        if proposal.get("user_id") and not state.get("auth_user_id"):
-            state["auth_user_id"] = proposal["user_id"]
-        agent_result = await _execute_single_change(state, change)
-        result = {"success": agent_result.get("success", False), "error": agent_result.get("error")}
 
     final_status = "executed" if result.get("success") else "failed"
     supabase_store.update_proposal_status(proposal_id, final_status)
-    return {"success": result.get("success", False), "message": result.get("error")}
+
+    # Build a user-friendly message. Raw exception strings ("Edit failed: ValueError(...)") are
+    # not useful — translate common failure modes into actionable explanations so the user knows
+    # whether to retry, edit the proposal, or escalate.
+    error = result.get("error") or ""
+    if result.get("success"):
+        message = result.get("note") or "Change applied to Confluence."
+    elif "Could not find Confluence page" in error:
+        message = (
+            f"Confluence page '{proposal.get('page_title') or '?'}' could not be located. "
+            "It may have been deleted or renamed since the proposal was generated."
+        )
+    elif "Version conflict" in error:
+        message = (
+            "The Confluence page was modified by someone else while the change was being applied. "
+            "Please retry the proposal."
+        )
+    elif "after_content is editorial instructions" in error:
+        message = (
+            "The proposal content was rejected as editorial instructions, not real page content. "
+            "Please regenerate the proposal."
+        )
+    elif "No unique visible-text match" in error or "matches" in error and "blocks" in error:
+        message = (
+            "The target text on the page is ambiguous (multiple matches found). "
+            "Please refine the proposal or apply manually."
+        )
+    elif "Confluence connector unavailable" in error:
+        message = "Confluence credentials are not configured on the server."
+    else:
+        message = error or "Change could not be applied to Confluence."
+
+    return {"success": result.get("success", False), "message": message}
 
 
 async def _execute_single_change(
@@ -1953,6 +2285,8 @@ async def _draft_verify_persist(
     """Draft, verify, and immediately persist one page's proposal. Errors are isolated."""
     try:
         draft = await _run_drafter(page, facts, transcript_text)
+        if draft is None:
+            return  # Drafter determined this page is not a relevant target — skip
         verified = await _run_verifier(
             draft,
             transcript_text,
@@ -2052,6 +2386,10 @@ async def _verify_and_persist(
     try:
         change_type = draft.get("change_type", "edit")
 
+        # Initialize at function scope so the verifier-input section below can reference them
+        # regardless of which change_type branch executed.
+        live_html: Optional[str] = None
+
         # Fetch real Confluence content so before_content shows actual page text, not LLM guess.
         # Also corrects section_heading: instead of trusting the LLM's heading guess, we scan
         # the live page HTML to find which section actually contains the target content.
@@ -2063,7 +2401,6 @@ async def _verify_and_persist(
 
             # Fetch full page HTML once — used for both content and section correction
             actual_id: Optional[str] = None
-            live_html: Optional[str] = None
             try:
                 connector = _get_connector()
                 actual_id = page_id
@@ -2084,12 +2421,20 @@ async def _verify_and_persist(
                 draft["page_id"] = actual_id
             if live_html:
                 full_text = _html_to_text(live_html)
-                # If the proposal said to target a specific section, extract just that section's text
-                # to give the user a focused before_content view on the card.
-                section_text: Optional[str] = None
-                if llm_heading:
-                    _, section_text = await _fetch_live_page_content(actual_id, page_title, llm_heading)
-                draft["before_content"] = section_text or full_text[:2000]
+                # Store before_content as a short, targeted excerpt (≤300 chars) so
+                # _direct_apply_change can do a precise find-and-replace at execution time.
+                # If the LLM gave us a specific before snippet, prefer that over the full section,
+                # since a short string is what we can uniquely locate on the page.
+                if llm_before and len(llm_before.strip()) <= 300:
+                    # LLM-supplied before_content is short and specific — use it directly
+                    draft["before_content"] = llm_before.strip()
+                else:
+                    # No short before — extract just the targeted section text for display;
+                    # execution will fall back to full-section replacement
+                    section_text: Optional[str] = None
+                    if llm_heading:
+                        _, section_text = await _fetch_live_page_content(actual_id, page_title, llm_heading)
+                    draft["before_content"] = section_text or full_text[:2000]
 
                 # Correct section_heading: if the LLM guessed wrong or the phrase lives in
                 # a different section, scan the live HTML to find the real section.
@@ -2120,22 +2465,96 @@ async def _verify_and_persist(
                         draft["_template_content"] = t_content
                         break
 
-        page_content = draft.get("before_content") or ""
+        # Give the verifier the FULL live page text (not just the section snippet) so it can
+        # judge page_relevance accurately — does the change actually belong on this page?
+        # Falls back to before_content when full HTML wasn't fetched (e.g. for create proposals).
+        if change_type in ("edit", "delete", "title") and live_html:
+            page_content = _html_to_text(live_html)[:4000]
+        else:
+            page_content = draft.get("before_content") or ""
+
         verified = await _run_verifier(draft, transcript_text, page_content)
 
-        # Strip internal enrichment keys before persisting to Supabase
-        row = {k: v for k, v in verified.items() if not k.startswith("_")}
+        # ANNOTATE-DON'T-GATE policy:
+        #   The verifier is now an annotation layer, not a hard gate. The only
+        #   cards we DROP at persistence time are ones whose `after_content` is
+        #   literally instruction text (e.g. "Maintain a professional tone") —
+        #   that text would be written verbatim to Confluence and is never useful.
+        #   Everything else is surfaced to the user with confidence/risk/page_relevance
+        #   visible so they can make an informed accept/reject decision.
+        content_type = verified.get("content_type") or "final_content"
+        if content_type == "meta_instruction":
+            logger.warning(
+                "_verify_and_persist: DROPPING card for page '%s' — after_content is "
+                "editorial instructions, not real page content. verifier_note: %s",
+                verified.get("page_title"),
+                verified.get("verifier_note") or "content_type=meta_instruction",
+            )
+            return
+
+        # Everything else is persisted UNLESS it targets the wrong page.
+        page_relevance = verified.get("page_relevance") or 5
+        if page_relevance < 4:
+            logger.warning(
+                "_verify_and_persist: DROPPING card for page '%s' — wrong page "
+                "(relevance=%d/10). verifier_note: %s",
+                verified.get("page_title"), page_relevance,
+                verified.get("verifier_note") or "low page_relevance",
+            )
+            return
+
+        # Pull the audit data (attached upstream by the qualifier/comparative stage) so we can
+        # both surface it to the UI via SSE AND prepend a short human-readable summary to
+        # verifier_note so the user sees what evidence backed this proposal.
+        audit = verified.get("_audit") or draft.get("_audit") or {}
+        if audit:
+            fit = audit.get("page_fit_score")
+            ov_found = audit.get("old_value_found")
+            matched = audit.get("matched_phrase")
+            retrieval_src = audit.get("retrieval_source")
+            audit_prefix_bits: List[str] = []
+            if fit is not None:
+                audit_prefix_bits.append(f"page_fit={fit}/10")
+            if ov_found:
+                audit_prefix_bits.append(f"matched='{matched or 'old_value'}'")
+            elif audit.get("matched_phrase") is None and ov_found is False:
+                audit_prefix_bits.append("old_value_not_on_page")
+            if retrieval_src:
+                audit_prefix_bits.append(f"via={retrieval_src}")
+            if audit_prefix_bits:
+                existing_note = verified.get("verifier_note") or ""
+                prefix = "[" + " ".join(audit_prefix_bits) + "] "
+                if not existing_note.startswith("["):
+                    verified["verifier_note"] = prefix + existing_note
+
+        # Build the persisted row. Strip internal-only keys that should NOT be sent to Supabase
+        # (the table schema doesn't have columns for them) but keep them on the SSE event payload
+        # so the UI can show audit info to the user.
+        _INTERNAL_KEYS = {"should_drop", "page_relevance", "content_type", "_audit", "edit_mode"}
+        row = {k: v for k, v in verified.items() if not k.startswith("_") and k not in _INTERNAL_KEYS}
         row.update({"job_id": job_id, "session_id": session_id, "user_id": user_id, "source": "pipeline", "status": "pending"})
 
         row_id = await asyncio.to_thread(supabase_store.upsert_proposal, row)
-        _emit(job_id, {
+        # SSE event includes audit fields so the live UI can render them even though
+        # they're not persisted in Supabase.
+        sse_payload = {
             "type": "proposal_ready",
             "id": row_id,
             "job_id": job_id,
             "session_id": session_id,
             "status": "pending",
             **row,
-        })
+        }
+        if audit:
+            sse_payload["audit"] = {
+                "page_fit_score": audit.get("page_fit_score"),
+                "old_value_found": audit.get("old_value_found"),
+                "matched_phrase": audit.get("matched_phrase"),
+                "retrieval_source": audit.get("retrieval_source"),
+                "qualifier_why": audit.get("qualifier_why"),
+                "relative_fit_gap": audit.get("relative_fit_gap"),
+            }
+        _emit(job_id, sse_payload)
     except Exception as exc:
         logger.warning("_verify_and_persist failed for draft %s: %s", draft.get("page_title"), exc)
 
@@ -2267,6 +2686,7 @@ async def _live_confluence_search(query_terms: List[str]) -> List[Dict[str, Any]
                     "space_key": r.get("space_key", ""),
                     "relevant_content": relevant_content,
                     "score": 1.0,
+                    "source": "keyword_search",
                 })
                 if len(pages) >= JARVIS_PIPELINE_MAX_PAGES:
                     break
@@ -2326,6 +2746,379 @@ async def _direct_title_search(page_titles: List[str]) -> List[Dict[str, Any]]:
     if pages:
         logger.info("Direct title search found %d pages for %d mentioned titles", len(pages), len(page_titles))
     return pages
+
+
+# ---------------------------------------------------------------------------
+# Workspace-aware LLM page selector — catches the "1 needle in 1000 pages" case
+# where neither keyword search nor RAG embeds the right page in their top-K.
+# ---------------------------------------------------------------------------
+
+# Per-pipeline-run cache (graph_user_id -> [{page_id, title}, ...] and timestamp)
+_PAGE_TITLES_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+_PAGE_TITLES_CACHE_TS: Dict[str, float] = {}
+_PAGE_TITLES_TTL_SECONDS = 900  # 15 min — long enough to cover a pipeline run, short enough to stay fresh
+
+JARVIS_WORKSPACE_TITLE_LIMIT = int(os.getenv("JARVIS_WORKSPACE_TITLE_LIMIT", "500"))
+
+
+async def _get_workspace_pages_for_filter(graph_user_id: str) -> List[Dict[str, Any]]:
+    """Fetch lightweight (page_id, title) tuples for all workspace pages, cached.
+
+    Used by `_llm_select_pages_for_intent` to do a workspace-scale title scan
+    without re-fetching pages for every intent. TTL prevents staleness across runs.
+    """
+    now = time.time()
+    cached = _PAGE_TITLES_CACHE.get(graph_user_id)
+    ts = _PAGE_TITLES_CACHE_TS.get(graph_user_id, 0.0)
+    if cached and (now - ts) < _PAGE_TITLES_TTL_SECONDS:
+        return cached
+
+    try:
+        connector = _get_connector()
+        pages = await asyncio.to_thread(connector.list_pages, JARVIS_WORKSPACE_TITLE_LIMIT)
+        items = [
+            {"page_id": p.get("page_id"), "title": p.get("title") or ""}
+            for p in pages
+            if p.get("page_id")
+        ]
+        _PAGE_TITLES_CACHE[graph_user_id] = items
+        _PAGE_TITLES_CACHE_TS[graph_user_id] = now
+        logger.info("Cached %d workspace page titles for user %s", len(items), graph_user_id)
+        return items
+    except Exception as exc:
+        logger.warning("Could not fetch workspace pages for LLM filter: %s", exc)
+        return []
+
+
+async def _llm_select_pages_for_intent(
+    intent: Any,  # ChangeIntent
+    all_pages: List[Dict[str, Any]],
+    *,
+    max_select: int = 12,
+) -> List[Dict[str, Any]]:
+    """Scan a workspace-wide list of page titles and let the LLM pick the ones
+    most likely to need updating for this intent.
+
+    Complementary to keyword/RAG retrieval — catches semantic matches that
+    don't share keywords with the title. E.g., intent about "Akshat's gym plan"
+    can still surface a page titled "Q4 Training Roadmap - Akshat" because the
+    LLM understands the connection between 'plan' and 'training roadmap'.
+    """
+    if not all_pages:
+        return []
+    subject = (getattr(intent, "subject", "") or "").strip()
+    instruction = (getattr(intent, "instruction", "") or "").strip()
+    target_hint = (getattr(intent, "target_hint", "") or "").strip()
+    old_value = (getattr(intent, "old_value", "") or "").strip()
+    new_value = (getattr(intent, "new_value", "") or "").strip()
+
+    if not (subject or instruction or target_hint):
+        return []
+
+    # Build a numbered list of titles. Limit to JARVIS_WORKSPACE_TITLE_LIMIT for token control.
+    title_list = "\n".join(
+        f"{i}. {p.get('title') or '(untitled)'}" for i, p in enumerate(all_pages[:JARVIS_WORKSPACE_TITLE_LIMIT])
+    )
+
+    prompt = (
+        "You are a Confluence page selector. Given a documentation CHANGE INTENT and a numbered list "
+        "of ALL page titles in the workspace, return the indices of pages whose CONTENT is likely to "
+        "be affected by this change.\n\n"
+        "CHANGE INTENT:\n"
+        f"- Subject:      {subject or '(none)'}\n"
+        f"- Instruction:  {instruction or '(none)'}\n"
+        f"- Target hint:  {target_hint or '(none)'}\n"
+        f"- Old value:    {old_value or '(none)'}\n"
+        f"- New value:    {new_value or '(none)'}\n\n"
+        "WORKSPACE PAGE TITLES:\n"
+        f"{title_list}\n\n"
+        "SELECTION RULES (STRICT):\n"
+        "1. Include a page ONLY if its TITLE strongly suggests its CONTENT covers this exact subject.\n"
+        "   Strong: title contains the subject name, or is clearly a doc for this specific thing.\n"
+        "   Weak (do NOT include): title is in the same general domain but covers a different thing.\n"
+        "   Example: intent about 'payments service on-call owner':\n"
+        "     STRONG → 'Payments Service Runbook', 'On-call Rotation - Payments'\n"
+        "     WEAK   → 'Engineering Org Chart', 'Production Services Overview' (too generic — exclude)\n"
+        "2. If intent.old_value is a SPECIFIC concrete string (version, person, endpoint, etc.) — include "
+        "pages whose titles suggest that value is likely documented there.\n"
+        "3. EXCLUDE pages where you're guessing. A bad include causes a wrong edit; a missed page is recoverable "
+        "via the other retrieval paths (keyword, RAG, phrase search) which run in parallel.\n"
+        "4. Be CONSERVATIVE — returning 0 pages is acceptable. Returning loosely-related pages is NOT.\n"
+        f"5. Select AT MOST {max_select} pages, and only those you are CONFIDENT about.\n\n"
+        f"Return JSON: {{\"indices\": [n, n, ...]}} where each n is a 0-based index from the list above. "
+        "Return only the JSON object — no explanation, no markdown."
+    )
+
+    try:
+        opts = _completion_opts(JARVIS_REVIEW_MODEL, 500)
+        response = await asyncio.to_thread(
+            lambda: _get_openai_client().chat.completions.create(
+                **opts,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+        )
+        data = json.loads(response.choices[0].message.content or "{}")
+        if not isinstance(data, dict):
+            return []
+        raw_indices = data.get("indices") or []
+        selected: List[Dict[str, Any]] = []
+        for raw_i in raw_indices:
+            try:
+                i = int(raw_i)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < len(all_pages):
+                page = dict(all_pages[i])
+                page["source"] = "llm_workspace_match"
+                page["score"] = 1.7  # between phrase (1.5) and title (2.0) match
+                selected.append(page)
+            if len(selected) >= max_select:
+                break
+        if selected:
+            logger.info(
+                "LLM workspace selector: chose %d pages for intent '%s' from %d titles",
+                len(selected), subject or instruction[:40], len(all_pages),
+            )
+        return selected
+    except Exception as exc:
+        logger.debug("LLM workspace selector failed for intent '%s': %s", subject, exc)
+        return []
+
+
+async def _retrieve_pages_for_intent(
+    intent: Any,  # ChangeIntent
+    graph_user_id: str,
+    *,
+    page_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+    per_intent_cap: int = 12,
+    workspace_titles: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Find Confluence pages relevant to a single ChangeIntent.
+
+    Runs three parallel retrieval paths against the intent's hints:
+      1. Live Confluence keyword search on subject + target_hint
+      2. RAG (Neo4j graph + Pinecone) on the same terms
+      3. Exact phrase search if intent.old_value is set (verbatim match in page body)
+    Plus an exact title search if target_hint looks like a page title.
+
+    Results are merged with phrase-match > title-match > rag > keyword priority,
+    deduplicated by page_id, and capped at per_intent_cap pages.
+    Uses page_cache (page_id -> full page dict) to avoid re-fetching across intents.
+    """
+    page_cache = page_cache if page_cache is not None else {}
+
+    subject = (getattr(intent, "subject", "") or "").strip()
+    target_hint = (getattr(intent, "target_hint", "") or "").strip()
+    old_value = (getattr(intent, "old_value", "") or "").strip()
+    new_value = (getattr(intent, "new_value", "") or "").strip()
+    instruction = (getattr(intent, "instruction", "") or "").strip()
+
+    # Build search query terms — prioritize specific hints, then fall back to general
+    queries: List[str] = []
+    seen_q: set = set()
+    for q in (subject, target_hint, old_value, new_value, instruction):
+        norm = q.strip()
+        if norm and norm.lower() not in seen_q and len(norm) >= 3:
+            seen_q.add(norm.lower())
+            queries.append(norm)
+    queries = queries[:5]
+
+    if not queries:
+        return []
+
+    title_query_candidates = [t for t in (target_hint, subject) if t and len(t) > 3][:2]
+    phrase_candidates = [old_value] if old_value and len(old_value) >= 4 else []
+
+    keyword_task = _live_confluence_search(queries[:3])
+    rag_task = _merged_rag_retrieval(graph_user_id, queries[:3])
+    title_task = _direct_title_search(title_query_candidates)
+    phrase_task = _content_phrase_search(phrase_candidates) if phrase_candidates else asyncio.sleep(0, result=[])
+    # 5th source — LLM scans every workspace page title and picks the semantically relevant ones.
+    # Catches pages where keyword/RAG misses because the title has no word overlap (e.g.
+    # "Q4 Training Roadmap" for an intent about "Akshat's gym plan").
+    if workspace_titles:
+        llm_select_task = _llm_select_pages_for_intent(intent, workspace_titles, max_select=per_intent_cap)
+    else:
+        llm_select_task = asyncio.sleep(0, result=[])
+
+    results = await asyncio.gather(
+        keyword_task, rag_task, title_task, phrase_task, llm_select_task,
+        return_exceptions=True,
+    )
+
+    def _safe(idx: int) -> List[Dict[str, Any]]:
+        r = results[idx]
+        if isinstance(r, Exception):
+            logger.debug("Intent retrieval path %d failed (non-fatal): %s", idx, r)
+            return []
+        return r or []
+
+    keyword_pages = _safe(0)
+    rag_pages = _safe(1)
+    title_pages = _safe(2)
+    phrase_pages = _safe(3)
+    llm_pages = _safe(4)
+
+    # For llm_pages we have only (page_id, title) — hydrate with live content if missing
+    # so the drafter has enough context. Done lazily via _enrich_page_for_drafter later,
+    # but we still need a baseline title so dedup works.
+    for p in llm_pages:
+        p.setdefault("relevant_content", "")
+
+    # Merge with priority: phrase > title > llm-workspace > rag > keyword
+    # Phrase and title are HIGHER confidence (exact content/title match) than LLM semantic match.
+    # LLM semantic match outranks RAG/keyword because it has a workspace-wide view.
+    ordered: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+    for batch in (phrase_pages, title_pages, llm_pages, rag_pages, keyword_pages):
+        for p in batch:
+            pid = p.get("page_id")
+            if not pid or pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            ordered.append(p)
+            if len(ordered) >= per_intent_cap:
+                break
+        if len(ordered) >= per_intent_cap:
+            break
+
+    # Populate shared page_cache so we only fetch full HTML once per page across intents
+    for p in ordered:
+        pid = p.get("page_id")
+        if pid and pid not in page_cache:
+            page_cache[pid] = p
+
+    return ordered
+
+
+def _build_section_content_map(
+    html: str,
+    available_headings: List[str],
+    *,
+    section_preview_chars: int = 500,
+) -> Dict[str, str]:
+    """Map each heading to a short preview of the text under it.
+
+    The drafter uses this to pick the section that actually contains content
+    related to the change — not just the section with the matching name.
+    """
+    if not html or not available_headings:
+        return {}
+    try:
+        from confluence_logic.utils.html_parser import get_section_html  # noqa: PLC0415
+    except Exception:
+        return {}
+
+    section_map: Dict[str, str] = {}
+    for heading in available_headings[:30]:
+        try:
+            section_html = get_section_html(html, heading)
+            preview = _html_to_text(section_html)[:section_preview_chars]
+            if preview:
+                section_map[heading] = preview
+        except Exception:
+            continue
+    return section_map
+
+
+async def _enrich_page_for_drafter(
+    page: Dict[str, Any],
+    *,
+    max_chars: int = 8000,
+) -> Dict[str, Any]:
+    """Ensure a page dict has full_content + available_headings + section_content_map.
+
+    The intent drafter needs:
+      - full_content: the full live page text (for copy-verbatim before_content)
+      - available_headings: list of section heading names
+      - section_content_map: heading -> short preview, so the drafter picks the
+        section that already discusses the subject, not just one with a matching name
+    """
+    if page.get("_drafter_ready"):
+        return page
+
+    page_id = page.get("page_id")
+    full_content = page.get("relevant_content") or ""
+    available_headings = page.get("available_headings") or []
+    live_html = page.get("_live_html") or ""
+
+    # Fetch fresh full HTML if we have a page_id and content is thin
+    if page_id and (len(full_content) < 1000 or not available_headings or not live_html):
+        try:
+            from confluence_logic.utils.html_parser import extract_headings  # noqa: PLC0415
+            connector = _get_connector()
+            html = await asyncio.to_thread(connector.fetch_page_html, page_id)
+            if html:
+                live_html = html
+                page["_live_html"] = html
+                full_content = _html_to_text(html)
+                available_headings = extract_headings(html) or []
+        except Exception as exc:
+            logger.debug("Could not fetch full HTML for page %s: %s", page_id, exc)
+
+    # Build a heading->preview map so the drafter can see what's inside each section
+    section_content_map = (
+        _build_section_content_map(live_html, available_headings) if live_html else {}
+    )
+
+    page["full_content"] = full_content[:max_chars]
+    page["available_headings"] = available_headings
+    page["section_content_map"] = section_content_map
+    page["_drafter_ready"] = True
+    return page
+
+
+def _normalize_for_fuzzy(text: str) -> str:
+    """Whitespace-normalize text for fuzzy comparison (collapse all whitespace runs)."""
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+async def _llm_locate_text_on_page(
+    target_text: str,
+    page_html: str,
+    *,
+    max_html_chars: int = 12000,
+) -> Optional[str]:
+    """Use an LLM to find the VERBATIM matching text on a live Confluence page.
+
+    Falls back to None if the LLM can't find a clean match. Used as the last-resort
+    fallback when execution-time exact and fuzzy matching both fail to locate the
+    text the drafter said should be replaced.
+    """
+    if not target_text or not page_html:
+        return None
+    try:
+        snippet = _html_to_text(page_html)[:max_html_chars]
+        prompt = (
+            "You are given the plain text of a Confluence page and a target snippet that should "
+            "be present on the page (possibly with whitespace/formatting differences). "
+            "Find the closest matching VERBATIM string on the page and return it.\n\n"
+            f"Target snippet:\n---\n{target_text[:1000]}\n---\n\n"
+            f"Page text:\n---\n{snippet}\n---\n\n"
+            "Return JSON: {\"found\": true/false, \"verbatim\": \"...the exact substring from the page...\"}\n"
+            "If no close match exists, return {\"found\": false, \"verbatim\": \"\"}. "
+            "Do not invent text — only copy what is actually present on the page."
+        )
+        opts = _completion_opts(JARVIS_REVIEW_MODEL, 400)
+        response = await asyncio.to_thread(
+            lambda: _get_openai_client().chat.completions.create(
+                **opts,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+        )
+        data = json.loads(response.choices[0].message.content or "{}")
+        if not isinstance(data, dict) or not data.get("found"):
+            return None
+        verbatim = (data.get("verbatim") or "").strip()
+        # Sanity check: must actually appear on the page
+        if verbatim and verbatim in snippet:
+            return verbatim
+        return None
+    except Exception as exc:
+        logger.debug("LLM-assisted text location failed: %s", exc)
+        return None
 
 
 async def _run_pipeline(
@@ -2404,113 +3197,361 @@ async def _run_pipeline(
         await _sync_recent_pinecone_pages(limit=30)
         asyncio.create_task(_auto_index_pinecone_background(graph_user_id))
 
-        # Step 2c: Four parallel retrieval paths — all must complete before Stage 3.
-        #   1. RAG (Neo4j + Pinecone): semantic and graph-based relevance
-        #   2. Keyword live search: broad CQL topic-keyword search
-        #   3. Direct title match: guarantees explicitly-named pages are always found
-        #   4. Content phrase search: finds every page containing the specific text being changed
-        #      (e.g., "OpenAI Agents SDK" → finds ALL pages mentioning it, not just top-ranked ones)
-        rag_results, live_results, title_results, phrase_results = await asyncio.gather(
-            _merged_rag_retrieval(graph_user_id, facts.query_terms),
-            _live_confluence_search(facts.query_terms),
-            _direct_title_search(facts.mentioned_page_titles),
-            _content_phrase_search(facts.content_phrases),
-            return_exceptions=True,
-        )
-        if isinstance(rag_results, Exception):
-            logger.warning("RAG retrieval error (non-fatal): %s", rag_results)
-            rag_results = []
-        if isinstance(live_results, Exception):
-            logger.warning("Live search error (non-fatal): %s", live_results)
-            live_results = []
-        if isinstance(title_results, Exception):
-            logger.warning("Direct title search error (non-fatal): %s", title_results)
-            title_results = []
-        if isinstance(phrase_results, Exception):
-            logger.warning("Content phrase search error (non-fatal): %s", phrase_results)
-            phrase_results = []
+        # ───────────────────────────────────────────────────────────────────
+        # Step 2c: INTENT-DRIVEN RETRIEVAL
+        # For each ChangeIntent extracted in Stage 1, find the pages where that
+        # change might live. Each intent gets its own retrieval pass, so subtle
+        # context-dependent changes don't get drowned out by other queries.
+        # ───────────────────────────────────────────────────────────────────
+        change_intents = list(getattr(facts, "change_intents", []) or [])
+        page_cache: Dict[str, Dict[str, Any]] = {}
 
-        logger.info(
-            "Retrieval: rag=%d live=%d title=%d phrase=%d",
-            len(rag_results), len(live_results), len(title_results), len(phrase_results),
-        )
+        if change_intents:
+            logger.info("Intent-driven pipeline: %d change intents to process", len(change_intents))
 
-        # Merge priority: phrase match (highest — exact content hit) > title match > RAG > keyword.
-        all_ids_by_priority: set = set()
-        ordered: List[Dict[str, Any]] = []
+            # Fetch the workspace title list ONCE (cached) for the LLM workspace selector
+            # to use across all per-intent retrieval calls. This avoids re-fetching for every intent.
+            workspace_titles = await _get_workspace_pages_for_filter(graph_user_id)
 
-        for p in phrase_results:
-            pid = p.get("page_id")
-            if pid and pid not in all_ids_by_priority:
-                all_ids_by_priority.add(pid)
-                ordered.append(p)
-        for p in title_results:
-            pid = p.get("page_id")
-            if pid and pid not in all_ids_by_priority:
-                all_ids_by_priority.add(pid)
-                ordered.append(p)
-        for p in rag_results:
-            pid = p.get("page_id")
-            if pid and pid not in all_ids_by_priority:
-                all_ids_by_priority.add(pid)
-                ordered.append(p)
-        for p in live_results:
-            pid = p.get("page_id")
-            if pid and pid not in all_ids_by_priority:
-                all_ids_by_priority.add(pid)
-                ordered.append(p)
+            intent_retrieval_results = await asyncio.gather(
+                *[
+                    _retrieve_pages_for_intent(
+                        intent, graph_user_id,
+                        page_cache=page_cache,
+                        workspace_titles=workspace_titles,
+                    )
+                    for intent in change_intents
+                ],
+                return_exceptions=True,
+            )
 
-        # Backfill missing relevant_content from live results
-        live_by_id = {p["page_id"]: p for p in live_results if p.get("page_id")}
-        for p in ordered:
-            if not p.get("relevant_content") and p.get("page_id") in live_by_id:
-                p["relevant_content"] = live_by_id[p["page_id"]].get("relevant_content", "")
+            # Build (intent, pages) pairs while filtering exceptions
+            intent_pages: List[tuple] = []
+            for intent, result in zip(change_intents, intent_retrieval_results):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "Intent retrieval failed for '%s': %s",
+                        getattr(intent, "subject", "?"), result,
+                    )
+                    intent_pages.append((intent, []))
+                else:
+                    intent_pages.append((intent, result or []))
 
-        candidate_pages = ordered
+            total_pages = sum(len(p) for _, p in intent_pages)
+            logger.info(
+                "Per-intent retrieval complete: %d intents → %d total (intent,page) pairs",
+                len(change_intents), total_pages,
+            )
 
-        # D-06: Zero-RAG fallback — generate create proposals from doc_worthy_updates
-        if not candidate_pages and facts.doc_worthy_updates:
-            candidate_pages = [
-                {
-                    "page_id": None,
-                    "title": f"New page: {item[:60]}",
-                    "relevant_content": "",
-                    "score": 0.0,
-                }
-                for item in facts.doc_worthy_updates[:3]
+            # ───────────────────────────────────────────────────────────────
+            # Stage 3: PER-(intent, page) DRAFTING in parallel
+            # Each pair gets a focused LLM call with ONE intent and ONE page —
+            # the drafter decides if the change applies and produces a precise edit.
+            # Concurrency is capped via a semaphore to respect rate limits.
+            # ───────────────────────────────────────────────────────────────
+            await asyncio.to_thread(
+                supabase_store.update_pipeline_job,
+                job_id, "drafting", "running", None, None,
+            )
+            _emit(job_id, {"type": "stage_start", "stage": "drafting"})
+
+            from confluence_logic.agents.drafter_agent import _run_intent_drafter  # noqa: PLC0415
+            from confluence_logic.agents.page_qualifier import _run_page_qualifier  # noqa: PLC0415
+
+            draft_sem = asyncio.Semaphore(int(os.getenv("JARVIS_DRAFTER_CONCURRENCY", "6")))
+            qualifier_sem = asyncio.Semaphore(int(os.getenv("JARVIS_QUALIFIER_CONCURRENCY", "8")))
+
+            # ───────────────────────────────────────────────────────────
+            # STAGE 3a — PAGE QUALIFIER (NEW)
+            # Gate every (intent, page) pair through a strict qualifier BEFORE drafting.
+            # Verbatim phrase hits qualify deterministically; other cases go through an
+            # LLM page-fit scorer. Pages that don't qualify never reach the drafter.
+            # ───────────────────────────────────────────────────────────
+            async def _enrich_and_qualify(intent_obj, page_obj):
+                async with qualifier_sem:
+                    enriched = await _enrich_page_for_drafter(page_obj)
+                    qualification = await _run_page_qualifier(intent_obj, enriched)
+                    return enriched, qualification
+
+            qualify_tasks: List = []
+            qualify_owner_intent_idx: List[int] = []
+            for idx, (intent_obj, pages) in enumerate(intent_pages):
+                for page_obj in pages:
+                    qualify_tasks.append(_enrich_and_qualify(intent_obj, page_obj))
+                    qualify_owner_intent_idx.append(idx)
+
+            qualify_results = await asyncio.gather(*qualify_tasks, return_exceptions=True)
+
+            # Build the drafting work list from only QUALIFIED pairs, and remember
+            # the qualifier outputs so we can attach them as audit data to drafts.
+            qualified_pairs: List[tuple] = []  # (intent_obj, enriched_page, qualification, owner_idx)
+            for i, qr in enumerate(qualify_results):
+                if isinstance(qr, Exception):
+                    logger.warning("Qualifier task failed (non-fatal): %s", qr)
+                    continue
+                if not qr:
+                    continue
+                enriched, qualification = qr
+                if not qualification.get("qualified"):
+                    continue  # Page rejected by qualifier — never reach the drafter
+                intent_obj = intent_pages[qualify_owner_intent_idx[i]][0]
+                qualified_pairs.append((intent_obj, enriched, qualification, qualify_owner_intent_idx[i]))
+
+            logger.info(
+                "Page qualifier: %d of %d (intent, page) pairs qualified for drafting",
+                len(qualified_pairs), len(qualify_tasks),
+            )
+
+            # ───────────────────────────────────────────────────────────
+            # STAGE 3b — DRAFTING (only on qualified pairs)
+            # ───────────────────────────────────────────────────────────
+            async def _draft_qualified(intent_obj, enriched_page):
+                async with draft_sem:
+                    return await _run_intent_drafter(
+                        intent_obj, enriched_page, transcript_text,
+                        facts=facts, summary_json=summary_json,
+                    )
+
+            intent_drafted_count: Dict[int, int] = {i: 0 for i in range(len(change_intents))}
+
+            draft_tasks = [
+                _draft_qualified(intent_obj, page_obj)
+                for (intent_obj, page_obj, _q, _idx) in qualified_pairs
             ]
+            raw_drafts = await asyncio.gather(*draft_tasks, return_exceptions=True)
 
-        # D-09: Deduplicate by page_id; cap at JARVIS_PIPELINE_MAX_PAGES
-        seen_ids: set = set()
-        deduplicated: list = []
-        for p in candidate_pages:
-            pid = p.get("page_id")
-            key = pid if pid else id(p)  # None page_ids (create proposals) each get own key
-            if key not in seen_ids:
-                seen_ids.add(key)
-                deduplicated.append(p)
-        candidate_pages = deduplicated[:JARVIS_PIPELINE_MAX_PAGES]
+            proposals: List[Dict[str, Any]] = []
+            for i, d in enumerate(raw_drafts):
+                if isinstance(d, Exception):
+                    logger.warning("Intent drafter task failed (non-fatal): %s", d)
+                    continue
+                if not d:
+                    continue
+                # Attach qualifier audit data to the draft so the verifier & UI can see it.
+                _intent_obj, _page, qualification, owner_idx = qualified_pairs[i]
+                d["_audit"] = {
+                    "page_fit_score": qualification.get("page_fit_score"),
+                    "old_value_found": qualification.get("old_value_found"),
+                    "matched_phrase": qualification.get("matched_phrase"),
+                    "qualifier_why": qualification.get("why"),
+                    "retrieval_source": (_page.get("source") or "unknown"),
+                    "intent_subject": getattr(_intent_obj, "subject", "") or "",
+                    "owner_intent_idx": owner_idx,
+                }
+                proposals.append(d)
+                intent_drafted_count[owner_idx] += 1
 
-        # Stage 3: Single comprehensive proposal generation (all pages → distinct proposals)
-        await asyncio.to_thread(
-            supabase_store.update_pipeline_job,
-            job_id, "drafting", "running", None, None,
-        )
-        _emit(job_id, {"type": "stage_start", "stage": "drafting"})
+            # For intents with action='create' OR intents where retrieval returned no pages
+            # AND the intent is documentation-worthy: emit a create proposal with page_id=null.
+            for idx, (intent_obj, pages) in enumerate(intent_pages):
+                action = (getattr(intent_obj, "action", "") or "").strip().lower()
+                drafted = intent_drafted_count.get(idx, 0)
+                no_pages_found = not pages
+                explicit_create = action == "create"
 
-        proposal_agent = ProposedChangesAgent(model=JARVIS_REVIEW_MODEL, max_tokens=4000)
-        proposals = await proposal_agent.propose_with_pages(
-            facts=facts,
-            transcript_text=transcript_text,
-            summary=summary_json,
-            candidate_pages=candidate_pages,
-            max_tokens=4000,
-        )
+                if explicit_create or (no_pages_found and drafted == 0):
+                    # No relevant page exists for this change — propose creating one
+                    # only if the intent has a concrete subject (avoid noise).
+                    subject = (getattr(intent_obj, "subject", "") or "").strip()
+                    instruction = (getattr(intent_obj, "instruction", "") or "").strip()
+                    if not subject and not instruction:
+                        continue
+                    new_title = subject or instruction[:80] or "Untitled new page"
+                    rationale = (
+                        getattr(intent_obj, "rationale", "") or instruction
+                        or f"Document this change: {subject}"
+                    )
+                    proposals.append({
+                        "change_type": "create",
+                        "page_id": None,
+                        "page_title": new_title,
+                        "section_heading": "Overview",
+                        "before_content": None,
+                        "after_content": instruction or subject or "",
+                        "rationale": rationale,
+                    })
+                    logger.info(
+                        "Intent '%s' produced a CREATE proposal (no matching page existed; action=%s)",
+                        subject or instruction[:60], action or "auto",
+                    )
+
+            # ───────────────────────────────────────────────────────────
+            # STAGE 3c — COMPARATIVE RANKING per intent
+            # Within each intent, drafts with a much lower page_fit_score than the
+            # best draft for that intent get an explicit risk annotation. This is
+            # the "is this the BEST page for this change?" check the boss flagged.
+            # We do NOT drop them — the user still sees them with a clear warning.
+            # ───────────────────────────────────────────────────────────
+            by_intent: Dict[int, List[Dict[str, Any]]] = {}
+            for p in proposals:
+                idx = (p.get("_audit") or {}).get("owner_intent_idx")
+                if idx is None:
+                    continue
+                by_intent.setdefault(idx, []).append(p)
+
+            for idx, drafts in by_intent.items():
+                if len(drafts) < 2:
+                    continue
+                fits = [(d.get("_audit") or {}).get("page_fit_score") or 0 for d in drafts]
+                max_fit = max(fits)
+                for d in drafts:
+                    audit = d.setdefault("_audit", {})
+                    fit = audit.get("page_fit_score") or 0
+                    audit["relative_fit_gap"] = max_fit - fit
+                    # 3+ points below the best draft for this intent → mark as review
+                    if max_fit - fit >= 3:
+                        d["risk"] = "review"
+                        existing_note = d.get("verifier_note") or ""
+                        warn = (
+                            f"[COMPARATIVE] Another candidate page scored {max_fit}/10 for this same "
+                            f"intent; this one scored only {fit}/10. Consider whether the higher-fit "
+                            f"page is the better target."
+                        )
+                        d["verifier_note"] = (warn + " " + existing_note).strip()
+
+            # ───────────────────────────────────────────────────────────
+            # STAGE 3d — TITLE-AMBIGUITY DETECTION
+            # If two drafts target pages with very similar titles AND both qualified,
+            # the retrieval was ambiguous. Annotate (don't drop) so the user reviews
+            # carefully before accepting.
+            # ───────────────────────────────────────────────────────────
+            def _title_similarity(a: str, b: str) -> float:
+                # Jaccard on lowercased non-stop word tokens — cheap and robust enough
+                stop = _GENERIC_TITLE_WORDS
+                ta = {w for w in re.split(r"\W+", (a or "").lower()) if w and w not in stop and len(w) > 2}
+                tb = {w for w in re.split(r"\W+", (b or "").lower()) if w and w not in stop and len(w) > 2}
+                if not ta or not tb:
+                    return 0.0
+                return len(ta & tb) / len(ta | tb)
+
+            for idx, drafts in by_intent.items():
+                if len(drafts) < 2:
+                    continue
+                titles = [(i, d.get("page_title") or "") for i, d in enumerate(drafts)]
+                for i in range(len(titles)):
+                    for j in range(i + 1, len(titles)):
+                        sim = _title_similarity(titles[i][1], titles[j][1])
+                        if sim >= 0.7 and titles[i][1].lower() != titles[j][1].lower():
+                            for k in (i, j):
+                                d = drafts[k]
+                                other_title = titles[j if k == i else i][1]
+                                note = (
+                                    f"[AMBIGUOUS-TITLE] Another similarly-titled page "
+                                    f"('{other_title}') also qualified for this intent. "
+                                    f"Confirm this is the right page before accepting."
+                                )
+                                existing = d.get("verifier_note") or ""
+                                if "[AMBIGUOUS-TITLE]" not in existing:
+                                    d["verifier_note"] = (note + " " + existing).strip()
+                                    if d.get("risk") == "safe":
+                                        d["risk"] = "review"
+
+            # ───────────────────────────────────────────────────────────
+            # STAGE 3e — SEMANTIC DEDUPLICATION (two layers)
+            # Layer 1: strict key (page_id, change_type, section_heading) — fast.
+            # Layer 2: meaning signature combining page + change_type + normalized
+            # before/after content + normalized subject. Catches cards that target
+            # the same page with slightly different heading guesses or rationales.
+            # ───────────────────────────────────────────────────────────
+            def _sig(text: str, n: int = 120) -> str:
+                t = re.sub(r"[*_`#>\-]+", " ", (text or "").lower())
+                t = re.sub(r"\s+", " ", t).strip()
+                return t[:n]
+
+            seen_strict: set = set()
+            seen_semantic: set = set()
+            deduped: List[Dict[str, Any]] = []
+            for p in proposals:
+                pid_key = str(p.get("page_id") or (p.get("page_title") or "").lower())
+                heading_key = str(p.get("section_heading") or "").lower()[:50]
+                ctype = p.get("change_type") or "edit"
+                emode = p.get("edit_mode") or ""
+                strict_key = f"{pid_key}|{ctype}|{emode}|{heading_key}"
+                intent_subject = ((p.get("_audit") or {}).get("intent_subject") or "").lower()
+                semantic_key = (
+                    f"{pid_key}|{ctype}|{emode}|"
+                    f"{_sig(intent_subject, 60)}|"
+                    f"{_sig(p.get('before_content') or '', 80)}|"
+                    f"{_sig(p.get('after_content') or '', 120)}"
+                )
+                if strict_key in seen_strict:
+                    logger.debug("Skipping strict-duplicate proposal: %s", strict_key)
+                    continue
+                if semantic_key in seen_semantic:
+                    logger.info(
+                        "Skipping SEMANTIC duplicate proposal for page '%s' (%s/%s) — "
+                        "same content/subject already targeted",
+                        p.get("page_title"), ctype, emode,
+                    )
+                    continue
+                seen_strict.add(strict_key)
+                seen_semantic.add(semantic_key)
+                deduped.append(p)
+            proposals = deduped
+
+            logger.info(
+                "Per-pair drafting produced %d unique proposals (from %d (intent,page) tasks)",
+                len(proposals), len(draft_tasks),
+            )
+
+        else:
+            # FALLBACK: no change_intents extracted — use the legacy single-pass
+            # proposal agent so we don't lose all coverage on transcripts where
+            # the structured extraction missed everything.
+            logger.info("No change_intents extracted — falling back to legacy proposal pipeline")
+
+            rag_results, live_results, title_results, phrase_results = await asyncio.gather(
+                _merged_rag_retrieval(graph_user_id, facts.query_terms),
+                _live_confluence_search(facts.query_terms),
+                _direct_title_search(facts.mentioned_page_titles),
+                _content_phrase_search(facts.content_phrases),
+                return_exceptions=True,
+            )
+            for label, idx, _r in (("rag", 0, rag_results), ("live", 1, live_results), ("title", 2, title_results), ("phrase", 3, phrase_results)):
+                pass  # ordering placeholder
+            if isinstance(rag_results, Exception): rag_results = []
+            if isinstance(live_results, Exception): live_results = []
+            if isinstance(title_results, Exception): title_results = []
+            if isinstance(phrase_results, Exception): phrase_results = []
+
+            ordered: List[Dict[str, Any]] = []
+            seen_ids: set = set()
+            for batch in (phrase_results, title_results, rag_results, live_results):
+                for p in batch:
+                    pid = p.get("page_id")
+                    if pid and pid not in seen_ids:
+                        seen_ids.add(pid)
+                        ordered.append(p)
+
+            if not ordered and facts.doc_worthy_updates:
+                ordered = [
+                    {"page_id": None, "title": f"New page: {item[:60]}", "relevant_content": "", "score": 0.0}
+                    for item in facts.doc_worthy_updates[:3]
+                ]
+
+            candidate_pages = ordered[:JARVIS_PIPELINE_MAX_PAGES]
+
+            await asyncio.to_thread(
+                supabase_store.update_pipeline_job,
+                job_id, "drafting", "running", None, None,
+            )
+            _emit(job_id, {"type": "stage_start", "stage": "drafting"})
+
+            proposal_agent = ProposedChangesAgent(model=JARVIS_REVIEW_MODEL, max_tokens=4000)
+            proposals = await proposal_agent.propose_with_pages(
+                facts=facts,
+                transcript_text=transcript_text,
+                summary=summary_json,
+                candidate_pages=candidate_pages,
+                max_tokens=4000,
+            )
 
         if not proposals:
-            logger.info("Pipeline %s: proposal agent returned 0 proposals", job_id)
+            logger.info("Pipeline %s: 0 proposals generated", job_id)
 
-        # Stage 4: Verify each proposal in parallel, then persist
+        # ───────────────────────────────────────────────────────────────
+        # Stage 4: VERIFY + PERSIST each proposal in parallel
+        # ───────────────────────────────────────────────────────────────
         _emit(job_id, {"type": "stage_start", "stage": "verification"})
         await asyncio.to_thread(
             supabase_store.update_pipeline_job,
