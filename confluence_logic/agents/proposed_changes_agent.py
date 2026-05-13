@@ -34,8 +34,12 @@ class ProposedChangesAgent:
     @property
     def system_prompt(self) -> str:
         return (
-            "You are Jarvis, a Confluence documentation assistant. You read meeting transcripts and propose "
-            "clear, specific changes to Confluence pages for a human to review and approve.\n\n"
+            "You are Jarvis, a Confluence documentation assistant. You receive structured meeting facts "
+            "(already extracted from the full transcript) and a list of relevant Confluence pages, "
+            "then propose clear, specific changes for a human to review and approve.\n\n"
+            "Your input contains: extracted_facts (decisions, action_items, doc_worthy_updates), "
+            "meeting_summary, retrieved_page_context (Confluence pages with content), "
+            "and transcript_tail (last portion of meeting for verbatim quotes).\n\n"
             "OUTPUT STRUCTURE RULES — critical:\n"
             "- Return ONLY JSON shaped as {\"changes\": [...]}.\n"
             "- Produce ONE change object per DISTINCT action. Never merge multiple actions into one change.\n"
@@ -269,7 +273,8 @@ class ProposedChangesAgent:
     async def propose_with_pages(
         self,
         *,
-        transcript_text: str,
+        facts: Any,  # ExtractedFacts — the compact distillation of the full transcript
+        transcript_tail: str,  # last ~1500 chars only, for verbatim quote context
         summary: Dict[str, Any],
         candidate_pages: List[Dict[str, Any]],
         query: str = "",
@@ -277,9 +282,11 @@ class ProposedChangesAgent:
     ) -> List[Dict[str, Any]]:
         """Produce all distinct change proposals using pre-fetched candidate pages.
 
-        Unlike propose(), this skips the internal workspace search — caller already ran
-        live Confluence search in Stage 2 and provides candidate_pages directly.
-        Higher max_tokens budget allows the model to output 5-8 distinct proposals.
+        Receives structured facts (not raw transcript) so input size is O(constant)
+        regardless of meeting length — a 100-minute meeting and a 10-minute meeting
+        produce the same token count here. The fact extraction stage (Stage 1) already
+        read and distilled the full transcript into decisions/action_items/doc_worthy_updates.
+        Only the last 1500 chars of transcript are included for verbatim quote context.
         """
         formatted_pages = [
             {
@@ -292,12 +299,6 @@ class ProposedChangesAgent:
             for p in candidate_pages
         ]
 
-        workspace_context = {
-            "retrieval_queries": [],
-            "retrieved_page_context": formatted_pages,
-            "retrieval_source": "pipeline_live_search",
-        }
-
         payload = {
             "optional_user_guidance": query or None,
             "meeting_summary": {
@@ -308,8 +309,18 @@ class ProposedChangesAgent:
                 "action_items": summary.get("action_items") or [],
                 "participants": summary.get("participants") or [],
             },
-            "workspace_context": workspace_context,
-            "full_transcript": transcript_text,
+            # Structured facts from Stage 1 — compact regardless of meeting length
+            "extracted_facts": {
+                "decisions": getattr(facts, "decisions", []),
+                "action_items": getattr(facts, "action_items", []),
+                "new_requirements": getattr(facts, "new_requirements", []),
+                "doc_worthy_updates": getattr(facts, "doc_worthy_updates", []),
+                "owners": getattr(facts, "owners", {}),
+                "query_terms": getattr(facts, "query_terms", []),
+            },
+            # Last 1500 chars only — enough for verbatim quote evidence
+            "transcript_tail": transcript_tail[-1500:],
+            "retrieved_page_context": formatted_pages,
         }
 
         opts = self._openai_completion_options(self.model, max_tokens)
