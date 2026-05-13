@@ -36,33 +36,39 @@ class ProposedChangesAgent:
         return (
             "You are Jarvis, a Confluence documentation assistant. You read meeting transcripts and propose "
             "clear, specific changes to Confluence pages for a human to review and approve.\n\n"
+            "OUTPUT STRUCTURE RULES — critical:\n"
+            "- Return ONLY JSON shaped as {\"changes\": [...]}.\n"
+            "- Produce ONE change object per DISTINCT action. Never merge multiple actions into one change.\n"
+            "- Cover EVERY distinct action mentioned in the transcript — even for pages not in the retrieved context "
+            "(use change_type: create for new pages, delete for pages to remove).\n"
+            "- Do NOT produce duplicate or near-identical change objects. Each must address a different page or action.\n\n"
             "CONTENT RULES — read carefully:\n\n"
             "before_content:\n"
             "- Copy the EXACT relevant excerpt (3–8 lines max) from the retrieved Confluence page that will be changed.\n"
             "- Do NOT paste the entire page. Only the specific paragraph, bullet, or section being modified.\n"
-            "- Format it as it appears on the page (use markdown: ## headings, **bold**, bullet points).\n"
-            "- If nothing exists yet (new section), set before_content to an empty string \"\".\n\n"
+            "- Format with markdown: ## headings, **bold**, bullet points.\n"
+            "- If nothing exists yet (new section or create), set before_content to null.\n\n"
             "after_content:\n"
-            "- Write the replacement content that should go into Confluence after this change is accepted.\n"
-            "- Keep it SHORT and FORMAL — 3–10 lines maximum. A non-technical person (e.g. HR) must understand it instantly.\n"
-            "- Use markdown: ## for section headings, **bold** for key terms, bullet points for lists.\n"
-            "- Write in third person, formal tone. No filler phrases like 'as discussed in the meeting'.\n"
-            "- Be specific: include names, page titles, and decisions exactly as stated in the transcript.\n\n"
+            "- Write the replacement content in formal, third-person English.\n"
+            "- Maximum 10 lines. An HR professional must understand it immediately.\n"
+            "- Use markdown: ## for headings, **bold** for key names/terms, - for bullet lists.\n"
+            "- Be specific: real names, exact page titles, decisions from the transcript.\n"
+            "- No filler phrases like 'as discussed' or 'the team decided'.\n"
+            "- For delete changes: after_content should be null.\n\n"
             "section_heading:\n"
-            "- The exact heading name of the section being changed (e.g. 'Team Assignments', 'Project Plan').\n"
-            "- Use the heading that already exists on the page when editing. For new sections, name it clearly.\n\n"
+            "- Exact heading of the section being changed. For creates, choose a clear descriptive heading.\n\n"
             "rationale:\n"
-            "- One sentence explaining WHY this change is needed, referencing the meeting decision.\n\n"
+            "- One sentence: why this change is needed, citing the specific meeting decision.\n\n"
+            "change_type values:\n"
+            "- edit: modify existing content on an existing page\n"
+            "- create: create a brand-new Confluence page (set page_id to null)\n"
+            "- delete: remove an existing page or section (set after_content to null)\n"
+            "- title: rename an existing page\n\n"
             "OTHER RULES:\n"
-            "- Return ONLY JSON shaped as {\"changes\": [...]}.\n"
             "- Each change must have: change_type, page_id, page_title, section_heading, before_content, after_content, rationale.\n"
-            "- change_type must be one of: create, edit, delete, title.\n"
-            "- For edits: use page_id and page_title exactly from the retrieved page context.\n"
-            "- For creates: set page_id to null, choose a clear page_title.\n"
-            "- For deletes: before_content is the content to remove; after_content should be \"\".\n"
-            "- For title changes: before_content is the old title; after_content is the new title.\n"
+            "- For edits/deletes: use page_id and page_title exactly from retrieved_page_context.\n"
+            "- For creates: set page_id to null.\n"
             "- Never invent page IDs, decisions, names, or metrics not in the transcript.\n"
-            "- If user guidance is provided, prioritise it over general transcript coverage.\n"
             "- If no changes are warranted, return {\"changes\": []}."
         )
 
@@ -259,6 +265,67 @@ class ProposedChangesAgent:
         if model.startswith(("gpt-5", "o1", "o3", "o4")):
             return {"model": model, "max_completion_tokens": max_tokens}
         return {"model": model, "max_tokens": max_tokens, "temperature": 0.2}
+
+    async def propose_with_pages(
+        self,
+        *,
+        transcript_text: str,
+        summary: Dict[str, Any],
+        candidate_pages: List[Dict[str, Any]],
+        query: str = "",
+        max_tokens: int = 4000,
+    ) -> List[Dict[str, Any]]:
+        """Produce all distinct change proposals using pre-fetched candidate pages.
+
+        Unlike propose(), this skips the internal workspace search — caller already ran
+        live Confluence search in Stage 2 and provides candidate_pages directly.
+        Higher max_tokens budget allows the model to output 5-8 distinct proposals.
+        """
+        formatted_pages = [
+            {
+                "page_id": p.get("page_id"),
+                "title": p.get("title") or p.get("page_title", ""),
+                "space_key": p.get("space_key", ""),
+                "heading": p.get("section_heading") or p.get("heading"),
+                "relevant_content": self._truncate(p.get("relevant_content") or ""),
+            }
+            for p in candidate_pages
+        ]
+
+        workspace_context = {
+            "retrieval_queries": [],
+            "retrieved_page_context": formatted_pages,
+            "retrieval_source": "pipeline_live_search",
+        }
+
+        payload = {
+            "optional_user_guidance": query or None,
+            "meeting_summary": {
+                "title": summary.get("title"),
+                "executive_summary": summary.get("summary"),
+                "key_topics": summary.get("key_topics") or [],
+                "decisions": summary.get("decisions") or [],
+                "action_items": summary.get("action_items") or [],
+                "participants": summary.get("participants") or [],
+            },
+            "workspace_context": workspace_context,
+            "full_transcript": transcript_text,
+        }
+
+        opts = self._openai_completion_options(self.model, max_tokens)
+        response = await asyncio.to_thread(
+            lambda: self.client_factory().chat.completions.create(
+                **opts,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                response_format={"type": "json_object"},
+            )
+        )
+        raw = response.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        return self._normalize_changes(data if isinstance(data, dict) else {})
 
     async def propose(
         self,

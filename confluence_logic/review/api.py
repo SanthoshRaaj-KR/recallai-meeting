@@ -1619,6 +1619,40 @@ async def _draft_verify_persist(
         )
 
 
+async def _verify_and_persist(
+    draft: Dict[str, Any],
+    transcript_text: str,
+    job_id: str,
+    session_id: str,
+    user_id: Optional[str],
+) -> None:
+    """Verify one proposal from the comprehensive proposal agent, then persist to Supabase."""
+    try:
+        page_content = draft.get("before_content") or ""
+        verified = await _run_verifier(draft, transcript_text, page_content)
+        row_id = await asyncio.to_thread(
+            supabase_store.upsert_proposal,
+            {
+                **verified,
+                "job_id": job_id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "source": "pipeline",
+                "status": "pending",
+            },
+        )
+        _emit(job_id, {
+            "type": "proposal_ready",
+            "id": row_id,
+            "job_id": job_id,
+            "session_id": session_id,
+            "status": "pending",
+            **verified,
+        })
+    except Exception as exc:
+        logger.warning("_verify_and_persist failed for draft %s: %s", draft.get("page_title"), exc)
+
+
 def _html_to_text(html: str) -> str:
     """Strip HTML tags and return plain text for the proposal agent."""
     soup = BeautifulSoup(html or "", "html.parser")
@@ -1785,28 +1819,44 @@ async def _run_pipeline(
                 deduplicated.append(p)
         candidate_pages = deduplicated[:JARVIS_PIPELINE_MAX_PAGES]
 
-        # Stage 3: Parallel Draft + Verify + Persist
+        # Stage 3: Single comprehensive proposal generation (all pages → distinct proposals)
         await asyncio.to_thread(
             supabase_store.update_pipeline_job,
             job_id, "drafting", "running", None, None,
         )
         _emit(job_id, {"type": "stage_start", "stage": "drafting"})
-        tasks = [
-            _draft_verify_persist(page, facts, transcript_text, job_id, session_id, user_id)
-            for page in candidate_pages
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, Exception):
-                logger.warning("Pipeline task failed (non-fatal): %s", r)
 
-        # Stage 4: Complete
+        proposal_agent = ProposedChangesAgent(model=JARVIS_REVIEW_MODEL, max_tokens=4000)
+        proposals = await proposal_agent.propose_with_pages(
+            transcript_text=transcript_text,
+            summary=summary_json,
+            candidate_pages=candidate_pages,
+            max_tokens=4000,
+        )
+
+        if not proposals:
+            logger.info("Pipeline %s: proposal agent returned 0 proposals", job_id)
+
+        # Stage 4: Verify each proposal in parallel, then persist
         _emit(job_id, {"type": "stage_start", "stage": "verification"})
+        await asyncio.to_thread(
+            supabase_store.update_pipeline_job,
+            job_id, "verification", "running", None, None,
+        )
+        verify_tasks = [
+            _verify_and_persist(proposal, transcript_text, job_id, session_id, user_id)
+            for proposal in proposals
+        ]
+        v_results = await asyncio.gather(*verify_tasks, return_exceptions=True)
+        for r in v_results:
+            if isinstance(r, Exception):
+                logger.warning("Verify-persist failed (non-fatal): %s", r)
+
         await asyncio.to_thread(
             supabase_store.update_pipeline_job,
             job_id, "complete", "completed", None, _utc_now_iso(),
         )
-        _emit(job_id, {"type": "pipeline_complete", "proposal_count": len(tasks)})
+        _emit(job_id, {"type": "pipeline_complete", "proposal_count": len(proposals)})
         asyncio.get_event_loop().call_later(300, _job_queues.pop, job_id, None)
         _emit(job_id, _SENTINEL)
 
