@@ -18,7 +18,7 @@ JARVIS_FACT_INPUT_MAX_CHARS = int(os.getenv("JARVIS_FACT_INPUT_MAX_CHARS", "6000
 JARVIS_FACT_CHUNK_CHARS = int(os.getenv("JARVIS_FACT_CHUNK_CHARS", "55000"))
 JARVIS_FACT_CHUNK_OVERLAP = int(os.getenv("JARVIS_FACT_CHUNK_OVERLAP", "2000"))
 JARVIS_AGENT_MODEL = os.getenv("JARVIS_AGENT_MODEL", "gpt-5-mini").strip()
-JARVIS_PIPELINE_MAX_PAGES = int(os.getenv("JARVIS_PIPELINE_MAX_PAGES", "8"))
+JARVIS_PIPELINE_MAX_PAGES = int(os.getenv("JARVIS_PIPELINE_MAX_PAGES", "20"))
 
 # ---------------------------------------------------------------------------
 # Output schema
@@ -35,6 +35,8 @@ class ExtractedFacts(BaseModel):
     deadlines: Dict[str, str] = {}   # task_description -> deadline_string
     doc_worthy_updates: List[str] = []
     query_terms: List[str] = []
+    mentioned_page_titles: List[str] = []  # exact Confluence page/doc names spoken in the meeting
+    content_phrases: List[str] = []        # specific strings to find verbatim in page content (e.g. "OpenAI Agents SDK")
 
 
 # ---------------------------------------------------------------------------
@@ -58,11 +60,23 @@ FACT_EXTRACTION_PROMPT = (
     "6. doc_worthy_updates: Items worth adding or updating in documentation — new processes, "
     "changed procedures, architectural decisions, API changes, launch timelines, configuration changes, "
     "and anything else that should be reflected in team knowledge bases\n"
-    "7. query_terms: 3-6 short search query terms (keywords or phrases) that would retrieve the "
-    "most relevant Confluence pages to update based on the meeting content\n\n"
+    "7. query_terms: 3-8 short search query terms (keywords or phrases) that would retrieve the "
+    "most relevant Confluence pages to update based on the meeting content\n"
+    "8. mentioned_page_titles: Exact names of Confluence pages, documents, wikis, or runbooks that "
+    "participants explicitly referred to during the meeting — capture the full title as spoken. "
+    "Examples: 'HR Onboarding 2024', 'API Runbook v2', 'Deployment Checklist', 'Architecture Overview'. "
+    "Only include names that sound like document/page titles, not generic topics. "
+    "Use [] if no specific document names were mentioned.\n"
+    "9. content_phrases: Specific strings or names that participants said should be FOUND and REPLACED "
+    "inside existing page content — the OLD values that literally appear in documentation right now. "
+    "Examples: if the meeting says 'replace Python 2 with Python 3 everywhere' capture 'Python 2'; "
+    "if they say 'change all references to the old API endpoint' capture the endpoint string; "
+    "if they say 'rename the team lead in all docs from Alice to Bob' capture 'Alice'. "
+    "Only include concrete strings that would appear verbatim in existing pages. "
+    "Use [] if no specific content replacements were discussed.\n\n"
     "IMPORTANT: Businesses rely on these facts for documentation — do not omit items. "
     "Be thorough and complete. Return valid JSON matching the ExtractedFacts schema with all fields. "
-    "For list fields (decisions, action_items, new_requirements, doc_worthy_updates, query_terms): "
+    "For list fields (decisions, action_items, new_requirements, doc_worthy_updates, query_terms, mentioned_page_titles, content_phrases): "
     "return an empty list [] if no items. "
     "For dict fields (owners, deadlines): return an empty object {} if none mentioned. "
     "Return JSON only — no markdown, no explanation."
@@ -106,6 +120,8 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
     new_requirements: List[str] = []
     doc_worthy_updates: List[str] = []
     query_terms: List[str] = []
+    mentioned_page_titles: List[str] = []
+    content_phrases: List[str] = []
     owners: Dict[str, str] = {}
     deadlines: Dict[str, str] = {}
 
@@ -114,6 +130,8 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
     seen_requirements: set = set()
     seen_doc: set = set()
     seen_terms: set = set()
+    seen_page_titles: set = set()
+    seen_phrases: set = set()
 
     for chunk in chunks:
         for item in chunk.decisions:
@@ -141,6 +159,16 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
             if key and key not in seen_terms:
                 seen_terms.add(key)
                 query_terms.append(item)
+        for item in chunk.mentioned_page_titles:
+            key = item.strip().lower()
+            if key and key not in seen_page_titles:
+                seen_page_titles.add(key)
+                mentioned_page_titles.append(item)
+        for item in chunk.content_phrases:
+            key = item.strip().lower()
+            if key and key not in seen_phrases:
+                seen_phrases.add(key)
+                content_phrases.append(item)
         owners.update(chunk.owners)
         deadlines.update(chunk.deadlines)
 
@@ -149,7 +177,9 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
         action_items=action_items,
         new_requirements=new_requirements,
         doc_worthy_updates=doc_worthy_updates,
-        query_terms=query_terms[:12],  # cap search terms
+        query_terms=query_terms[:12],
+        mentioned_page_titles=mentioned_page_titles[:20],
+        content_phrases=content_phrases[:20],
         owners=owners,
         deadlines=deadlines,
     )

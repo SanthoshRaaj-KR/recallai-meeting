@@ -2,7 +2,7 @@ import logging
 from typing import Callable, List, Optional, Tuple
 from agents import Agent, Runner
 from ..core.schemas import MasterVoiceDecision, ResolverDecision
-from .tools import search_workspace_knowledge, fetch_live_page, preview_edit, preview_delete, commit_delete, commit_document_edit, update_page_title, reset_tool_state, get_tool_state, list_workspace_pages, format_page_titles_for_user, set_mutation_observer
+from .tools import search_workspace_knowledge, fetch_live_page, preview_edit, preview_delete, commit_delete, commit_document_edit, update_page_title, reset_tool_state, get_tool_state, list_workspace_pages, format_page_titles_for_user, set_mutation_observer, delete_confluence_page
 from .reframer_agent import ReframerAgent
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,9 @@ class EditorAgent:
                 "- If the user says to remove all content, replace the entire page, rewrite the whole page, or start fresh, you must use heading_string='FULL_PAGE'. Do not use 'Root' for that.\n"
                 "- If the user wants to replace visible text that is not a heading, use heading_string='FULL_PAGE' or the relevant real heading, and pass the visible text itself as old_block_html. The edit tools can resolve a unique visible-text block.\n"
                 "- Use a heading name only when the target is actually a page heading from available_headings. Do not treat arbitrary text like '14' as a heading unless you saw it in available_headings.\n"
-                "- TABLES: When creating or editing tables, ALWAYS use Confluence storage format classes: <table class=\"confluenceTable\"><tbody><tr><th class=\"confluenceTh\">...</th></tr><tr><td class=\"confluenceTd\">...</td></tr></tbody></table>. Plain markdown/HTML tables will not render properly.\n"
+                "- CONTENT FORMAT: Write new_block_html as HTML (<p>, <strong>, <ul>/<li>, <h2>, <h3>) not markdown. "
+                "The tools auto-convert basic markdown to HTML if needed, but HTML is preferred for precision.\n"
+                "- TABLES: Use Confluence storage format: <table class=\"confluenceTable\"><tbody><tr><th class=\"confluenceTh\">...</th></tr><tr><td class=\"confluenceTd\">...</td></tr></tbody></table>.\n"
                 "- ALMOST NEVER return 'NEEDS_CLARIFICATION'. You are a worker agent; do NOT ask questions directly. If search returns zero results, return 'ERROR: Could not find target page.' Prefer best-guess execution over failing.\n"
                 "- NEVER claim success unless the most recent create/commit tool returned success=true. If a tool fails or conflicts completely, you MUST return 'ERROR: The update failed. <reason>' instead of failing silently.\n"
                 "You may receive recent meeting context before the user request. Use it to understand references like 'what we just discussed', 'the decision we made', etc. Do NOT quote or repeat meeting context verbatim unless asked.\n"                "If the edit succeeds, return a short internal completion note without extra conversational padding."
@@ -43,17 +45,20 @@ class EditorAgent:
             name="Jarvis Page Deleter",
             model=model,
             instructions=(
-                "You delete content from existing Confluence pages. "
-                "Use 'search_workspace_knowledge' or 'list_workspace_pages' to find the right page, 'fetch_live_page' to inspect it, "
-                "then 'preview_delete' and 'commit_delete' for the actual removal. "
-                "Do NOT blindly trust page IDs from history. ALWAYS use 'search_workspace_knowledge' or 'list_workspace_pages' to verify the target first. "
+                "You delete content from existing Confluence pages or entire pages. "
+                "Use 'search_workspace_knowledge' or 'list_workspace_pages' to find the right page. "
+                "Do NOT blindly trust page IDs. ALWAYS verify the target first. "
                 "If a page name is approximately given, search and pick the closest match. Do NOT ask for confirmation. "
-                "If the user wants an entire section removed, set delete_entire_section=true with the real heading. "
-                "If they want one paragraph, block, bullet group, or visible text removed, leave delete_entire_section=false and pass the exact visible target text. "
-                "Never create a page. ALMOST NEVER ask questions. If search returns zero results AND you cannot guess the target, return 'ERROR: Could not find target page.' Prefer best-guess execution. "
+                "CHOOSING THE RIGHT DELETE TOOL:\n"
+                "- If the instruction says to delete the ENTIRE PAGE (permanently remove the page itself): "
+                "use 'delete_confluence_page(page_id)'. Do NOT use commit_delete for this — commit_delete only empties content, the page shell remains.\n"
+                "- If the instruction says to delete a SECTION or specific content block within a page: "
+                "use 'fetch_live_page', 'preview_delete', then 'commit_delete' with delete_entire_section=True for sections "
+                "or delete_entire_section=False with target text for individual blocks.\n"
+                "Never create a page. ALMOST NEVER ask questions. If search returns zero results AND you cannot guess the target, return 'ERROR: Could not find target page.' "
                 "If deletion fails completely, return 'ERROR: The deletion failed. <reason>'"
             ),
-            tools=[search_workspace_knowledge, fetch_live_page, preview_delete, commit_delete, list_workspace_pages],
+            tools=[search_workspace_knowledge, fetch_live_page, preview_delete, commit_delete, delete_confluence_page, list_workspace_pages],
         )
         self.create_agent = Agent(
             name="Jarvis Page Creator",
@@ -65,7 +70,9 @@ class EditorAgent:
                 "Use 'create_confluence_page(space_key, title, body_text, sections, parent_page_id)' for creation. "
                 "If the user gives a clear topic but no explicit title, derive a concise sensible title from that topic. Never ask for a title. "
                 "If the request sounds like an edit to an existing page, do not create anything. "
-                "TABLES: When providing body_text or section HTML that includes tables, ALWAYS use Confluence storage format classes: <table class=\"confluenceTable\"><tbody><tr><th class=\"confluenceTh\">...</th></tr><tr><td class=\"confluenceTd\">...</td></tr></tbody></table>. Plain HTML tables will not render properly. "
+                "CONTENT FORMAT: Provide body_text and section content as Confluence Storage Format HTML "
+                "(<p>, <strong>, <ul>/<li>, <h2>, <h3>) or as plain text/markdown — the tool auto-converts. "
+                "TABLES: Use Confluence format: <table class=\"confluenceTable\"><tbody><tr><th class=\"confluenceTh\">...</th></tr><tr><td class=\"confluenceTd\">...</td></tr></tbody></table>. "
                 "NEVER ask questions. Always infer the best course of action. "
                 "If page creation fails completely, return 'ERROR: Page creation failed. <reason>'"
             ),

@@ -159,6 +159,13 @@ class ConfluenceConnector(DocumentFetcher, DocumentPusher):
         response.raise_for_status()
         return response.status_code == 200
 
+    def delete_page(self, page_id: str) -> bool:
+        """Permanently delete a Confluence page by ID (moves it to trash)."""
+        url = f"{self.base_url}/content/{page_id}"
+        response = requests.delete(url, auth=self.auth, headers={"Accept": "application/json"}, timeout=15)
+        response.raise_for_status()
+        return response.status_code in (200, 204)
+
     def create_page(self, space_key: Optional[str], title: str, content: str, parent_page_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a new page under the given space (and optional parent)."""
         resolved_space_key = (space_key or self.default_space_key).strip()

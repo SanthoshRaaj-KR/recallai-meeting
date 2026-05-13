@@ -23,6 +23,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from io import BytesIO
 from itertools import count
+from pathlib import Path
 from threading import Thread
 from typing import Any, Deque, Iterator, Optional
 from uuid import uuid4
@@ -49,7 +50,9 @@ from confluence_logic import graph_rag
 from confluence_logic import confluence_page_graph
 from confluence_logic.agents.proposed_changes_agent import ProposedChangesAgent
 
-load_dotenv()
+_MODULE_DIR = Path(__file__).resolve().parent
+load_dotenv(_MODULE_DIR.parent / ".env")
+load_dotenv(_MODULE_DIR / ".env", override=True)
 
 RECALL_API_KEY = os.getenv("RECALL_API_KEY")
 RECALL_API_REGION = os.getenv("RECALL_API_REGION", "ap-northeast-1")
@@ -800,7 +803,19 @@ def build_transcript_provider_config() -> dict:
 
 def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None) -> dict:
     stream_path = f"/recall-audio-stream/{session_id}" if session_id else "/recall-audio-stream"
-    ws_url = WEBHOOK_URL.replace("https://", "wss://") + stream_path
+    if not WEBHOOK_URL:
+        raise RuntimeError(
+            "WEBHOOK_URL is not configured. Set it in confluence_logic/.env or the process environment."
+        )
+
+    if WEBHOOK_URL.startswith("https://"):
+        ws_base = WEBHOOK_URL.replace("https://", "wss://", 1)
+    elif WEBHOOK_URL.startswith("http://"):
+        ws_base = WEBHOOK_URL.replace("http://", "ws://", 1)
+    else:
+        ws_base = WEBHOOK_URL
+
+    ws_url = ws_base + stream_path
     return {
         "meeting_url": meeting_url,
         "bot_name": BOT_NAME,

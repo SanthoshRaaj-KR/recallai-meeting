@@ -42,6 +42,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _openai_client: Optional[OpenAI] = None
+_confluence_connector = None
+
+
+def _get_connector():
+    """Lazy singleton ConfluenceConnector. Raises ValueError if credentials are missing."""
+    global _confluence_connector
+    if _confluence_connector is None:
+        from confluence_logic.connectors.confluence import ConfluenceConnector  # noqa: PLC0415
+        _confluence_connector = ConfluenceConnector()
+    return _confluence_connector
 
 # NOTE: The SSE `stage` field uses UI-SPEC names (fact_extraction, rag_retrieval,
 # drafting, verification). The Supabase `update_pipeline_job` calls may use
@@ -1090,49 +1100,66 @@ def _format_approved_change_request(change: Dict[str, Any]) -> str:
         if template_content:
             template_block = (
                 f"\n\nTEMPLATE (fetched live from '{template_title}'):\n"
-                f"Copy this structure and replace every reference to '{template_title}' with '{page_title}':\n\n"
+                f"Adapt this structure for '{page_title}' — keep the same sections and formatting, "
+                f"replace all mentions of '{template_title}' with '{page_title}', update content to match the meeting context:\n\n"
                 f"{template_content}"
             )
         return (
-            f"Create a new Confluence page.\n\n"
-            f"TITLE (exact): {page_title}\n"
-            f"HEADING: {heading or page_title}\n\n"
-            f"PAGE BODY:\n{after or f'## {page_title}'}\n"
+            f"Create a new Confluence page with professional documentation content.\n\n"
+            f"TITLE (exact, do not change): {page_title}\n"
+            f"RATIONALE: {rationale}\n"
+            f"MEETING CONTEXT (use this to understand what the page should contain — do NOT copy it verbatim as page body):\n{after}\n"
             f"{template_block}\n\n"
-            f"RATIONALE: {rationale}\n\n"
             f"Steps:\n"
             f"1. Search for '{page_title}' — if it already exists, do NOT create a duplicate.\n"
             f"2. Use create_new_page with title exactly: {page_title}\n"
-            f"3. Use the PAGE BODY above as content.\n"
-            f"4. Do NOT edit any existing page. Only create."
+            f"3. Write proper professional Confluence content for '{page_title}':\n"
+            f"   - Do NOT paste the MEETING CONTEXT as the page body — it is a description for reviewers, not documentation.\n"
+            f"   - Write actual documentation: use ## headings, **bold** for key terms, bullet lists.\n"
+            f"   - Be factual, third-person, professional. Content should read like real documentation.\n"
+            f"   {'- Use the TEMPLATE above as the structural model.' if template_content else ''}\n"
+            f"4. Do NOT edit any existing page."
         )
 
     elif change_type == "delete":
-        scope = f"section '{heading}'" if heading else "entire page content"
+        if heading:
+            delete_steps = (
+                f"1. Search for '{page_title}' to find the page.\n"
+                f"2. Fetch the live page with fetch_live_page.\n"
+                f"3. Use preview_delete then commit_delete to remove section '{heading}' (delete_entire_section=True).\n"
+                f"Do NOT delete the entire page. Do NOT create any pages."
+            )
+            scope = f"section '{heading}' within the page"
+        else:
+            delete_steps = (
+                f"1. Search for '{page_title}' to find the exact page_id (use '{page_id}' if valid, otherwise search).\n"
+                f"2. Call delete_confluence_page(page_id) to permanently delete the entire page.\n"
+                f"   IMPORTANT: Use delete_confluence_page — NOT commit_delete. commit_delete only empties content; the page shell remains.\n"
+                f"Do NOT just clear the page body. Do NOT create any pages."
+            )
+            scope = "entire page (permanently deleted)"
         return (
-            f"Delete content from Confluence.\n\n"
+            f"Delete from Confluence.\n\n"
             f"TARGET PAGE: {page_title} (id: {page_id})\n"
             f"SCOPE: {scope}\n\n"
             f"CONTENT TO REMOVE:\n{before or '[see live page]'}\n\n"
             f"RATIONALE: {rationale}\n\n"
-            f"Steps:\n"
-            f"1. Search for '{page_title}' to verify it exists.\n"
-            f"2. Fetch the live page.\n"
-            f"3. {'Delete the section: ' + heading if heading else 'Delete the entire page body.'}\n"
-            f"4. Commit the deletion.\n"
-            f"Do NOT create any pages."
+            f"Steps:\n{delete_steps}"
         )
 
     elif change_type == "title":
+        search_hint = f"Use page_id {page_id} directly." if page_id and page_id != "NONE" else f"Search for '{page_title}' to find the exact page_id."
         return (
-            f"Rename a Confluence page.\n\n"
+            f"Rename an existing Confluence page.\n\n"
             f"CURRENT TITLE: {page_title} (id: {page_id})\n"
             f"NEW TITLE: {after}\n\n"
             f"RATIONALE: {rationale}\n\n"
             f"Steps:\n"
-            f"1. Search for '{page_title}' to find the exact page.\n"
-            f"2. Call update_page_title to rename it to exactly: {after}\n"
-            f"3. Do NOT create a new page — rename the existing one."
+            f"1. {search_hint}\n"
+            f"2. Call fetch_live_page to get the current version number.\n"
+            f"3. Call update_page_title(page_id, expected_version, '{after}') to rename it.\n"
+            f"4. Do NOT create a new page — rename the existing one only.\n"
+            f"5. Do NOT edit any page content — only the title changes."
         )
 
     else:  # edit
@@ -1153,12 +1180,270 @@ def _format_approved_change_request(change: Dict[str, Any]) -> str:
         )
 
 
-async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[str, Any]:
-    """Execute a Supabase-backed pipeline proposal.
+async def _resolve_page_id(page_id: Optional[str], page_title: str) -> Optional[str]:
+    """Return a verified page_id: use the one we have if set, otherwise search by title."""
+    if page_id:
+        return page_id
+    if not page_title:
+        return None
+    try:
+        connector = _get_connector()
+        results = await asyncio.to_thread(connector.search_pages, page_title, 5)
+        for r in results:
+            if r.get("title", "").strip().lower() == page_title.strip().lower():
+                return r["page_id"]
+        if results:
+            return results[0]["page_id"]
+    except Exception as exc:
+        logger.debug("_resolve_page_id search failed for '%s': %s", page_title, exc)
+    return None
 
-    Re-fetches live Confluence content at execution time so the EditorAgent
-    receives the actual current page text, not the stale LLM-generated summary.
+
+def _completion_opts(model: str, max_tokens: int) -> Dict[str, Any]:
+    """Return model-appropriate token-limit key (max_tokens vs max_completion_tokens)."""
+    if model.startswith(("gpt-5", "o1", "o3", "o4")):
+        return {"model": model, "max_completion_tokens": max_tokens}
+    return {"model": model, "max_tokens": max_tokens, "temperature": 0.3}
+
+
+async def _generate_page_content(title: str, context: str, rationale: str) -> str:
+    """Ask the LLM to write proper Confluence documentation content for a new page.
+
+    The proposal's after_content is a change description for human review — not page body.
+    This function turns the description into actual documentation HTML.
     """
+    from openai import OpenAI as _OpenAI  # noqa: PLC0415
+    from confluence_logic.utils.html_builder import markdown_to_html  # noqa: PLC0415
+    prompt = (
+        f"Write professional Confluence documentation content for a page titled \"{title}\".\n\n"
+        f"Meeting context (what was decided):\n{context}\n\n"
+        f"Rationale:\n{rationale}\n\n"
+        "Requirements:\n"
+        "- Write ACTUAL documentation — not a description of what to write\n"
+        "- Use Confluence Storage Format HTML: <h2>, <p>, <strong>, <ul>, <li>\n"
+        "- Be specific, factual, third-person, professional\n"
+        "- 3-6 paragraphs or sections appropriate for team documentation\n"
+        "- Return ONLY the HTML body content, no <html>/<body> wrapper, no explanation"
+    )
+    try:
+        client = _OpenAI()
+        opts = _completion_opts(JARVIS_REVIEW_MODEL, 800)
+        response = await asyncio.to_thread(
+            lambda: client.chat.completions.create(
+                **opts,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.M)
+        raw = re.sub(r"\n?```$", "", raw, flags=re.M)
+        return markdown_to_html(raw) if raw and "<" not in raw else raw
+    except Exception as exc:
+        logger.warning("_generate_page_content LLM call failed: %s", exc)
+        from confluence_logic.utils.html_builder import markdown_to_html as _mth  # noqa: PLC0415
+        return _mth(context) or f"<h2>{title}</h2><p>{rationale}</p>"
+
+
+_EXPLICIT_CREATE_PHRASES = (
+    "create a new", "add a new page", "new page for", "new confluence page",
+    "create page", "make a new page", "create a page",
+)
+
+
+def _is_explicit_create(text: str) -> bool:
+    """Return True if rationale/after_content explicitly asks for page creation."""
+    lowered = (text or "").lower()
+    return any(phrase in lowered for phrase in _EXPLICIT_CREATE_PHRASES)
+
+
+async def _find_editable_page_for_topic(title: str, context: str) -> Optional[Dict[str, Any]]:
+    """Search for an existing page that covers the same topic before creating a new one.
+
+    Returns a page dict {page_id, title, relevant_content} if a relevant page is found,
+    or None if nothing close exists and a new page should be created.
+    """
+    try:
+        connector = _get_connector()
+        # Search with page title words as query terms
+        words = [w for w in re.split(r"\W+", title) if len(w) > 2]
+        query = " ".join(words[:6]) if words else title
+        results = await asyncio.to_thread(connector.search_pages, query, 5)
+        for r in results:
+            r_title = (r.get("title") or "").strip()
+            # Exact or very close title match = the page already exists
+            if r_title.lower() == title.lower():
+                return {"page_id": r["page_id"], "title": r_title, "existing": True}
+            # Overlapping title words = related page that could be edited instead
+            r_words = set(re.split(r"\W+", r_title.lower()))
+            t_words = set(re.split(r"\W+", title.lower()))
+            overlap = r_words & t_words - {"", "a", "an", "the", "of", "in", "for"}
+            if len(overlap) >= max(1, len(t_words) // 2):
+                return {"page_id": r["page_id"], "title": r_title, "existing": False}
+    except Exception as exc:
+        logger.debug("_find_editable_page_for_topic failed for '%s': %s", title, exc)
+    return None
+
+
+async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute a pipeline proposal directly via Confluence REST API calls.
+
+    Does NOT route through the AI EditorAgent — all data was already determined
+    in the proposal stage, so re-deriving it with AI only adds error surface.
+    Markdown in after_content is converted to Confluence Storage Format HTML.
+
+    Returns {"success": bool, "error": str|None}.
+    """
+    from confluence_logic.utils.html_builder import markdown_to_html  # noqa: PLC0415
+    from confluence_logic.utils.html_parser import (  # noqa: PLC0415
+        edit_block_in_section, delete_content_in_section, extract_headings,
+    )
+
+    change_type = (proposal.get("change_type") or "edit").lower()
+    page_title = proposal.get("page_title") or ""
+    page_id = proposal.get("page_id")
+    heading = proposal.get("section_heading")
+    after_content = proposal.get("after_content") or ""
+    rationale = proposal.get("rationale") or ""
+
+    try:
+        connector = _get_connector()
+    except Exception as exc:
+        return {"success": False, "error": f"Confluence connector unavailable: {exc}"}
+
+    # ── CREATE ────────────────────────────────────────────────────────────────
+    if change_type == "create":
+        html_content = await _generate_page_content(page_title, after_content, rationale)
+        if heading:
+            html_content = f"<h2>{heading}</h2>\n{html_content}"
+
+        explicit = _is_explicit_create(rationale) or _is_explicit_create(after_content)
+
+        # Look for: (a) exact page match → update it; (b) related page → edit it (unless explicit create)
+        related = await _find_editable_page_for_topic(page_title, after_content)
+
+        if related and related.get("existing"):
+            # Page already exists — overwrite its content with proper generated HTML
+            existing_id = related["page_id"]
+            logger.info("Page '%s' already exists (%s) — updating content", page_title, existing_id)
+            try:
+                meta = await asyncio.to_thread(connector.get_page_metadata, existing_id)
+                version = meta.get("version", {}).get("number", 1)
+                success = await asyncio.to_thread(connector.push_update, existing_id, html_content, version)
+                return {"success": success, "note": "Updated existing page with proper content"}
+            except Exception as exc:
+                return {"success": False, "error": f"Update of existing page failed: {exc}"}
+
+        if related and not related.get("existing") and not explicit:
+            # A related page exists and we weren't explicitly told to create — edit that page
+            rel_id = related["page_id"]
+            rel_title = related["title"]
+            logger.info(
+                "Found related page '%s' (%s) — editing it instead of creating '%s'",
+                rel_title, rel_id, page_title,
+            )
+            try:
+                live_html = await asyncio.to_thread(connector.fetch_page_html, rel_id)
+                meta = await asyncio.to_thread(connector.get_page_metadata, rel_id)
+                version = meta.get("version", {}).get("number", 1)
+                # Append the new content at the end of the existing page
+                combined_html = live_html.rstrip() + "\n" + html_content
+                success = await asyncio.to_thread(connector.push_update, rel_id, combined_html, version)
+                return {"success": success, "note": f"Appended to related page '{rel_title}'"}
+            except Exception as exc:
+                logger.warning("Edit of related page failed, falling back to create: %s", exc)
+                # Fall through to create
+
+        # No suitable existing page — create a new one
+        try:
+            result = await asyncio.to_thread(connector.create_page, None, page_title, html_content, None)
+            new_id = result.get("id")
+            if new_id:
+                logger.info("Created page '%s' → %s", page_title, new_id)
+                return {"success": True, "page_id": new_id}
+            return {"success": False, "error": "create_page returned no ID"}
+        except Exception as exc:
+            return {"success": False, "error": f"Create failed: {exc}"}
+
+    # ── RESOLVE PAGE ID (required for all other change types) ─────────────────
+    resolved_id = await _resolve_page_id(page_id, page_title)
+    if not resolved_id:
+        return {"success": False, "error": f"Could not find Confluence page '{page_title}'"}
+
+    # ── DELETE ────────────────────────────────────────────────────────────────
+    if change_type == "delete":
+        try:
+            if heading:
+                # Delete a specific section inside the page
+                live_html = await asyncio.to_thread(connector.fetch_page_html, resolved_id)
+                meta = await asyncio.to_thread(connector.get_page_metadata, resolved_id)
+                version = meta.get("version", {}).get("number", 1)
+
+                # Fuzzy heading match against available headings
+                available = extract_headings(live_html)
+                matched_heading = heading
+                h_lower = heading.lower()
+                for h in available:
+                    if h_lower in h.lower() or h.lower() in h_lower:
+                        matched_heading = h
+                        break
+
+                new_html = delete_content_in_section(live_html, matched_heading, "", delete_entire_section=True)
+                success = await asyncio.to_thread(connector.push_update, resolved_id, new_html, version)
+                return {"success": success, "error": None if success else "push_update returned false"}
+            else:
+                # Delete the entire page
+                success = await asyncio.to_thread(connector.delete_page, resolved_id)
+                return {"success": success}
+        except Exception as exc:
+            return {"success": False, "error": f"Delete failed: {exc}"}
+
+    # ── TITLE (rename) ────────────────────────────────────────────────────────
+    if change_type == "title":
+        new_title = after_content.strip()
+        if not new_title:
+            return {"success": False, "error": "No new title specified in after_content"}
+        try:
+            meta = await asyncio.to_thread(connector.get_page_metadata, resolved_id)
+            version = meta.get("version", {}).get("number", 1)
+            live_html = await asyncio.to_thread(connector.fetch_page_html, resolved_id)
+            success = await asyncio.to_thread(connector.push_update, resolved_id, live_html, version, new_title)
+            return {"success": success}
+        except Exception as exc:
+            return {"success": False, "error": f"Rename failed: {exc}"}
+
+    # ── EDIT ──────────────────────────────────────────────────────────────────
+    try:
+        live_html = await asyncio.to_thread(connector.fetch_page_html, resolved_id)
+        meta = await asyncio.to_thread(connector.get_page_metadata, resolved_id)
+        version = meta.get("version", {}).get("number", 1)
+
+        new_block_html = markdown_to_html(after_content)
+
+        # Resolve the target section heading (fuzzy match against the live page)
+        target_heading = "FULL_PAGE"
+        if heading:
+            available = extract_headings(live_html)
+            h_lower = heading.lower()
+            for h in available:
+                if h_lower in h.lower() or h.lower() in h_lower:
+                    target_heading = h
+                    break
+            else:
+                target_heading = heading  # keep as-is; html_parser will raise if not found
+
+        new_html = edit_block_in_section(live_html, target_heading, "", new_block_html)
+        success = await asyncio.to_thread(connector.push_update, resolved_id, new_html, version)
+        return {"success": success, "error": None if success else "push_update returned false"}
+    except ValueError as exc:
+        # Heading not found or ambiguous — fall through to EditorAgent
+        logger.warning("Direct edit failed for '%s' (heading issue): %s — will try EditorAgent", page_title, exc)
+        return {"success": False, "error": str(exc), "_try_agent": True}
+    except Exception as exc:
+        return {"success": False, "error": f"Edit failed: {exc}"}
+
+
+async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[str, Any]:
+    """Execute a pipeline proposal: direct API call first, EditorAgent fallback for complex edits."""
     proposal = supabase_store.get_proposal_by_id(proposal_id)
     if not proposal:
         return {"success": False, "message": "Proposal not found."}
@@ -1171,54 +1456,32 @@ async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[
 
     supabase_store.update_proposal_status(proposal_id, "accepted")
 
-    change_type = proposal.get("change_type", "edit")
-    page_title = proposal.get("page_title") or ""
-    page_id = proposal.get("page_id")
-    heading = proposal.get("section_heading")
+    # Attempt direct execution first — deterministic, no AI re-reasoning needed.
+    result = await _direct_apply_change(proposal)
 
-    change = {
-        "id": proposal_id,
-        "change_type": change_type,
-        "page_id": page_id,
-        "page_title": page_title,
-        "section_heading": heading,
-        "before_content": proposal.get("before_content"),
-        "after_content": proposal.get("after_content"),
-        "rationale": proposal.get("rationale"),
-        "status": "pending",
-    }
+    # If direct edit failed because of a heading mismatch, fall back to the EditorAgent
+    # which can use search + fetch to locate the right section dynamically.
+    if not result.get("success") and result.get("_try_agent"):
+        logger.info("Falling back to EditorAgent for proposal %s", proposal_id)
+        change = {
+            "id": proposal_id,
+            "change_type": proposal.get("change_type", "edit"),
+            "page_id": proposal.get("page_id"),
+            "page_title": proposal.get("page_title") or "",
+            "section_heading": proposal.get("section_heading"),
+            "before_content": proposal.get("before_content"),
+            "after_content": proposal.get("after_content"),
+            "rationale": proposal.get("rationale"),
+            "status": "pending",
+        }
+        state = _get_meeting_state(session_id)
+        if proposal.get("user_id") and not state.get("auth_user_id"):
+            state["auth_user_id"] = proposal["user_id"]
+        agent_result = await _execute_single_change(state, change)
+        result = {"success": agent_result.get("success", False), "error": agent_result.get("error")}
 
-    # Re-fetch live content at execution time — page may have changed since proposal was created.
-    # This gives the EditorAgent real, current content to target precisely.
-    if change_type in ("edit", "delete", "title"):
-        verified_id, live_text = await _fetch_live_page_content(page_id, page_title, heading)
-        if verified_id:
-            change["page_id"] = verified_id
-        if live_text:
-            change["before_content"] = live_text
-
-    elif change_type == "create":
-        # Re-fetch template if referenced in after_content/rationale
-        combined = f"{proposal.get('rationale', '')} {proposal.get('after_content', '')}"
-        import re as _re
-        bold_refs = _re.findall(r'\*\*([^*]+)\*\*', combined)
-        for ref in bold_refs:
-            if ref.strip() and ref.strip().lower() != page_title.lower():
-                t_id, t_content = await _fetch_live_page_content(None, ref.strip(), None)
-                if t_content:
-                    change["_template_page_id"] = t_id
-                    change["_template_page_title"] = ref.strip()
-                    change["_template_content"] = t_content
-                    break
-
-    state = _get_meeting_state(session_id)
-    if proposal.get("user_id") and not state.get("auth_user_id"):
-        state["auth_user_id"] = proposal["user_id"]
-
-    result = await _execute_single_change(state, change)
     final_status = "executed" if result.get("success") else "failed"
     supabase_store.update_proposal_status(proposal_id, final_status)
-
     return {"success": result.get("success", False), "message": result.get("error")}
 
 
@@ -1723,6 +1986,34 @@ async def _draft_verify_persist(
         )
 
 
+async def _sync_recent_pinecone_pages(limit: int = 30) -> None:
+    """Inline (blocking) sync for the most recently modified Confluence pages.
+
+    Fetches the `limit` most-recently-modified pages and re-embeds any whose
+    Confluence version doesn't match what's stored in Pinecone.  Runs inline
+    in the pipeline so the current run always sees up-to-date embeddings for
+    pages edited directly in Confluence since the last pipeline run.
+
+    Skips unchanged pages instantly (version check in process_page), so this
+    adds < 1 second of overhead for a workspace where nothing changed.
+    """
+    try:
+        from confluence_logic.ingestion.doc_pipeline import IngestionPipeline  # noqa: PLC0415
+        connector = _get_connector()
+        pages = await asyncio.to_thread(connector.list_pages, limit)
+        pipeline = IngestionPipeline()
+        for page in pages:
+            page_id = page.get("page_id")
+            if not page_id:
+                continue
+            try:
+                await asyncio.to_thread(pipeline.process_page, page_id)
+            except Exception as exc:
+                logger.debug("Inline Pinecone sync skipped page %s: %s", page_id, exc)
+    except Exception as exc:
+        logger.debug("Inline Pinecone sync failed (non-fatal): %s", exc)
+
+
 async def _auto_index_pinecone_background(graph_user_id: str) -> None:
     """Fire-and-forget: index new/changed Confluence pages into Pinecone.
 
@@ -1731,9 +2022,12 @@ async def _auto_index_pinecone_background(graph_user_id: str) -> None:
     Never blocks the pipeline — called via asyncio.create_task.
     """
     try:
-        from confluence_logic.ingestion.doc_pipeline import IngestionPipeline
+        from confluence_logic.ingestion.doc_pipeline import IngestionPipeline  # noqa: PLC0415
+        from confluence_logic.confluence_page_graph import MAX_INDEX_PAGES  # noqa: PLC0415
         connector = _get_connector()
-        pages = await asyncio.to_thread(connector.list_pages, JARVIS_PIPELINE_MAX_PAGES)
+        # Index the full workspace — use the same ceiling as Neo4j graph (default 500).
+        # This is intentionally larger than JARVIS_PIPELINE_MAX_PAGES (candidate cap per run).
+        pages = await asyncio.to_thread(connector.list_pages, MAX_INDEX_PAGES)
         pipeline = IngestionPipeline()
         for page in pages:
             page_id = page.get("page_id")
@@ -1759,15 +2053,57 @@ async def _verify_and_persist(
         change_type = draft.get("change_type", "edit")
 
         # Fetch real Confluence content so before_content shows actual page text, not LLM guess.
-        # This makes the card reviewable: the user sees exactly what exists now vs what will change.
+        # Also corrects section_heading: instead of trusting the LLM's heading guess, we scan
+        # the live page HTML to find which section actually contains the target content.
         if change_type in ("edit", "delete", "title"):
-            verified_id, live_text = await _fetch_live_page_content(
-                draft.get("page_id"), draft.get("page_title", ""), draft.get("section_heading")
-            )
-            if verified_id:
-                draft["page_id"] = verified_id
-            if live_text:
-                draft["before_content"] = live_text
+            page_id = draft.get("page_id")
+            page_title = draft.get("page_title", "")
+            llm_heading = draft.get("section_heading")
+            llm_before = draft.get("before_content") or ""
+
+            # Fetch full page HTML once — used for both content and section correction
+            actual_id: Optional[str] = None
+            live_html: Optional[str] = None
+            try:
+                connector = _get_connector()
+                actual_id = page_id
+                if not actual_id:
+                    results = await asyncio.to_thread(connector.search_pages, page_title, 5)
+                    for r in results:
+                        if r.get("title", "").strip().lower() == page_title.strip().lower():
+                            actual_id = r["page_id"]
+                            break
+                    if not actual_id and results:
+                        actual_id = results[0]["page_id"]
+                if actual_id:
+                    live_html = await asyncio.to_thread(connector.fetch_page_html, actual_id)
+            except Exception as exc:
+                logger.debug("Live fetch failed in verify-persist (non-fatal): %s", exc)
+
+            if actual_id:
+                draft["page_id"] = actual_id
+            if live_html:
+                full_text = _html_to_text(live_html)
+                # If the proposal said to target a specific section, extract just that section's text
+                # to give the user a focused before_content view on the card.
+                section_text: Optional[str] = None
+                if llm_heading:
+                    _, section_text = await _fetch_live_page_content(actual_id, page_title, llm_heading)
+                draft["before_content"] = section_text or full_text[:2000]
+
+                # Correct section_heading: if the LLM guessed wrong or the phrase lives in
+                # a different section, scan the live HTML to find the real section.
+                if llm_before:
+                    real_heading = _find_section_for_content(live_html, llm_before)
+                    if real_heading:
+                        draft["section_heading"] = real_heading
+                elif not llm_heading and actual_id:
+                    # No heading from LLM — try to locate after_content target in the page
+                    after = draft.get("after_content") or ""
+                    if after:
+                        real_heading = _find_section_for_content(live_html, after)
+                        if real_heading:
+                            draft["section_heading"] = real_heading
 
         elif change_type == "create":
             # For creates: try to find a template page and store its content for execution
@@ -1810,6 +2146,89 @@ def _html_to_text(html: str) -> str:
     return soup.get_text(separator="\n", strip=True)[:4000]
 
 
+def _find_section_for_content(html: str, target_text: str) -> Optional[str]:
+    """Return the heading name of the section in `html` that contains `target_text`.
+
+    Used to fix wrong section_heading: instead of trusting the LLM's guess, we
+    scan the actual page HTML to find where the content lives.
+    Returns None if the text spans multiple sections or can't be located.
+    """
+    if not html or not target_text:
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    needle = " ".join(target_text.lower().split())[:120]
+
+    current_heading: Optional[str] = None
+    for element in soup.find_all(True):
+        tag = element.name or ""
+        if re.match(r"^h[1-6]$", tag):
+            current_heading = element.get_text(" ", strip=True) or None
+        else:
+            text = " ".join((element.get_text(" ", strip=True) or "").lower().split())
+            if needle and needle[:60] in text:
+                return current_heading
+
+    return None
+
+
+async def _content_phrase_search(phrases: List[str]) -> List[Dict[str, Any]]:
+    """Search Confluence for every page whose full-text contains any of `phrases`.
+
+    Unlike _live_confluence_search (topic-keyword search), this does an exact phrase
+    search so pages are found regardless of keyword ranking. Intended for "change X to Y"
+    changes where X is a specific string that must appear in the page content.
+    """
+    if not phrases:
+        return []
+
+    try:
+        connector = _get_connector()
+    except Exception:
+        return []
+
+    seen_ids: set = set()
+    pages: List[Dict[str, Any]] = []
+
+    for phrase in phrases[:10]:
+        phrase = (phrase or "").strip()
+        if not phrase or len(phrase) < 4:
+            continue
+        try:
+            # CQL text ~ performs a full-text search across all page content
+            results = await asyncio.to_thread(connector.search_pages, phrase, 15)
+            for r in results:
+                page_id = r.get("page_id")
+                if not page_id or page_id in seen_ids:
+                    continue
+                seen_ids.add(page_id)
+                try:
+                    html = await asyncio.to_thread(connector.fetch_page_html, page_id)
+                    full_text = _html_to_text(html)
+                    # Only include pages where the phrase actually appears in content
+                    if phrase.lower() not in full_text.lower():
+                        continue
+                    # Find the exact section containing the phrase
+                    section_heading = _find_section_for_content(html, phrase)
+                    pages.append({
+                        "page_id": page_id,
+                        "title": r.get("title", ""),
+                        "space_key": r.get("space_key", ""),
+                        "relevant_content": full_text,
+                        "section_heading": section_heading,
+                        "score": 1.5,
+                        "source": "content_phrase_match",
+                    })
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("Content phrase search failed for '%s': %s", phrase, exc)
+
+    if pages:
+        logger.info("Content phrase search found %d pages for %d phrases", len(pages), len(phrases))
+    return pages
+
+
 async def _live_confluence_search(query_terms: List[str]) -> List[Dict[str, Any]]:
     """Search the user's Confluence workspace live via CQL for each query term.
 
@@ -1829,7 +2248,7 @@ async def _live_confluence_search(query_terms: List[str]) -> List[Dict[str, Any]
         if len(pages) >= JARVIS_PIPELINE_MAX_PAGES:
             break
         try:
-            results = await asyncio.to_thread(connector.search_pages, term, 5)
+            results = await asyncio.to_thread(connector.search_pages, term, 10)
             for r in results:
                 page_id = r.get("page_id")
                 if not page_id or page_id in seen_ids:
@@ -1854,6 +2273,58 @@ async def _live_confluence_search(query_terms: List[str]) -> List[Dict[str, Any]
         except Exception as exc:
             logger.warning("Live Confluence search failed for term '%s': %s", term, exc)
 
+    return pages
+
+
+async def _direct_title_search(page_titles: List[str]) -> List[Dict[str, Any]]:
+    """Search Confluence for pages whose titles exactly or closely match spoken page names.
+
+    Uses a CQL title match (case-insensitive fuzzy) for each title extracted by the
+    fact agent.  This guarantees that any page explicitly named in the meeting is in
+    the candidate set regardless of how it ranks in the broad keyword search — solving
+    the "1 page in 1000" problem without scanning the whole workspace.
+    """
+    if not page_titles:
+        return []
+
+    try:
+        connector = _get_connector()
+    except Exception:
+        return []
+
+    seen_ids: set = set()
+    pages: List[Dict[str, Any]] = []
+
+    for raw_title in page_titles[:20]:
+        title = (raw_title or "").strip()
+        if not title or len(title) < 3:
+            continue
+        try:
+            # Try exact title first, then fuzzy
+            results = await asyncio.to_thread(connector.search_pages, title, 3)
+            for r in results:
+                page_id = r.get("page_id")
+                if not page_id or page_id in seen_ids:
+                    continue
+                seen_ids.add(page_id)
+                try:
+                    html = await asyncio.to_thread(connector.fetch_page_html, page_id)
+                    relevant_content = _html_to_text(html)
+                except Exception:
+                    relevant_content = r.get("excerpt") or ""
+                pages.append({
+                    "page_id": page_id,
+                    "title": r.get("title", ""),
+                    "space_key": r.get("space_key", ""),
+                    "relevant_content": relevant_content,
+                    "score": 2.0,  # high score — explicit mention in transcript
+                    "source": "direct_title_match",
+                })
+        except Exception as exc:
+            logger.debug("Direct title search failed for '%s': %s", title, exc)
+
+    if pages:
+        logger.info("Direct title search found %d pages for %d mentioned titles", len(pages), len(page_titles))
     return pages
 
 
@@ -1926,15 +2397,24 @@ async def _run_pipeline(
         # writes them to Neo4j; every subsequent run within 2 hours returns instantly.
         await confluence_page_graph.ensure_user_confluence_graph(graph_user_id)
 
-        # Step 2b: Kick off Pinecone auto-index as a fire-and-forget background task.
-        # Uses per-page version checks so only changed pages are re-embedded.
-        # Does NOT block the current pipeline — indexes for future runs.
+        # Step 2b: Pinecone sync — two-phase:
+        #   Phase 1 (inline, fast): reindex only the recently-modified pages so this
+        #     pipeline run sees up-to-date embeddings for any pages edited since the last run.
+        #   Phase 2 (background, slow): sweep the rest of the workspace for version changes.
+        await _sync_recent_pinecone_pages(limit=30)
         asyncio.create_task(_auto_index_pinecone_background(graph_user_id))
 
-        # Step 2c: RAG (now populated) + live CQL search in parallel.
-        rag_results, live_results = await asyncio.gather(
+        # Step 2c: Four parallel retrieval paths — all must complete before Stage 3.
+        #   1. RAG (Neo4j + Pinecone): semantic and graph-based relevance
+        #   2. Keyword live search: broad CQL topic-keyword search
+        #   3. Direct title match: guarantees explicitly-named pages are always found
+        #   4. Content phrase search: finds every page containing the specific text being changed
+        #      (e.g., "OpenAI Agents SDK" → finds ALL pages mentioning it, not just top-ranked ones)
+        rag_results, live_results, title_results, phrase_results = await asyncio.gather(
             _merged_rag_retrieval(graph_user_id, facts.query_terms),
             _live_confluence_search(facts.query_terms),
+            _direct_title_search(facts.mentioned_page_titles),
+            _content_phrase_search(facts.content_phrases),
             return_exceptions=True,
         )
         if isinstance(rag_results, Exception):
@@ -1943,18 +2423,50 @@ async def _run_pipeline(
         if isinstance(live_results, Exception):
             logger.warning("Live search error (non-fatal): %s", live_results)
             live_results = []
+        if isinstance(title_results, Exception):
+            logger.warning("Direct title search error (non-fatal): %s", title_results)
+            title_results = []
+        if isinstance(phrase_results, Exception):
+            logger.warning("Content phrase search error (non-fatal): %s", phrase_results)
+            phrase_results = []
 
-        # Merge: prefer RAG entries (have scored relevance); fill in live results for new page_ids
-        rag_ids = {p.get("page_id") for p in rag_results if p.get("page_id")}
-        extra_live = [p for p in live_results if p.get("page_id") not in rag_ids]
+        logger.info(
+            "Retrieval: rag=%d live=%d title=%d phrase=%d",
+            len(rag_results), len(live_results), len(title_results), len(phrase_results),
+        )
 
-        # For RAG pages missing relevant_content, backfill from live results
-        live_by_id = {p["page_id"]: p for p in live_results if p.get("page_id")}
+        # Merge priority: phrase match (highest — exact content hit) > title match > RAG > keyword.
+        all_ids_by_priority: set = set()
+        ordered: List[Dict[str, Any]] = []
+
+        for p in phrase_results:
+            pid = p.get("page_id")
+            if pid and pid not in all_ids_by_priority:
+                all_ids_by_priority.add(pid)
+                ordered.append(p)
+        for p in title_results:
+            pid = p.get("page_id")
+            if pid and pid not in all_ids_by_priority:
+                all_ids_by_priority.add(pid)
+                ordered.append(p)
         for p in rag_results:
+            pid = p.get("page_id")
+            if pid and pid not in all_ids_by_priority:
+                all_ids_by_priority.add(pid)
+                ordered.append(p)
+        for p in live_results:
+            pid = p.get("page_id")
+            if pid and pid not in all_ids_by_priority:
+                all_ids_by_priority.add(pid)
+                ordered.append(p)
+
+        # Backfill missing relevant_content from live results
+        live_by_id = {p["page_id"]: p for p in live_results if p.get("page_id")}
+        for p in ordered:
             if not p.get("relevant_content") and p.get("page_id") in live_by_id:
                 p["relevant_content"] = live_by_id[p["page_id"]].get("relevant_content", "")
 
-        candidate_pages = list(rag_results) + extra_live
+        candidate_pages = ordered
 
         # D-06: Zero-RAG fallback — generate create proposals from doc_worthy_updates
         if not candidate_pages and facts.doc_worthy_updates:

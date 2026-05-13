@@ -143,11 +143,40 @@ def _get_driver():
             from neo4j import AsyncGraphDatabase
             user = os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME", "neo4j")
             password = os.getenv("NEO4J_PASSWORD", "")
-            _driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+            # max_connection_lifetime=300 forces connections to refresh every 5 min,
+            # preventing stale TCP connections to AuraDB (which closes idle connections).
+            _driver = AsyncGraphDatabase.driver(
+                uri,
+                auth=(user, password),
+                max_connection_lifetime=300,
+                connection_timeout=30,
+                keep_alive=True,
+            )
         except Exception as e:
             logger.warning("Neo4j driver init failed: %s", e)
             return None
     return _driver
+
+
+def reset_driver() -> None:
+    """Force-reset the Neo4j driver singleton so the next call recreates it.
+
+    Call this when execute_query raises a connection-level error so the broken
+    driver is not reused indefinitely.
+    """
+    global _driver
+    old = _driver
+    _driver = None
+    if old is not None:
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(old.close())
+            else:
+                loop.run_until_complete(old.close())
+        except Exception:
+            pass
 
 
 # ---------- STT Normalization ----------

@@ -52,6 +52,16 @@ def test_build_create_bot_payload_uses_recall_provider_by_default():
     assert endpoint["url"] == "wss://example.ngrok-free.app/recall-audio-stream"
 
 
+def test_build_create_bot_payload_requires_webhook_url():
+    with patch.object(ja, "WEBHOOK_URL", None):
+        try:
+            ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
+        except RuntimeError as exc:
+            assert "WEBHOOK_URL" in str(exc)
+        else:
+            raise AssertionError("Expected RuntimeError when WEBHOOK_URL is missing")
+
+
 def test_confluence_read_query_detection_excludes_mutations():
     assert ja._is_confluence_read_query("what does the roadmap page say about launch")
     assert ja._is_confluence_read_query("list the Confluence pages")
@@ -86,7 +96,12 @@ def test_build_create_bot_payload_supports_assembly_provider_opt_in():
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
 
     provider = payload["recording_config"]["transcript"]["provider"]
-    assert provider == {"assembly_ai_v3_streaming": {}}
+    assert provider == {
+        "assembly_ai_v3_streaming": {
+            "language_code": "en",
+            "speech_model": "u3-rt-pro",
+        }
+    }
 
 
 def test_process_transcript_event_handles_inline_wake_word_query():

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(gsd-sdk query *)",
+      "Bash(git commit -m ' *)",
+      "Skill(gsd-discuss-phase)",
+      "Skill(gsd-execute-phase)",
+      "Skill(gsd-plan-phase)",
+      "Bash(git commit *)",
+      "Bash(conda run *)",
+      "Skill(gsd-code-review)",
+      "Skill(gsd-ui-phase)",
+      "Bash(python *)"
+    ]
+  }
+}

@@ -9,6 +9,7 @@ from ..db.vector_store import PineconeStore
 from ..connectors.confluence import ConfluenceConnector
 from ..core.schemas import SearchResponse, CandidatePage, LivePageResponse, PreviewResponse, CommitResponse, CreatePageResponse, PageSectionInput
 from ..utils.html_parser import delete_content_in_section, edit_block_in_section, extract_headings, get_section_html
+from ..utils.html_builder import markdown_to_html
 import logging
 from agents import function_tool
 from confluence_logic import confluence_page_graph
@@ -469,10 +470,12 @@ def commit_delete(
 def commit_document_edit(page_id: str, expected_version: int, heading_string: str, old_block_html: str = "", new_block_html: str = "") -> CommitResponse:
     """Commits a parsed structural sub-section DOM replacement securely using Op-Locking bounds."""
     try:
+        # Auto-convert markdown to Confluence HTML so agents can write either format.
+        new_html = markdown_to_html(new_block_html) if new_block_html else new_block_html
         _emit_mutation_started("edit")
         success, committed_version = _commit_with_retry(
             page_id,
-            apply_fn=lambda html: edit_block_in_section(html, heading_string, old_block_html, new_block_html),
+            apply_fn=lambda html: edit_block_in_section(html, heading_string, old_block_html, new_html),
             expected_version=expected_version,
         )
 
@@ -499,6 +502,30 @@ def commit_document_edit(page_id: str, expected_version: int, heading_string: st
         message = str(e)
         _tool_run_state.set({"last_action": "commit", "success": False, "message": message})
         return CommitResponse(success=False, version=None, message=message)
+
+@function_tool
+def delete_confluence_page(page_id: str) -> CommitResponse:
+    """Permanently deletes an entire Confluence page by its page_id.
+
+    Use this when the whole page should be removed (not just a section).
+    Do NOT use commit_delete for whole-page removal — that only empties content.
+    """
+    try:
+        _emit_mutation_started("delete_page")
+        success = get_connector().delete_page(page_id)
+        if success:
+            message = f"Page {page_id} permanently deleted."
+            _tool_run_state.set({"last_action": "commit", "success": True, "message": message})
+            return CommitResponse(success=True, version=None, message=message)
+        message = f"Page {page_id} delete returned unexpected status."
+        _tool_run_state.set({"last_action": "commit", "success": False, "message": message})
+        return CommitResponse(success=False, version=None, message=message)
+    except Exception as e:
+        logger.error("delete_confluence_page failed for %s: %s", page_id, e)
+        message = str(e)
+        _tool_run_state.set({"last_action": "commit", "success": False, "message": message})
+        return CommitResponse(success=False, version=None, message=message)
+
 
 @function_tool
 def create_confluence_page(

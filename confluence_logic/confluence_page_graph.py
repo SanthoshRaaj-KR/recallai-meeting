@@ -40,6 +40,24 @@ def _driver():
     return graph_rag._get_driver()
 
 
+def _is_connection_error(exc: Exception) -> bool:
+    """Return True for Neo4j errors that mean the driver should be reset."""
+    name = type(exc).__name__
+    msg = str(exc).lower()
+    return (
+        name in {"ServiceUnavailable", "SessionExpired", "DriverError"}
+        or "connectionreset" in msg
+        or "routing" in msg
+        or "defunct connection" in msg
+    )
+
+
+def _reset_driver_on_error(exc: Exception) -> None:
+    if _is_connection_error(exc):
+        logger.warning("Resetting Neo4j driver after connection error: %s", exc)
+        graph_rag.reset_driver()
+
+
 def set_current_graph_user_id(user_id: str):
     return _current_graph_user_id.set(user_id or "")
 
@@ -118,6 +136,9 @@ def _sections_from_html(html: str) -> List[Dict[str, Any]]:
     return sections[:80]
 
 
+_CONSTRAINTS_ENSURED: set[str] = set()
+
+
 async def _ensure_constraints(driver) -> None:
     import neo4j
 
@@ -128,7 +149,12 @@ async def _ensure_constraints(driver) -> None:
         "CREATE CONSTRAINT cf_term_scope IF NOT EXISTS FOR (t:CfTerm) REQUIRE (t.user_id, t.name) IS UNIQUE",
     ]
     for cypher in constraints:
+        # Skip if already confirmed by a previous call this process lifetime — avoids
+        # the repeated SCHEMA notification Neo4j sends when the constraint already exists.
+        if cypher in _CONSTRAINTS_ENSURED:
+            continue
         await driver.execute_query(cypher, routing_=neo4j.RoutingControl.WRITE)
+        _CONSTRAINTS_ENSURED.add(cypher)
 
 
 async def _is_fresh(driver, user_id: str) -> bool:
@@ -164,6 +190,7 @@ async def ensure_user_confluence_graph(user_id: str, force: bool = False) -> boo
         await _write_pages_incremental(driver, user_id, connector, pages)
         return True
     except Exception as exc:
+        _reset_driver_on_error(exc)
         logger.warning("Confluence page graph build failed for user %s: %s", user_id, exc)
         return False
 
@@ -347,6 +374,7 @@ async def query_user_confluence_graph(user_id: str, query: str, limit: int = MAX
             )
         return results
     except Exception as exc:
+        _reset_driver_on_error(exc)
         logger.warning("Confluence page graph query failed for user %s: %s", user_id, exc)
         return []
 
@@ -383,6 +411,7 @@ async def list_user_confluence_pages(user_id: str, limit: int = MAX_QUERY_RESULT
             for record in records
         ]
     except Exception as exc:
+        _reset_driver_on_error(exc)
         logger.warning("Could not list Confluence graph pages for user %s: %s", user_id, exc)
         return []
 
