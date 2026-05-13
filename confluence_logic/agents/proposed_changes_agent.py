@@ -34,12 +34,11 @@ class ProposedChangesAgent:
     @property
     def system_prompt(self) -> str:
         return (
-            "You are Jarvis, a Confluence documentation assistant. You receive structured meeting facts "
-            "(already extracted from the full transcript) and a list of relevant Confluence pages, "
-            "then propose clear, specific changes for a human to review and approve.\n\n"
-            "Your input contains: extracted_facts (decisions, action_items, doc_worthy_updates), "
-            "meeting_summary, retrieved_page_context (Confluence pages with content), "
-            "and transcript_tail (last portion of meeting for verbatim quotes).\n\n"
+            "You are Jarvis, a Confluence documentation assistant. You receive the full meeting transcript, "
+            "structured facts already extracted from it, and a list of relevant Confluence pages. "
+            "Propose clear, specific changes for a human to review and approve.\n\n"
+            "Your input contains: full_transcript, extracted_facts (decisions, action_items, doc_worthy_updates), "
+            "meeting_summary, and retrieved_page_context (Confluence pages with their current content).\n\n"
             "OUTPUT STRUCTURE RULES — critical:\n"
             "- Return ONLY JSON shaped as {\"changes\": [...]}.\n"
             "- Produce ONE change object per DISTINCT action. Never merge multiple actions into one change.\n"
@@ -273,8 +272,8 @@ class ProposedChangesAgent:
     async def propose_with_pages(
         self,
         *,
-        facts: Any,  # ExtractedFacts — the compact distillation of the full transcript
-        transcript_tail: str,  # last ~1500 chars only, for verbatim quote context
+        facts: Any,  # ExtractedFacts — merged facts from all transcript chunks
+        transcript_text: str,  # full transcript — no truncation, model sees everything
         summary: Dict[str, Any],
         candidate_pages: List[Dict[str, Any]],
         query: str = "",
@@ -282,11 +281,10 @@ class ProposedChangesAgent:
     ) -> List[Dict[str, Any]]:
         """Produce all distinct change proposals using pre-fetched candidate pages.
 
-        Receives structured facts (not raw transcript) so input size is O(constant)
-        regardless of meeting length — a 100-minute meeting and a 10-minute meeting
-        produce the same token count here. The fact extraction stage (Stage 1) already
-        read and distilled the full transcript into decisions/action_items/doc_worthy_updates.
-        Only the last 1500 chars of transcript are included for verbatim quote context.
+        Sends the full transcript + structured facts so nothing is missed.
+        Fact extraction (Stage 1) already ran chunked parallel extraction across the
+        whole meeting; the merged facts + full transcript give the proposal agent
+        maximum coverage for any meeting length.
         """
         formatted_pages = [
             {
@@ -309,7 +307,7 @@ class ProposedChangesAgent:
                 "action_items": summary.get("action_items") or [],
                 "participants": summary.get("participants") or [],
             },
-            # Structured facts from Stage 1 — compact regardless of meeting length
+            # Structured facts merged from all chunks — always comprehensive
             "extracted_facts": {
                 "decisions": getattr(facts, "decisions", []),
                 "action_items": getattr(facts, "action_items", []),
@@ -318,8 +316,7 @@ class ProposedChangesAgent:
                 "owners": getattr(facts, "owners", {}),
                 "query_terms": getattr(facts, "query_terms", []),
             },
-            # Last 1500 chars only — enough for verbatim quote evidence
-            "transcript_tail": transcript_tail[-1500:],
+            "full_transcript": transcript_text,
             "retrieved_page_context": formatted_pages,
         }
 

@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-JARVIS_FACT_INPUT_MAX_CHARS = int(os.getenv("JARVIS_FACT_INPUT_MAX_CHARS", "30000"))
+JARVIS_FACT_INPUT_MAX_CHARS = int(os.getenv("JARVIS_FACT_INPUT_MAX_CHARS", "60000"))
+JARVIS_FACT_CHUNK_CHARS = int(os.getenv("JARVIS_FACT_CHUNK_CHARS", "55000"))
+JARVIS_FACT_CHUNK_OVERLAP = int(os.getenv("JARVIS_FACT_CHUNK_OVERLAP", "2000"))
 JARVIS_AGENT_MODEL = os.getenv("JARVIS_AGENT_MODEL", "gpt-5-mini").strip()
 JARVIS_PIPELINE_MAX_PAGES = int(os.getenv("JARVIS_PIPELINE_MAX_PAGES", "8"))
 
@@ -97,19 +99,82 @@ def _transcript_to_text(transcript: Union[str, List[Any]]) -> str:
     return "\n".join(lines)
 
 
+def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
+    """Merge facts extracted from multiple transcript chunks, deduplicating by value."""
+    decisions: List[str] = []
+    action_items: List[str] = []
+    new_requirements: List[str] = []
+    doc_worthy_updates: List[str] = []
+    query_terms: List[str] = []
+    owners: Dict[str, str] = {}
+    deadlines: Dict[str, str] = {}
+
+    seen_decisions: set = set()
+    seen_actions: set = set()
+    seen_requirements: set = set()
+    seen_doc: set = set()
+    seen_terms: set = set()
+
+    for chunk in chunks:
+        for item in chunk.decisions:
+            key = item.strip().lower()
+            if key and key not in seen_decisions:
+                seen_decisions.add(key)
+                decisions.append(item)
+        for item in chunk.action_items:
+            key = item.strip().lower()
+            if key and key not in seen_actions:
+                seen_actions.add(key)
+                action_items.append(item)
+        for item in chunk.new_requirements:
+            key = item.strip().lower()
+            if key and key not in seen_requirements:
+                seen_requirements.add(key)
+                new_requirements.append(item)
+        for item in chunk.doc_worthy_updates:
+            key = item.strip().lower()
+            if key and key not in seen_doc:
+                seen_doc.add(key)
+                doc_worthy_updates.append(item)
+        for item in chunk.query_terms:
+            key = item.strip().lower()
+            if key and key not in seen_terms:
+                seen_terms.add(key)
+                query_terms.append(item)
+        owners.update(chunk.owners)
+        deadlines.update(chunk.deadlines)
+
+    return ExtractedFacts(
+        decisions=decisions,
+        action_items=action_items,
+        new_requirements=new_requirements,
+        doc_worthy_updates=doc_worthy_updates,
+        query_terms=query_terms[:12],  # cap search terms
+        owners=owners,
+        deadlines=deadlines,
+    )
+
+
+async def _extract_chunk(text: str) -> ExtractedFacts:
+    """Run fact extraction on a single text chunk."""
+    result = await Runner.run(_fact_agent, text)
+    if isinstance(result.final_output, ExtractedFacts):
+        return result.final_output
+    return ExtractedFacts.model_validate(result.final_output)
+
+
 async def _run_fact_extraction(
     transcript_text: Optional[str] = None,
     *,
     transcript: Optional[Union[str, List[Any]]] = None,
 ) -> ExtractedFacts:
-    """Extract structured facts from transcript. Returns empty ExtractedFacts on failure.
+    """Extract structured facts from the full transcript with no data loss.
 
-    Accepts either:
-    - transcript_text: a plain string (plan 02-03 interface)
-    - transcript: a string or list of turn dicts (test interface / pipeline_coordinator interface)
+    For transcripts longer than JARVIS_FACT_CHUNK_CHARS, splits into overlapping
+    chunks and runs extraction in parallel on each, then merges results.
+    A 100-minute meeting and a 10-minute meeting both get full coverage.
     """
     try:
-        # Resolve input to a plain string
         if transcript_text is not None:
             text = transcript_text
         elif transcript is not None:
@@ -118,11 +183,39 @@ async def _run_fact_extraction(
             logger.warning("_run_fact_extraction called with no transcript input")
             return ExtractedFacts()
 
-        capped = text[:JARVIS_FACT_INPUT_MAX_CHARS]
-        result = await Runner.run(_fact_agent, capped)
-        if isinstance(result.final_output, ExtractedFacts):
-            return result.final_output
-        return ExtractedFacts.model_validate(result.final_output)
+        # Short transcript — single call, no chunking needed
+        if len(text) <= JARVIS_FACT_CHUNK_CHARS:
+            return await _extract_chunk(text)
+
+        # Long transcript — split into overlapping chunks and extract in parallel
+        chunks: List[str] = []
+        start = 0
+        while start < len(text):
+            end = start + JARVIS_FACT_CHUNK_CHARS
+            chunks.append(text[start:end])
+            if end >= len(text):
+                break
+            # Overlap: next chunk starts JARVIS_FACT_CHUNK_OVERLAP chars before end
+            # so decisions/actions spanning a chunk boundary are captured
+            start = end - JARVIS_FACT_CHUNK_OVERLAP
+
+        logger.info(
+            "Fact extraction: transcript %d chars → %d chunks of ~%d chars each",
+            len(text), len(chunks), JARVIS_FACT_CHUNK_CHARS,
+        )
+        chunk_results = await asyncio.gather(
+            *[_extract_chunk(c) for c in chunks],
+            return_exceptions=True,
+        )
+        valid: List[ExtractedFacts] = []
+        for i, r in enumerate(chunk_results):
+            if isinstance(r, Exception):
+                logger.warning("Fact extraction chunk %d failed (non-fatal): %s", i, r)
+            else:
+                valid.append(r)
+
+        return _merge_facts(valid) if valid else ExtractedFacts()
+
     except Exception as exc:
         logger.warning("Fact extraction failed, using empty facts: %s", exc)
         return ExtractedFacts()

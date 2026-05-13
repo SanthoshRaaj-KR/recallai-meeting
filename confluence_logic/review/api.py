@@ -1829,7 +1829,7 @@ async def _run_pipeline(
         proposal_agent = ProposedChangesAgent(model=JARVIS_REVIEW_MODEL, max_tokens=4000)
         proposals = await proposal_agent.propose_with_pages(
             facts=facts,
-            transcript_tail=transcript_text,  # already capped upstream; only tail used
+            transcript_text=transcript_text,
             summary=summary_json,
             candidate_pages=candidate_pages,
             max_tokens=4000,
