@@ -29,8 +29,14 @@ def _resolve_target_html(section_html: str, target: str) -> str:
 def _resolve_visible_text_target(section_html: str, target_text: str) -> str:
     """
     Resolve a plain-text target into a unique outer HTML block within the section.
-    This lets the agent target visible text like "14" or "common mistakes" without
-    having to guess the exact storage HTML wrapper.
+    This lets the agent target visible text like "SOC2 by Q4" or "Beta: July 30" without
+    having to guess the exact HTML wrapper.
+
+    When multiple elements match (e.g. both a <li> and its parent <ul> contain the target),
+    we prefer LEAF elements — those with no child element tags — because they are the most
+    specific, unambiguous match. If that still leaves multiple matches, we pick the one with
+    the shortest outer HTML. This eliminates false "appears N times" errors caused by
+    recursive get_text() including container text.
     """
     if not target_text:
         return target_text
@@ -52,11 +58,17 @@ def _resolve_visible_text_target(section_html: str, target_text: str) -> str:
     matches = exact_matches if exact_matches else partial_matches
     if not matches:
         raise ValueError("No unique visible-text match found for the requested replacement target.")
+
     if len(matches) > 1:
-        raise ValueError(
-            f"The visible text target '{target_text}' matches {len(matches)} blocks. "
-            "Provide a more specific target."
-        )
+        # Prefer leaf elements (no child Tag nodes) — they are most specific.
+        leaf_matches = [t for t in matches if not any(isinstance(c, Tag) for c in t.children)]
+        if len(leaf_matches) == 1:
+            return str(leaf_matches[0])
+        if len(leaf_matches) > 1:
+            # Multiple leaves — pick the shortest outer HTML (most atomic element)
+            return str(min(leaf_matches, key=lambda t: len(str(t))))
+        # No leaf matches — fall back to shortest outer HTML among all matches
+        return str(min(matches, key=lambda t: len(str(t))))
 
     return str(matches[0])
 

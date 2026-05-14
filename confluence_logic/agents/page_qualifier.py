@@ -7,13 +7,16 @@ a destructive/wrong edit.
 
 Two-pass design:
   1. Deterministic checks (free, no LLM): if intent.old_value is set, check
-     whether it appears verbatim in page.full_content. This is the strongest
-     possible signal — phrase-king behavior. When old_value is set but absent
-     from the page, the page is disqualified for 'replace' actions.
+     whether it appears verbatim in page.full_content (after normalizing ordinal
+     suffixes, e.g. "30th"→"30"). This is the strongest possible signal —
+     phrase-king behavior. A long specific old_value (≥20 chars) found verbatim
+     qualifies immediately with score 10.
   2. LLM judgment (one cheap call): when the deterministic check is inconclusive
-     (no old_value, or action is additive), an LLM scores 0-10 how well the page
-     fits the intent's subject. The threshold is strict (>=5 to qualify) and the
-     prompt explicitly biases toward "no" when uncertain.
+     (no old_value, short old_value, or old_value not found), an LLM scores 0-10
+     how well the page fits the intent's subject. Threshold is 5 to qualify.
+     When old_value was set but not found verbatim, the LLM score is capped at 6
+     (reflecting uncertainty) and the prompt warns the LLM to score conservatively.
+     The drafter is the true safety gate for replace operations.
 
 Returns:
     {
@@ -24,77 +27,42 @@ Returns:
         "why": str
     }
 """
-import asyncio
 import json
 import logging
 import os
 import re
 from typing import Any, Dict, Optional
 
-from openai import OpenAI
+from agents import Agent, Runner
 
 logger = logging.getLogger(__name__)
 
-QUALIFIER_MODEL = os.getenv("JARVIS_QUALIFIER_MODEL", "gpt-5.4-mini").strip()
+QUALIFIER_MODEL = os.getenv("JARVIS_QUALIFIER_MODEL", "gpt-5.4-nano").strip()
 QUALIFIER_MAX_TOKENS = int(os.getenv("JARVIS_QUALIFIER_MAX_TOKENS", "400"))
-QUALIFIER_FIT_THRESHOLD = int(os.getenv("JARVIS_QUALIFIER_FIT_THRESHOLD", "7"))
-
-_openai_client: Optional[OpenAI] = None
-
-
-def _get_openai_client() -> OpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = OpenAI()
-    return _openai_client
-
-
-def _openai_completion_options(model: str, max_tokens: int) -> Dict[str, Any]:
-    opts: Dict[str, Any] = {"model": model}
-    if model.startswith(("gpt-5", "o1", "o3", "o4")):
-        opts["max_completion_tokens"] = max_tokens
-    else:
-        opts["max_tokens"] = max_tokens
-        opts["temperature"] = 0.1
-    return opts
+QUALIFIER_FIT_THRESHOLD = int(os.getenv("JARVIS_QUALIFIER_FIT_THRESHOLD", "5"))
 
 
 def _norm(text: str) -> str:
-    """Whitespace-normalize and lowercase for verbatim presence checks."""
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
+    """Whitespace-normalize, lowercase, and strip ordinal suffixes for verbatim presence checks.
+
+    Strips ordinal suffixes so "July 30th" matches "July 30" and "1st" matches "1".
+    """
+    t = (text or "").strip().lower()
+    t = re.sub(r"\b(\d+)(st|nd|rd|th)\b", r"\1", t)
+    return re.sub(r"\s+", " ", t).strip()
 
 
 QUALIFIER_PROMPT = (
-    "You are a strict page-fit qualifier for a Confluence change pipeline. "
-    "Given ONE change intent and ONE candidate page, decide whether the page is the "
-    "RIGHT target for this change.\n\n"
-
-    "Input JSON:\n"
-    "  intent: {subject, instruction, target_hint, old_value, new_value, action}\n"
-    "  page: {title, headings, content_preview}\n\n"
-
-    "SCORING RUBRIC (0-10):\n"
-    "  10 — Page is dedicated to this exact subject. Title and content both confirm.\n"
-    "  7-9 — Page covers this subject as a major section. Content clearly relates.\n"
-    "  4-6 — Page mentions this subject as part of broader content. Maybe a target.\n"
-    "  1-3 — Page is in the same general domain but covers a different specific subject.\n"
-    "  0   — Page covers a completely different subject. Wrong target.\n\n"
-
-    "STRICT GUIDANCE:\n"
-    "- Title overlap is NOT enough. The page CONTENT must be about this subject.\n"
-    "- 'PostgreSQL is mentioned somewhere' is NOT enough to say a page about ORM frameworks "
-    "is the right target for a PostgreSQL version change.\n"
-    "- A vague/generic page in the right domain (e.g. 'Engineering Overview' for a specific "
-    "service change) scores 3 or below.\n"
-    "- Be conservative — when uncertain, score LOWER. A missed page is recoverable via other "
-    "retrieval paths; a wrong edit is not.\n\n"
-
-    "Return JSON with EXACTLY these keys (no extras, no wrapper):\n"
-    "{\n"
-    "  \"page_fit_score\": <int 0-10>,\n"
-    "  \"why\": \"<one sentence rationale citing specific page content vs intent subject>\"\n"
-    "}\n"
-    "Return only the JSON object. No markdown, no explanation."
+    "Score how well a Confluence page fits a change intent. 0-10.\n\n"
+    "Input JSON: {intent: {subject, instruction, target_hint, old_value, new_value, action}, "
+    "page: {title, headings, content_preview}}\n\n"
+    "Scoring:\n"
+    "  8-10: page is dedicated to this subject — title+content both confirm\n"
+    "  5-7 : page covers this subject as a major section\n"
+    "  2-4 : page mentions it in passing but is mainly about something else\n"
+    "  0-1 : different subject entirely\n\n"
+    "Rules: title overlap alone = max 3. Be conservative when unsure — score lower.\n\n"
+    "Return JSON only: {\"page_fit_score\": <0-10>, \"why\": \"<one sentence>\"}"
 )
 
 
@@ -116,18 +84,36 @@ async def _run_page_qualifier(
     page_title = page.get("title") or page.get("page_title") or ""
     full_content = page.get("full_content") or page.get("relevant_content") or ""
 
+    # ── Pre-check: structural rejects (no LLM needed) ─────────────────────
+    # Template/scaffold pages must never be edited by the pipeline regardless of content match.
+    if re.search(r"\btemplate\b", page_title, re.IGNORECASE):
+        logger.info(
+            "Qualifier: '%s' REJECTED — template/scaffold page (auto-reject, no LLM needed)",
+            page_title,
+        )
+        return {
+            "qualified": False,
+            "page_fit_score": 0,
+            "old_value_found": False,
+            "matched_phrase": None,
+            "why": "Template or scaffold page — not a valid edit target for the pipeline",
+            "old_value_missing": False,
+        }
+
     # ── Phase 1: deterministic checks ─────────────────────────────────────
-    # Check if old_value is present verbatim on the page
+    # Check if old_value is present verbatim on the page (after ordinal-suffix normalization).
     old_value_found = False
+    _old_value_missing = False  # True when old_value was set but not found; caps LLM score to 6
     if old_value and len(old_value) >= 3:
         norm_content = _norm(full_content)
         norm_old = _norm(old_value)
         if norm_old in norm_content:
             old_value_found = True
-            
-            # If the old_value is highly specific (>= 20 chars), it's a guaranteed match.
-            # If it's shorter (e.g., 'Fat', '10 kg'), it might just be a common phrase appearing 
-            # randomly, so we still require the LLM to verify the page's topical relevance.
+
+            # A highly specific old_value (≥20 chars) found verbatim is an unambiguous match —
+            # qualify immediately without spending an LLM call.
+            # Shorter phrases (e.g. "Q4", "10 kg") might appear incidentally anywhere on the page,
+            # so fall through to LLM scoring to confirm topical relevance.
             if len(old_value) >= 20:
                 logger.info(
                     "Qualifier: '%s' QUALIFIED for intent '%s' — specific old_value '%s' present verbatim",
@@ -140,22 +126,20 @@ async def _run_page_qualifier(
                     "matched_phrase": old_value,
                     "why": f"old_value '{old_value}' present verbatim on page",
                 }
-                
-        # old_value set + NOT on page + action is replace → disqualify deterministically.
-        # Replace cannot succeed without the old text being there.
-        if action == "replace" and not old_value_found:
-            logger.info(
-                "Qualifier: '%s' REJECTED for intent '%s' — replace action but old_value '%s' "
-                "not present on page (cannot replace what isn't there)",
-                page_title, subject or instruction[:40], old_value,
+
+        else:
+            # old_value was specified but NOT found verbatim (even after ordinal normalization).
+            # Do NOT auto-reject — fall through to LLM scoring so conceptually relevant pages
+            # (e.g. page has "July 30" when intent has "July 30th" after another variation, or
+            # the concept is present under different wording) can still reach the drafter.
+            # The drafter is the true safety gate: it will say applies=false if unrelated, or
+            # downgrade to append if replace anchor can't be found.
+            # We cap the LLM score at 6 to signal this uncertainty.
+            _old_value_missing = True
+            logger.debug(
+                "Qualifier: old_value '%s' not found verbatim on '%s' — falling to LLM (score capped at 6)",
+                old_value, page_title,
             )
-            return {
-                "qualified": False,
-                "page_fit_score": 1,
-                "old_value_found": False,
-                "matched_phrase": None,
-                "why": f"old_value '{old_value}' not found on page; replace action cannot succeed here",
-            }
 
     # ── Phase 2: LLM judgment ─────────────────────────────────────────────
     # Build a compact representation of the page for the LLM
@@ -173,6 +157,16 @@ async def _run_page_qualifier(
     else:
         page_repr_content = content_preview
 
+    # When old_value was expected but not found verbatim, tell the LLM to be extra conservative.
+    # The drafter will decide the exact edit mode (replace vs append) if this page qualifies.
+    if _old_value_missing:
+        page_repr_content = (
+            f"[QUALIFIER NOTE: intent.old_value='{old_value}' was NOT found verbatim in this page. "
+            f"Score conservatively — only qualify if this page is clearly the right conceptual target "
+            f"for this change. The drafter will handle finding the exact anchor text.]\n\n"
+            + page_repr_content
+        )
+
     payload = {
         "intent": {
             "subject": subject,
@@ -189,19 +183,21 @@ async def _run_page_qualifier(
         },
     }
 
+    agent = Agent(
+        name="PageQualifier",
+        model=QUALIFIER_MODEL,
+        instructions=QUALIFIER_PROMPT,
+    )
+
     try:
-        opts = _openai_completion_options(QUALIFIER_MODEL, QUALIFIER_MAX_TOKENS)
-        response = await asyncio.to_thread(
-            lambda: _get_openai_client().chat.completions.create(
-                **opts,
-                messages=[
-                    {"role": "system", "content": QUALIFIER_PROMPT},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-                response_format={"type": "json_object"},
-            )
-        )
-        data = json.loads(response.choices[0].message.content or "{}")
+        result = await Runner.run(agent, json.dumps(payload, ensure_ascii=False))
+        raw = result.final_output
+        if isinstance(raw, str):
+            data = json.loads(raw)
+        elif isinstance(raw, dict):
+            data = raw
+        else:
+            data = {}
     except Exception as exc:
         logger.warning("Page qualifier LLM call failed for '%s': %s", page_title, exc)
         # Fail-safe: when the qualifier errors, default to LOW fit and qualified=False
@@ -221,6 +217,11 @@ async def _run_page_qualifier(
     except (TypeError, ValueError):
         fit = 0
 
+    # Cap score at 6 when old_value was set but not found verbatim — the LLM cannot be
+    # sure this is the right page without seeing the exact text to replace.
+    if _old_value_missing:
+        fit = min(fit, 6)
+
     why = (data.get("why") or "").strip() or "no rationale"
     qualified = fit >= QUALIFIER_FIT_THRESHOLD
 
@@ -239,4 +240,5 @@ async def _run_page_qualifier(
         "old_value_found": old_value_found,
         "matched_phrase": old_value if old_value_found else None,
         "why": why,
+        "old_value_missing": _old_value_missing,
     }

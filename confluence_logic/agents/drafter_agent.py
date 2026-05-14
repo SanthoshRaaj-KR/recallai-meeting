@@ -288,8 +288,14 @@ INTENT_DRAFTER_PROMPT = (
     "  c) If intent.target_hint is set: does it match the page's title or any heading?\n\n"
     "Apply this STRICT rule (when in doubt, return applies=false):\n"
     "- (b) is true (old_value found verbatim on page) → applies=true. STRONGEST SIGNAL.\n"
-    "- (b) is set but old_value is NOT on page → applies=false. The page does NOT contain the value to change.\n"
-    "  (Exception: if (a) is unambiguously true AND action is 'add', applies=true.)\n"
+    "- (b) is set but old_value is NOT on page:\n"
+    "    • action is 'add'                                   → applies=true (additive, no anchor needed).\n"
+    "    • action is 'replace' AND page is CLEARLY the right target (rule (a) strongly true —\n"
+    "      page is dedicated to this subject, not merely mentioning it):\n"
+    "      → applies=true, but you MUST use edit_mode='append' and set before_content=null.\n"
+    "        You cannot replace text that isn't there verbatim, but the decision IS relevant.\n"
+    "        Add the new information as a new bullet or sentence to the appropriate section.\n"
+    "    • action is 'replace' AND page is only loosely related                → applies=false.\n"
     "- (b) is empty AND (a) is unambiguously true (page is dedicated to this subject) → applies=true.\n"
     "- (b) is empty AND only (a) is loosely true (page mentions subject in passing) → applies=false.\n"
     "- Only (c) loosely matches (title/heading word overlap only, content unrelated) → applies=false.\n"
@@ -318,17 +324,58 @@ INTENT_DRAFTER_PROMPT = (
     "PROHIBITED: do NOT pick 'replace' if intent.old_value is empty or absent from the page. That would "
     "force a destructive section-replace at execution time and is the #1 cause of bad edits.\n\n"
 
-    "before_content (CRITICAL):\n"
-    "- For edits: copy a SHORT VERBATIM snippet (1–5 lines) from page.full_content that contains "
-    "the old/wrong text being replaced. Copy character-for-character so execution can find it exactly.\n"
-    "- If intent.old_value is set AND it appears in page.full_content: use that exact string, with "
-    "minimal surrounding context (a sentence or bullet) so the match is unique.\n"
-    "- If no specific text to replace (purely additive new bullet/section): set to null.\n"
+    "before_content (CRITICAL — read every rule):\n"
+    "- ONLY copy text that LITERALLY EXISTS in page.full_content. Search the full_content string "
+    "character-by-character for the exact phrase you want to use. If you cannot find it verbatim, "
+    "do NOT use it as before_content.\n"
+    "- NEVER paraphrase, reword, or compose before_content — it must be a literal substring of full_content.\n"
+    "- If intent.old_value is set AND appears verbatim in full_content: use that exact string.\n"
+    "- If the text you want to replace is NOT in full_content: set before_content=null and "
+    "edit_mode='append'. NEVER invent a plausible-sounding snippet.\n"
+    "- For purely additive changes (new bullet/section): before_content=null.\n"
     "- For title-only/delete-page changes: null.\n\n"
+
+    "═══════════════════════════════════════════════\n"
+    "QUALITY RULES — read before writing after_content\n"
+    "═══════════════════════════════════════════════\n"
+
+    "RULE 1 — TRANSCRIPT GROUNDING (most critical):\n"
+    "Every sentence in after_content must be DIRECTLY traceable to a specific statement made in the "
+    "transcript. Do NOT add implementation details, technical specifics, methodology, or best practices "
+    "that were not explicitly spoken in the meeting.\n"
+    "  WRONG: transcript says 'add encryption at rest' → you write 'Enable AES-256 encryption, integrate "
+    "with key management service, rotate keys quarterly, and encrypt all backups and replicas'\n"
+    "  CORRECT: transcript says 'add encryption at rest' → you write '- Encryption at rest required for "
+    "transcript storage (required before beta release)'\n"
+    "If you cannot point to a direct quote in the transcript for a sentence, remove that sentence.\n\n"
+
+    "RULE 2 — MINIMAL CHANGE:\n"
+    "Make the smallest change that accurately captures the decision. Maximum 3 lines for new content. "
+    "Match the scope of what was said, not what could theoretically be said about the topic.\n"
+    "  WRONG: transcript says 'move to async Kafka pipeline' → you write a 5-line architecture paragraph "
+    "describing consumer topology, event stages, partitioning strategy, and delivery guarantees\n"
+    "  CORRECT: '- Transcript processing moving to async event-driven pipeline (Kafka)'\n\n"
+
+    "RULE 3 — STATE CONSISTENCY:\n"
+    "When a meeting decision cancels, deprioritizes, or supersedes an existing documented item, "
+    "REPLACE the old entry — do not annotate alongside it. Adding a note next to the old item creates "
+    "contradictory state in the document (the item is both listed and deprioritized).\n"
+    "  WRONG: page has 'Mobile app' in Q4 roadmap → you append '- Mobile app deprioritized' below it\n"
+    "  CORRECT: replace 'Mobile app' with 'Mobile app — deprioritized until next year'\n\n"
+
+    "RULE 4 — SINGLE BEST SECTION:\n"
+    "For this (intent, page) pair, update exactly ONE section — the one that best fits the change. "
+    "Do not propose updates to multiple sections of the same page for the same intent.\n\n"
+
+    "RULE 5 — SECTION SEMANTICS:\n"
+    "'Known Limitations' and 'Known Issues' sections document CURRENT gaps or shortcomings — not "
+    "requirements, mandates, or new features. If the change adds a requirement or prerequisite, "
+    "write it under 'Requirements', 'Planned Work', or 'Prerequisites'. If no such section exists, "
+    "use edit_mode='create_section' with an appropriate heading rather than misusing 'Known Limitations'.\n\n"
 
     "after_content (CRITICAL — FINAL PAGE CONTENT, NOT INSTRUCTIONS):\n"
     "- Write the EXACT replacement text that should appear on the page.\n"
-    "- This text is written DIRECTLY to Confluence — it must read as documentation, not as instructions.\n"
+    "- This text is written DIRECTLY to Confluence — it must read as published documentation.\n"
     "- FORBIDDEN — never write any of:\n"
     "  * 'Keep X as the primary subject'\n"
     "  * 'Include X only as comparison'\n"
@@ -336,19 +383,19 @@ INTENT_DRAFTER_PROMPT = (
     "  * 'Maintain a professional tone'\n"
     "  * 'This page should focus on...'\n"
     "  * 'Ensure the content covers...'\n"
-    "  * Anything that reads as direction to a writer\n"
+    "  * Anything that reads as direction to a writer rather than content for a reader\n"
     "- CORRECT examples:\n"
-    "  * 'Akshat's gym plan: **9 weeks** of progressive strength training.'\n"
-    "  * '**Framework:** Claude SDK'\n"
-    "  * 'The team lead is **Bob**.'\n"
+    "  * 'Beta release date: **August 20** (moved from July 30 to allow infrastructure stabilization)'\n"
+    "  * '**Owner:** Priya (security compliance)'\n"
+    "  * '- Encryption at rest required for transcript storage before beta'\n"
     "- Use markdown: ## for new section headings, **bold** for key terms, - for bullets.\n"
-    "- Maximum ~10 lines.\n\n"
+    "- Maximum 3 lines for new content; for replace, match the length of the old content.\n\n"
 
     "section_heading:\n"
     "- Use an EXACT name from page.available_headings if the change targets a specific section.\n"
     "- Look at page.section_content_map to pick the section whose content already covers the subject. "
-    "Example: if the intent is about 'PostgreSQL version' and section_content_map shows that section "
-    "'Infrastructure' contains 'PostgreSQL 13', pick 'Infrastructure'.\n"
+    "Example: if the intent is about a database version and section_content_map shows that section "
+    "'Infrastructure' contains the current version string, pick 'Infrastructure'.\n"
     "- If the edit touches the very first paragraph before any heading, use null.\n"
     "- For title changes: null.\n\n"
 
@@ -451,7 +498,7 @@ def _normalize_intent_draft(
     Returns None when applies=false (drafter rejected the page).
     Enforces the edit_mode safety contract:
       - replace requires before_content (otherwise downgrade to append)
-      - append with before_content upgrades to replace (treat before as anchor)
+      - append with before_content: strip before_content (it's extraneous context, not an anchor)
       - unknown edit_mode is inferred from before_content presence
 
     Extracted as a standalone function for unit testing.
@@ -500,10 +547,17 @@ def _normalize_intent_draft(
             )
             edit_mode = "append"
 
-        # SAFETY GUARD: if drafter says 'append' but did include before_content, the drafter
-        # gave us a hint of what to replace — trust it and upgrade to 'replace'.
+        # SAFETY GUARD 2 (revised): if drafter says 'append' but accidentally included
+        # before_content (e.g. existing section text as context), strip it.
+        # Upgrading to 'replace' here caused execution failure because the section preview
+        # doesn't match Confluence HTML exactly. Append has no anchor — keep it that way.
         if edit_mode == "append" and before_content:
-            edit_mode = "replace"
+            logger.debug(
+                "IntentDrafter for '%s': edit_mode='append' with before_content — "
+                "stripping before_content (append needs no anchor)",
+                page_title,
+            )
+            before_content = None
 
     rationale = data.get("rationale")
     if not rationale and intent is not None:

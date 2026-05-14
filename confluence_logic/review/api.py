@@ -104,7 +104,7 @@ _RECALL_ACTIVE_CODES = {
     "recording_permission_allowed",
 }
 _RECALL_STATUS_CACHE_SECONDS = float(os.getenv("RECALL_STATUS_CACHE_SECONDS", "4.0"))
-JARVIS_REVIEW_MODEL = os.getenv("JARVIS_REVIEW_MODEL", "gpt-5.4-mini").strip()
+JARVIS_REVIEW_MODEL = os.getenv("JARVIS_REVIEW_MODEL", "gpt-5-mini").strip()
 JARVIS_REVIEW_MAX_INPUT_CHARS = int(os.getenv("JARVIS_REVIEW_MAX_INPUT_CHARS", "0"))
 JARVIS_REVIEW_SUMMARY_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_SUMMARY_MAX_TOKENS", "1100"))
 JARVIS_REVIEW_MOM_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_MOM_MAX_TOKENS", "900"))
@@ -132,7 +132,8 @@ class StartBotRequest(BaseModel):
 
 class ExecuteChangesRequest(BaseModel):
     ids: Optional[List[int]] = None
-    proposal_id: Optional[str] = None  # UUID from Supabase (Phase 3 pipeline proposals)
+    proposal_id: Optional[str] = None  # single pipeline proposal UUID
+    proposal_ids: Optional[List[str]] = None  # batch of pipeline proposal UUIDs (grouped by page)
 
 
 class ProposeChangesRequest(BaseModel):
@@ -1123,61 +1124,122 @@ def _format_approved_change_request(change: Dict[str, Any]) -> str:
 
     elif change_type == "delete":
         if heading:
-            delete_steps = (
-                f"1. Search for '{page_title}' to find the page.\n"
-                f"2. Fetch the live page with fetch_live_page.\n"
-                f"3. Use preview_delete then commit_delete to remove section '{heading}' (delete_entire_section=True).\n"
-                f"Do NOT delete the entire page. Do NOT create any pages."
+            return (
+                f"Delete section '{heading}' from Confluence page '{page_title}' (page ID: {page_id}).\n\n"
+                f"SAFETY: Delete ONLY section '{heading}'. Do NOT touch any other section or the rest of the page.\n"
+                f"Use fetch_live_page('{page_id}') then commit_delete with delete_entire_section=True.\n"
+                f"Reason: {rationale}"
             )
-            scope = f"section '{heading}' within the page"
         else:
-            delete_steps = (
-                f"1. Search for '{page_title}' to find the exact page_id (use '{page_id}' if valid, otherwise search).\n"
-                f"2. Call delete_confluence_page(page_id) to permanently delete the entire page.\n"
-                f"   IMPORTANT: Use delete_confluence_page — NOT commit_delete. commit_delete only empties content; the page shell remains.\n"
-                f"Do NOT just clear the page body. Do NOT create any pages."
+            return (
+                f"Permanently delete the entire Confluence page '{page_title}' (page ID: {page_id}).\n\n"
+                f"Use delete_confluence_page('{page_id}').\n"
+                f"Reason: {rationale}"
             )
-            scope = "entire page (permanently deleted)"
-        return (
-            f"Delete from Confluence.\n\n"
-            f"TARGET PAGE: {page_title} (id: {page_id})\n"
-            f"SCOPE: {scope}\n\n"
-            f"CONTENT TO REMOVE:\n{before or '[see live page]'}\n\n"
-            f"RATIONALE: {rationale}\n\n"
-            f"Steps:\n{delete_steps}"
-        )
 
     elif change_type == "title":
-        search_hint = f"Use page_id {page_id} directly." if page_id and page_id != "NONE" else f"Search for '{page_title}' to find the exact page_id."
         return (
-            f"Rename an existing Confluence page.\n\n"
-            f"CURRENT TITLE: {page_title} (id: {page_id})\n"
-            f"NEW TITLE: {after}\n\n"
-            f"RATIONALE: {rationale}\n\n"
-            f"Steps:\n"
-            f"1. {search_hint}\n"
-            f"2. Call fetch_live_page to get the current version number.\n"
-            f"3. Call update_page_title(page_id, expected_version, '{after}') to rename it.\n"
-            f"4. Do NOT create a new page — rename the existing one only.\n"
-            f"5. Do NOT edit any page content — only the title changes."
+            f"Rename Confluence page '{page_title}' (page ID: {page_id}) to '{after}'.\n\n"
+            f"Use fetch_live_page('{page_id}') to get the current version, "
+            f"then update_page_title('{page_id}', expected_version, '{after}').\n"
+            f"Do NOT create a new page. Do NOT change any page content.\n"
+            f"Reason: {rationale}"
         )
 
     else:  # edit
-        section_ref = f"section '{heading}'" if heading else "main content"
-        return (
-            f"Update an existing Confluence page.\n\n"
-            f"TARGET PAGE: {page_title} (id: {page_id})\n"
-            f"TARGET SECTION: {section_ref}\n\n"
-            f"CURRENT CONTENT (from live page):\n{before or '[fetch live page — page_id above is verified]'}\n\n"
-            f"REPLACEMENT CONTENT:\n{after}\n\n"
-            f"RATIONALE: {rationale}\n\n"
-            f"Steps:\n"
-            f"1. Fetch live page '{page_title}' (id: {page_id}).\n"
-            f"2. Locate {section_ref}.\n"
-            f"3. Replace the current content with the REPLACEMENT CONTENT above.\n"
-            f"4. Use preview_edit then commit_document_edit.\n"
-            f"Apply only this change. Do not touch other sections."
-        )
+        section_ref = f"section '{heading}'" if heading else "the page intro"
+        if before:
+            return (
+                f"Edit Confluence page '{page_title}' (page ID: {page_id}).\n\n"
+                f"In {section_ref}, find this exact text:\n"
+                f"---\n{before}\n---\n\n"
+                f"Replace it with:\n"
+                f"---\n{after}\n---\n\n"
+                f"SAFETY RULES:\n"
+                f"- Use page_id '{page_id}' directly — do NOT search for or edit any other page.\n"
+                f"- Replace ONLY the text shown above. Do NOT modify any other content.\n"
+                f"- If the exact text is not found, do NOT modify the section — report it instead.\n"
+                f"Reason: {rationale}"
+            )
+        else:
+            return (
+                f"Edit Confluence page '{page_title}' (page ID: {page_id}).\n\n"
+                f"Add the following content to the END of {section_ref} (preserve ALL existing content — do NOT remove anything):\n"
+                f"---\n{after}\n---\n\n"
+                f"SAFETY RULES:\n"
+                f"- Use page_id '{page_id}' directly — do NOT search for or edit any other page.\n"
+                f"- Fetch the current section content first using fetch_live_page('{page_id}', '{heading or ''}').\n"
+                f"- Pass the FULL current section html as old_block_html and the FULL current section html PLUS the new content appended at the end as new_block_html.\n"
+                f"- NEVER pass empty string as old_block_html — that deletes the whole section.\n"
+                f"Reason: {rationale}"
+            )
+
+
+def _format_bundled_page_instruction(proposals: List[Dict[str, Any]]) -> str:
+    """Build ONE instruction string for ALL changes targeting the same page.
+
+    Sending multiple changes for the same page as a single EditorAgent call
+    prevents version conflicts and accidental overwrites that happen when
+    independent calls race against each other.
+    """
+    if not proposals:
+        return ""
+    if len(proposals) == 1:
+        return _format_approved_change_request(proposals[0])
+
+    p0 = proposals[0]
+    page_title = p0.get("page_title") or "Confluence page"
+    page_id = p0.get("page_id") or "NONE"
+
+    lines = [
+        f"Edit Confluence page '{page_title}' (page ID: {page_id}, verified — use this ID directly).",
+        "",
+        "CRITICAL SAFETY RULES (apply to ALL changes below):",
+        f"- Use page_id '{page_id}' directly with fetch_live_page — do NOT search for any other page.",
+        "- Make ONLY the listed changes. Do NOT delete, clear, or replace any other content.",
+        "- For each replace change: if the exact text is not found on the page, SKIP that change.",
+        "- For each append change: fetch the section first, then add to the END — never pass empty old_block_html.",
+        "- After ALL changes are done, verify the page still contains all original content plus your additions.",
+        "",
+        f"Apply these {len(proposals)} changes in order:",
+        "",
+    ]
+
+    for i, proposal in enumerate(proposals, 1):
+        change_type = str(proposal.get("change_type") or "edit").lower()
+        heading = proposal.get("section_heading") or None
+        before = proposal.get("before_content") or ""
+        after = proposal.get("after_content") or ""
+        rationale = proposal.get("rationale") or ""
+        section_ref = f"section '{heading}'" if heading else "the page intro"
+
+        if change_type == "delete" and heading:
+            lines.append(f"Change {i}: DELETE section '{heading}' entirely.")
+        elif change_type == "delete":
+            lines.append(f"Change {i}: DELETE the entire page.")
+        elif change_type == "title":
+            lines.append(f"Change {i}: RENAME this page to '{after}'.")
+        elif before:
+            lines += [
+                f"Change {i}: REPLACE in {section_ref}.",
+                f"  Find this exact text: {before!r}",
+                f"  Replace with: {after!r}",
+            ]
+        else:
+            lines += [
+                f"Change {i}: APPEND to {section_ref} (preserve existing content).",
+                f"  Add at the end: {after!r}",
+                f"  Fetch section html first; pass full section as old_block_html + new content appended as new_block_html.",
+            ]
+        if rationale:
+            lines.append(f"  Reason: {rationale}")
+        lines.append("")
+
+    lines += [
+        "Apply each change sequentially using preview_edit then commit_document_edit.",
+        "Do NOT skip any change unless the target text is genuinely absent from the page.",
+    ]
+    return "\n".join(lines)
 
 
 async def _resolve_page_id(page_id: Optional[str], page_title: str) -> Optional[str]:
@@ -1590,6 +1652,19 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
                         heading, page_title, available[:8],
                     )
                     target_heading = "FULL_PAGE"
+                    # Recover create_section intent: edit_mode is not persisted in Supabase.
+                    # When append mode targets a heading that doesn't exist, it was originally
+                    # a create_section proposal — create the new section instead of appending
+                    # to FULL_PAGE.
+                    if edit_mode == "append":
+                        logger.info(
+                            "Upgrading 'append' → 'create_section' for '%s': "
+                            "section '%s' not on live page",
+                            page_title, heading,
+                        )
+                        edit_mode = "create_section"
+                        is_replacement = False
+                        is_targeted = False
 
             if is_targeted:
                 # Short, specific before_content: find the exact old text and replace it.
@@ -1613,7 +1688,7 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
                         )
                         section_text = _html_to_text(section_html)
                         norm_before = _normalize_for_fuzzy(before_content)
-                        # Find the line in the section whose normalized form contains norm_before
+                        # Strategy 2a: line-by-line scan — works for single-line before_content
                         fuzzy_match: Optional[str] = None
                         for line in section_text.split("\n"):
                             line_str = line.strip()
@@ -1622,6 +1697,19 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
                             if norm_before in _normalize_for_fuzzy(line_str):
                                 fuzzy_match = line_str
                                 break
+                        # Strategy 2b: full-section normalized search — handles multi-line before_content
+                        # and cases where the target spans multiple text nodes. Uses the first line
+                        # of before_content as the surgical anchor for edit_block_in_section.
+                        if fuzzy_match is None and norm_before:
+                            norm_section = _normalize_for_fuzzy(section_text)
+                            if norm_before in norm_section:
+                                first_line = before_content.split("\n")[0].strip()
+                                if first_line:
+                                    fuzzy_match = first_line
+                                    logger.debug(
+                                        "Full-section fuzzy match for '%s' — using first-line anchor '%s...'",
+                                        page_title, first_line[:60],
+                                    )
                         if fuzzy_match:
                             logger.info(
                                 "Fuzzy match found '%s...' in '%s' — using it for targeted replace",
@@ -1763,8 +1851,106 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": False, "error": "Edit failed after max retries"}
 
 
+# Per-page execution lock — prevents concurrent EditorAgent calls to the same page.
+# Key: page_id or page_title. Value: asyncio.Lock().
+_page_execution_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _page_lock(page_id: Optional[str], page_title: str) -> asyncio.Lock:
+    key = page_id or page_title or "unknown"
+    if key not in _page_execution_locks:
+        _page_execution_locks[key] = asyncio.Lock()
+    return _page_execution_locks[key]
+
+
+async def _execute_pipeline_proposals_batched(
+    proposal_ids: List[str],
+    session_id: str,
+) -> Dict[str, Any]:
+    """Execute multiple pipeline proposals, grouped by target page.
+
+    All proposals for the same page are sent as ONE EditorAgent call to prevent
+    version conflicts, race conditions, and destructive overwrites.
+    """
+    proposals = []
+    for pid in proposal_ids:
+        p = supabase_store.get_proposal_by_id(pid)
+        if not p:
+            continue
+        status = p.get("status", "pending")
+        if status in ("executed", "rejected"):
+            continue
+        proposals.append(p)
+
+    if not proposals:
+        return {"results": []}
+
+    # Group by page (use page_id as key; fall back to page_title)
+    by_page: Dict[str, List[Dict[str, Any]]] = {}
+    for p in proposals:
+        key = p.get("page_id") or p.get("page_title") or "unknown"
+        by_page.setdefault(key, []).append(p)
+
+    all_results: List[Dict[str, Any]] = []
+
+    for page_key, page_proposals in by_page.items():
+        # Mark all as executing
+        for p in page_proposals:
+            if p.get("id"):
+                supabase_store.update_proposal_status(str(p["id"]), "executing")
+
+        p0 = page_proposals[0]
+        page_id = p0.get("page_id")
+        page_title = p0.get("page_title") or ""
+
+        # Acquire per-page lock — prevents concurrent calls to the same page
+        lock = _page_lock(page_id, page_title)
+        async with lock:
+            user_id = p0.get("user_id")
+            graph_user_id = _confluence_graph_user_id(
+                {"id": user_id} if user_id else None,
+                session_id,
+            )
+            instruction = _format_bundled_page_instruction(page_proposals)
+            editor_agent = _get_editor_agent()
+            graph_token = confluence_page_graph.set_current_graph_user_id(graph_user_id)
+            try:
+                answer = await editor_agent.handle_prepared_query(
+                    instruction,
+                    original_query=f"Execute {len(page_proposals)} proposals for page '{page_title}'",
+                )
+            except Exception as exc:
+                logger.error("EditorAgent raised for page '%s': %s", page_title, exc)
+                answer = f"ERROR: {exc}"
+            finally:
+                confluence_page_graph.reset_current_graph_user_id(graph_token)
+
+        normalized = (answer or "").strip()
+        failed = normalized.lower().startswith((
+            "error:", "the requested change did not complete", "i encountered an issue",
+        ))
+        final_status = "failed" if failed else "executed"
+        for p in page_proposals:
+            if p.get("id"):
+                supabase_store.update_proposal_status(str(p["id"]), final_status)
+
+        all_results.append({
+            "page": page_title,
+            "success": not failed,
+            "proposal_count": len(page_proposals),
+            "message": normalized if failed else "Changes applied to Confluence.",
+        })
+
+    return {"results": all_results}
+
+
 async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[str, Any]:
-    """Execute a pipeline proposal via direct Confluence API calls."""
+    """Execute a pipeline proposal through the master EditorAgent.
+
+    Routes through the same EditorAgent path as in-memory proposals so all the
+    agent's live-search, fetch, preview, version-conflict, and sub-agent
+    capabilities are available — not just the brittle direct REST path.
+    """
     proposal = supabase_store.get_proposal_by_id(proposal_id)
     if not proposal:
         return {"success": False, "message": "Proposal not found."}
@@ -1777,44 +1963,45 @@ async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[
 
     supabase_store.update_proposal_status(proposal_id, "executing")
 
-    # Direct execution — deterministic, no AI re-reasoning needed.
-    result = await _direct_apply_change(proposal)
+    # Build a structured step-by-step instruction for the EditorAgent.
+    # _format_approved_change_request handles all change_types (edit/delete/create/title).
+    prepared_query = _format_approved_change_request(proposal)
 
-    final_status = "executed" if result.get("success") else "failed"
-    supabase_store.update_proposal_status(proposal_id, final_status)
+    # Set up per-user Confluence graph context from the proposal row.
+    user_id = proposal.get("user_id")
+    graph_user_id = _confluence_graph_user_id(
+        {"id": user_id} if user_id else None,
+        session_id,
+    )
 
-    # Build a user-friendly message. Raw exception strings ("Edit failed: ValueError(...)") are
-    # not useful — translate common failure modes into actionable explanations so the user knows
-    # whether to retry, edit the proposal, or escalate.
-    error = result.get("error") or ""
-    if result.get("success"):
-        message = result.get("note") or "Change applied to Confluence."
-    elif "Could not find Confluence page" in error:
-        message = (
-            f"Confluence page '{proposal.get('page_title') or '?'}' could not be located. "
-            "It may have been deleted or renamed since the proposal was generated."
-        )
-    elif "Version conflict" in error:
-        message = (
-            "The Confluence page was modified by someone else while the change was being applied. "
-            "Please retry the proposal."
-        )
-    elif "after_content is editorial instructions" in error:
-        message = (
-            "The proposal content was rejected as editorial instructions, not real page content. "
-            "Please regenerate the proposal."
-        )
-    elif "No unique visible-text match" in error or "matches" in error and "blocks" in error:
-        message = (
-            "The target text on the page is ambiguous (multiple matches found). "
-            "Please refine the proposal or apply manually."
-        )
-    elif "Confluence connector unavailable" in error:
-        message = "Confluence credentials are not configured on the server."
-    else:
-        message = error or "Change could not be applied to Confluence."
+    page_id = proposal.get("page_id")
+    page_title_for_lock = proposal.get("page_title") or ""
+    lock = _page_lock(page_id, page_title_for_lock)
+    editor_agent = _get_editor_agent()
+    graph_token = confluence_page_graph.set_current_graph_user_id(graph_user_id)
+    try:
+        async with lock:
+            answer = await editor_agent.handle_prepared_query(
+                prepared_query,
+                original_query=f"Execute pipeline proposal {proposal_id}",
+            )
+    except Exception as exc:
+        logger.error("EditorAgent raised during pipeline proposal %s: %s", proposal_id, exc)
+        supabase_store.update_proposal_status(proposal_id, "failed")
+        return {"success": False, "message": f"Execution error: {exc}"}
+    finally:
+        confluence_page_graph.reset_current_graph_user_id(graph_token)
 
-    return {"success": result.get("success", False), "message": message}
+    normalized = (answer or "").strip()
+    failed = normalized.lower().startswith((
+        "error:", "the requested change did not complete", "i encountered an issue",
+    ))
+
+    supabase_store.update_proposal_status(proposal_id, "failed" if failed else "executed")
+
+    if failed:
+        return {"success": False, "message": normalized}
+    return {"success": True, "message": "Change applied to Confluence."}
 
 
 async def _execute_single_change(
@@ -2068,6 +2255,8 @@ async def execute_review_changes(body: ExecuteChangesRequest) -> Dict[str, Any]:
 
 @router.post("/sessions/{session_id}/review/execute")
 async def execute_review_changes_for_session(session_id: str, body: ExecuteChangesRequest) -> Dict[str, Any]:
+    if body.proposal_ids:
+        return await _execute_pipeline_proposals_batched(body.proposal_ids, session_id)
     if body.proposal_id:
         return await _execute_pipeline_proposal(body.proposal_id, session_id)
     state = _get_meeting_state(session_id)
@@ -2426,8 +2615,23 @@ async def _verify_and_persist(
                 # If the LLM gave us a specific before snippet, prefer that over the full section,
                 # since a short string is what we can uniquely locate on the page.
                 if llm_before and len(llm_before.strip()) <= 300:
-                    # LLM-supplied before_content is short and specific — use it directly
-                    draft["before_content"] = llm_before.strip()
+                    # LLM-supplied before_content is short and specific.
+                    # Validate it actually exists on the live page so execution won't fail
+                    # with "text not found". If not found, clear it — the edit becomes append.
+                    candidate_before = llm_before.strip()
+                    if live_html:
+                        full_page_text = BeautifulSoup(live_html, "html.parser").get_text(separator=" ", strip=True)
+                        if _normalize_for_fuzzy(candidate_before) not in _normalize_for_fuzzy(full_page_text):
+                            logger.warning(
+                                "_verify_and_persist: before_content '%s...' NOT on page '%s' — "
+                                "clearing to prevent replace-failure at execution",
+                                candidate_before[:60], page_title,
+                            )
+                            draft["before_content"] = None
+                        else:
+                            draft["before_content"] = candidate_before
+                    else:
+                        draft["before_content"] = candidate_before
                 else:
                     # No short before — extract just the targeted section text for display;
                     # execution will fall back to full-section replacement
@@ -2465,48 +2669,34 @@ async def _verify_and_persist(
                         draft["_template_content"] = t_content
                         break
 
-        # Give the verifier the FULL live page text (not just the section snippet) so it can
-        # judge page_relevance accurately — does the change actually belong on this page?
-        # Falls back to before_content when full HTML wasn't fetched (e.g. for create proposals).
-        if change_type in ("edit", "delete", "title") and live_html:
-            page_content = _html_to_text(live_html)[:4000]
-        else:
-            page_content = draft.get("before_content") or ""
-
-        verified = await _run_verifier(draft, transcript_text, page_content)
-
-        # ANNOTATE-DON'T-GATE policy:
-        #   The verifier is now an annotation layer, not a hard gate. The only
-        #   cards we DROP at persistence time are ones whose `after_content` is
-        #   literally instruction text (e.g. "Maintain a professional tone") —
-        #   that text would be written verbatim to Confluence and is never useful.
-        #   Everything else is surfaced to the user with confidence/risk/page_relevance
-        #   visible so they can make an informed accept/reject decision.
-        content_type = verified.get("content_type") or "final_content"
-        if content_type == "meta_instruction":
+        # ── Inline quality gate (replaces VerifierAgent LLM call) ──────────────
+        # The qualifier + drafter already handle page-relevance and applies checks.
+        # The only hard drop here is meta_instruction content — text that reads as
+        # editorial directives rather than real page documentation.
+        from confluence_logic.agents.proposed_changes_agent import _is_instruction_after_content  # noqa: PLC0415
+        after_text = draft.get("after_content") or ""
+        if change_type in ("edit", "create") and after_text and _is_instruction_after_content(after_text):
             logger.warning(
                 "_verify_and_persist: DROPPING card for page '%s' — after_content is "
-                "editorial instructions, not real page content. verifier_note: %s",
-                verified.get("page_title"),
-                verified.get("verifier_note") or "content_type=meta_instruction",
+                "editorial instructions, not publishable documentation.",
+                draft.get("page_title"),
             )
             return
 
-        # Everything else is persisted UNLESS it targets the wrong page.
-        page_relevance = verified.get("page_relevance") or 5
-        if page_relevance < 4:
-            logger.warning(
-                "_verify_and_persist: DROPPING card for page '%s' — wrong page "
-                "(relevance=%d/10). verifier_note: %s",
-                verified.get("page_title"), page_relevance,
-                verified.get("verifier_note") or "low page_relevance",
-            )
-            return
+        # Stamp defaults so the UI/row have the expected fields without an LLM call.
+        verified = draft
+        verified.setdefault("confidence", "medium")
+        verified.setdefault("risk", "safe")
+        verified.setdefault("verifier_note", "")
+        verified.setdefault("transcript_evidence", [])
+        verified.setdefault("page_relevance", 7)
+        verified.setdefault("content_type", "final_content")
+        verified.setdefault("should_drop", False)
 
         # Pull the audit data (attached upstream by the qualifier/comparative stage) so we can
         # both surface it to the UI via SSE AND prepend a short human-readable summary to
         # verifier_note so the user sees what evidence backed this proposal.
-        audit = verified.get("_audit") or draft.get("_audit") or {}
+        audit = draft.get("_audit") or {}
         if audit:
             fit = audit.get("page_fit_score")
             ov_found = audit.get("old_value_found")
@@ -2780,6 +2970,7 @@ async def _get_workspace_pages_for_filter(graph_user_id: str) -> List[Dict[str, 
             {"page_id": p.get("page_id"), "title": p.get("title") or ""}
             for p in pages
             if p.get("page_id")
+            and not re.search(r"\btemplate\b", (p.get("title") or ""), re.IGNORECASE)
         ]
         _PAGE_TITLES_CACHE[graph_user_id] = items
         _PAGE_TITLES_CACHE_TS[graph_user_id] = now
@@ -3302,6 +3493,31 @@ async def _run_pipeline(
                 len(qualified_pairs), len(qualify_tasks),
             )
 
+            # Per-intent coverage SSE — tells the client (and logs) how many pages
+            # each intent retrieved and how many qualified, so silent drops are visible.
+            intent_retrieved_counts = {i: len(pages) for i, (_, pages) in enumerate(intent_pages)}
+            intent_qualified_counts: Dict[int, int] = {}
+            for (_, _, _, owner_idx) in qualified_pairs:
+                intent_qualified_counts[owner_idx] = intent_qualified_counts.get(owner_idx, 0) + 1
+            _emit(job_id, {
+                "type": "qualifier_coverage",
+                "intents": [
+                    {
+                        "subject": getattr(intent_pages[i][0], "subject", "?") or "?",
+                        "retrieved": intent_retrieved_counts.get(i, 0),
+                        "qualified": intent_qualified_counts.get(i, 0),
+                    }
+                    for i in range(len(intent_pages))
+                ],
+            })
+            for i, (intent_obj, pages) in enumerate(intent_pages):
+                if intent_qualified_counts.get(i, 0) == 0:
+                    logger.warning(
+                        "Intent '%s' produced 0 qualified pages (retrieved=%d) — will produce no proposals",
+                        getattr(intent_obj, "subject", "?") or "?",
+                        len(pages),
+                    )
+
             # ───────────────────────────────────────────────────────────
             # STAGE 3b — DRAFTING (only on qualified pairs)
             # ───────────────────────────────────────────────────────────
@@ -3493,6 +3709,17 @@ async def _run_pipeline(
                 "Per-pair drafting produced %d unique proposals (from %d (intent,page) tasks)",
                 len(proposals), len(draft_tasks),
             )
+
+            # Warn about intents where every qualified pair was rejected by the drafter
+            for idx, (intent_obj, pages) in enumerate(intent_pages):
+                if intent_drafted_count.get(idx, 0) == 0 and pages:
+                    logger.warning(
+                        "Intent '%s': retrieved=%d pages, qualified=%d, but 0 proposals drafted "
+                        "(all qualified pairs said applies=false or errored)",
+                        getattr(intent_obj, "subject", "?") or "?",
+                        len(pages),
+                        intent_qualified_counts.get(idx, 0),
+                    )
 
         else:
             # FALLBACK: no change_intents extracted — use the legacy single-pass

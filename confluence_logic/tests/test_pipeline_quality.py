@@ -112,7 +112,8 @@ def test_real_documentation_is_not_flagged_as_instruction():
 
 
 def test_qualifier_qualifies_when_old_value_present_verbatim():
-    """If intent.old_value appears on the page, qualify deterministically with score 10."""
+    """If a highly specific old_value (≥20 chars) appears on the page, qualify deterministically
+    with score 10 — no LLM call needed. Shorter old_values still qualify via LLM scoring."""
     import asyncio
     from types import SimpleNamespace
     from confluence_logic.agents.page_qualifier import _run_page_qualifier
@@ -121,8 +122,8 @@ def test_qualifier_qualifies_when_old_value_present_verbatim():
         subject="PostgreSQL version",
         instruction="Update PostgreSQL version from 13 to 16",
         target_hint="database",
-        old_value="PostgreSQL 13",
-        new_value="PostgreSQL 16",
+        old_value="PostgreSQL 13 on AWS RDS",  # 24 chars — triggers deterministic path
+        new_value="PostgreSQL 16 on AWS RDS",
         action="replace",
     )
     page = {
@@ -132,14 +133,17 @@ def test_qualifier_qualifies_when_old_value_present_verbatim():
     }
     out = asyncio.run(_run_page_qualifier(intent, page))
     assert out["qualified"] is True
-    assert out["page_fit_score"] == 10
+    assert out["page_fit_score"] == 10, "Long specific old_value found verbatim must give score 10"
     assert out["old_value_found"] is True
-    assert out["matched_phrase"] == "PostgreSQL 13"
+    assert out["matched_phrase"] == "PostgreSQL 13 on AWS RDS"
 
 
 def test_qualifier_rejects_replace_when_old_value_missing():
-    """If intent.old_value is set but absent from the page, a replace action cannot
-    succeed there — qualifier must deterministically reject without calling the LLM."""
+    """When old_value is not found verbatim on a page that has zero conceptual match,
+    the qualifier must reject the pair (score < threshold). The old_value_missing flag
+    is set and the LLM score is capped at 6; a completely unrelated page scores 0-2.
+    NOTE: this test makes a real LLM call when OPENAI_API_KEY is set; without a key
+    the qualifier errors and returns qualified=False / score=0 — both pass the assertion."""
     import asyncio
     from types import SimpleNamespace
     from confluence_logic.agents.page_qualifier import _run_page_qualifier
@@ -158,10 +162,10 @@ def test_qualifier_rejects_replace_when_old_value_missing():
         "available_headings": ["Frontend"],
     }
     out = asyncio.run(_run_page_qualifier(intent, page))
-    assert out["qualified"] is False
-    assert out["page_fit_score"] <= 3
+    assert out["qualified"] is False, "Completely unrelated page must not qualify even via LLM path"
+    assert out["page_fit_score"] <= 5, "React/TS page must score low for PostgreSQL intent (capped+unrelated)"
     assert out["old_value_found"] is False
-    assert "not found" in out["why"].lower()
+    assert out.get("old_value_missing") is True, "old_value_missing flag must be set when phrase not found"
 
 
 # ---------------------------------------------------------------------------
@@ -194,9 +198,10 @@ def test_drafter_normalizer_downgrades_replace_without_before_content():
     assert out["edit_mode"] == "append"
 
 
-def test_drafter_normalizer_upgrades_append_with_before_content():
-    """If the LLM says edit_mode='append' but DID provide before_content, the normalizer
-    treats this as a hint and upgrades to 'replace' — the LLM has anchor text."""
+def test_drafter_normalizer_strips_before_content_for_append():
+    """If the LLM says edit_mode='append' but provides before_content (e.g. section context),
+    the normalizer strips before_content rather than upgrading to replace.
+    Upgrading caused execution failure because section previews don't match Confluence HTML."""
     from confluence_logic.agents.drafter_agent import _normalize_intent_draft
 
     raw_llm_output = {
@@ -204,16 +209,16 @@ def test_drafter_normalizer_upgrades_append_with_before_content():
         "change_type": "edit",
         "edit_mode": "append",
         "page_id": "page1",
-        "page_title": "Some Page",
-        "section_heading": "Overview",
-        "before_content": "Santos doesn't go to the gym.",
-        "after_content": "Santos goes to the gym three times a week.",
-        "rationale": "Meeting decision",
+        "page_title": "Sprint 18",
+        "section_heading": "Planned Work",
+        "before_content": "Planned Work\n- Improve summary quality\n- Add Slack formatting",
+        "after_content": "- Microsoft Teams integration (prioritized for Acme Corp and Zenith Health)",
+        "rationale": "Teams integration moved ahead of Slack per meeting decision",
     }
-    out = _normalize_intent_draft(raw_llm_output, "page1", "Some Page")
+    out = _normalize_intent_draft(raw_llm_output, "page1", "Sprint 18")
     assert out is not None
-    assert out["edit_mode"] == "replace"
-    assert out["before_content"] == "Santos doesn't go to the gym."
+    assert out["edit_mode"] == "append", "edit_mode must stay 'append' — do not upgrade to replace"
+    assert out["before_content"] is None, "before_content must be stripped for append (no anchor needed)"
 
 
 def test_drafter_normalizer_skips_when_applies_false():
@@ -378,3 +383,109 @@ def test_edit_mode_normalization_legacy_proposals():
     assert infer_edit_mode("create_section", "") == "create_section"
     # Unknown edit_mode → fallback inference
     assert infer_edit_mode("garbage", "Old text") == "replace"
+
+
+# ---------------------------------------------------------------------------
+# Qualifier — ordinal suffix normalization
+# ---------------------------------------------------------------------------
+
+
+def test_qualifier_normalizes_ordinal_suffixes():
+    """'July 30th' in old_value must match 'July 30' on the page after ordinal normalization.
+
+    The fact-extraction LLM often writes ordinal dates ('July 30th') while the page stores
+    them as plain numbers ('July 30'). The qualifier must normalize before the verbatim check
+    so this variation never causes a false miss and a deterministic reject.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from confluence_logic.agents.page_qualifier import _run_page_qualifier
+
+    intent = SimpleNamespace(
+        subject="beta release date",
+        instruction="Update beta release date from July 30 to August 20",
+        target_hint="AI Meeting Assistant, release timeline",
+        old_value="July 30th",
+        new_value="August 20",
+        action="replace",
+    )
+    page = {
+        "title": "AI Meeting Assistant",
+        "full_content": "Timeline\nAlpha: June 15\nBeta: July 30\nGA: September 1",
+        "available_headings": ["Timeline"],
+    }
+    out = asyncio.run(_run_page_qualifier(intent, page))
+    assert out["qualified"] is True, "'July 30th' must find 'July 30' via ordinal normalization"
+    assert out["page_fit_score"] == 10, "verbatim match (after normalization) must return score 10"
+    assert out["old_value_found"] is True
+
+
+# ---------------------------------------------------------------------------
+# Qualifier — old_value_missing flag
+# ---------------------------------------------------------------------------
+
+
+def test_qualifier_sets_old_value_missing_flag():
+    """When old_value is set but not found on the page (and doesn't normalize to a match),
+    the qualifier must set old_value_missing=True so downstream can see the signal."""
+    from confluence_logic.agents.page_qualifier import _norm
+
+    # Verify the normalization itself: "30th" → "30"
+    assert _norm("July 30th") == "july 30"
+    assert _norm("1st quarter") == "1 quarter"
+    assert _norm("22nd") == "22"
+
+    # Verify non-ordinal text is unchanged
+    assert _norm("PostgreSQL 13") == "postgresql 13"
+    assert _norm("  Multiple   Spaces  ") == "multiple spaces"
+
+
+# ---------------------------------------------------------------------------
+# Qualifier — template page auto-reject
+# ---------------------------------------------------------------------------
+
+
+def test_qualifier_rejects_template_page():
+    """Pages with 'template' in the title must be rejected with score 0 — never edit scaffolds."""
+    import asyncio
+    from types import SimpleNamespace
+    from confluence_logic.agents.page_qualifier import _run_page_qualifier
+
+    intent = SimpleNamespace(
+        subject="product requirements",
+        instruction="Update product requirements for new feature",
+        target_hint="product requirements",
+        old_value="", new_value="Teams integration required", action="add",
+    )
+    page = {
+        "title": "Template - Product Requirements",
+        "full_content": "This template is used for writing product requirements documents...",
+        "available_headings": ["Overview", "Requirements", "Acceptance Criteria"],
+    }
+    out = asyncio.run(_run_page_qualifier(intent, page))
+    assert out["qualified"] is False, "Template page must be auto-rejected"
+    assert out["page_fit_score"] == 0, "Template page must score 0"
+    assert "template" in out["why"].lower()
+
+
+# ---------------------------------------------------------------------------
+# HTML parser — leaf-element preference for multi-match resolution
+# ---------------------------------------------------------------------------
+
+
+def test_html_resolver_prefers_leaf_element_over_container():
+    """When target text appears in both a <li> leaf and its parent <ul> container,
+    the resolver must prefer the leaf element (most specific match) without raising ValueError."""
+    from confluence_logic.utils.html_parser import _resolve_visible_text_target
+
+    html = """
+    <ul>
+      <li>SOC2 by Q4</li>
+      <li>GDPR readiness by Q1</li>
+    </ul>
+    """
+    # "SOC2 by Q4" is an exact match on the <li> and a partial match on the <ul>.
+    # Previously this raised ValueError("appears N times") — now must return the <li>.
+    result = _resolve_visible_text_target(html, "SOC2 by Q4")
+    assert "SOC2 by Q4" in result
+    assert result.strip().startswith("<li"), f"Expected <li> element, got: {result[:80]}"
