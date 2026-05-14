@@ -608,3 +608,96 @@ async def test_handle_general_question_speaks_filler_before_answer():
     assert "answer_generated" in call_order, "answer was never generated"
     assert call_order.index("spoke:Let me check that fo") < call_order.index("spoke:The answer is 42."), \
         f"Expected filler audio before answer audio, got: {call_order}"
+
+
+# REQ-01: Incremental sentence splitter tests — added by plan 01-001
+
+
+def test_split_sentence_incremental_basic():
+    sentences, remainder = ja._split_sentence_incremental("Hello world. ")
+    assert sentences == ["Hello world."]
+    assert remainder == ""
+
+
+def test_split_sentence_incremental_abbreviation_guard():
+    # "Dr." should NOT be a sentence end — the period is part of the abbreviation
+    sentences, remainder = ja._split_sentence_incremental("Dr. Smith arrived.")
+    # Without a trailing space after the final period, the second period is also not yet a confirmed boundary
+    # — the splitter waits for whitespace or more input.
+    assert sentences == []
+    assert remainder == "Dr. Smith arrived."
+
+    # With trailing space, the final period IS a boundary (>=5 chars, not abbrev)
+    sentences, remainder = ja._split_sentence_incremental("Dr. Smith arrived. ")
+    assert sentences == ["Dr. Smith arrived."]
+    assert remainder == ""
+
+
+def test_split_sentence_incremental_initial_guard():
+    # "U.S." internal periods must not split; final period after "today" is the real boundary
+    sentences, remainder = ja._split_sentence_incremental("U.S. policy is clear today. ")
+    assert sentences == ["U.S. policy is clear today."]
+    assert remainder == ""
+
+
+def test_split_sentence_incremental_min_chars():
+    # "Hi." — only 2 non-whitespace chars before the period; must NOT split
+    sentences, remainder = ja._split_sentence_incremental("Hi. ")
+    assert sentences == []
+    assert remainder == "Hi. "
+
+
+def test_split_sentence_incremental_exclamation_unconditional():
+    # "!" splits regardless of preceding length
+    sentences, remainder = ja._split_sentence_incremental("Hi! ")
+    assert sentences == ["Hi!"]
+    assert remainder == ""
+
+
+def test_split_sentence_incremental_question_unconditional():
+    # "?" splits regardless of preceding length
+    sentences, remainder = ja._split_sentence_incremental("Hi? ")
+    assert sentences == ["Hi?"]
+    assert remainder == ""
+
+
+def test_split_sentence_incremental_cross_token():
+    # Simulate token-by-token streaming — incremental accumulation must not emit until boundary completes
+    buffer = ""
+    for token in ["Hello", " world"]:
+        buffer += token
+        sentences, buffer = ja._split_sentence_incremental(buffer)
+        assert sentences == []
+    # Now add period — still no whitespace after, so no boundary yet
+    buffer += "."
+    sentences, buffer = ja._split_sentence_incremental(buffer)
+    assert sentences == []
+    assert buffer == "Hello world."
+    # Add trailing space — boundary now confirmed
+    buffer += " "
+    sentences, buffer = ja._split_sentence_incremental(buffer)
+    assert sentences == ["Hello world."]
+    assert buffer == ""
+
+
+def test_split_sentence_incremental_multiple_sentences():
+    sentences, remainder = ja._split_sentence_incremental(
+        "First sentence here. Second one too! Third? "
+    )
+    assert sentences == ["First sentence here.", "Second one too!", "Third?"]
+    assert remainder == ""
+
+
+def test_split_sentence_incremental_remainder_preserved():
+    sentences, remainder = ja._split_sentence_incremental(
+        "First sentence here. And another partial"
+    )
+    assert sentences == ["First sentence here."]
+    assert remainder == "And another partial"
+
+
+def test_split_sentence_incremental_inside_word_period():
+    # Period inside "example.com" must not split — followed by non-whitespace char
+    sentences, remainder = ja._split_sentence_incremental("Visit example.com today! ")
+    assert sentences == ["Visit example.com today!"]
+    assert remainder == ""
