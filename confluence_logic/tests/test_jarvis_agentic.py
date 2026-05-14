@@ -431,12 +431,13 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_speak_streaming_combines_sentences_into_one_recall_upload():
+async def test_speak_streaming_posts_each_sentence_separately():
+    """REQ-05: per-sentence POST to output_audio (not combined)."""
     _reset_meeting_state()
 
     async def sentence_gen():
-        yield "First sentence."
-        yield "Second sentence."
+        yield "First sentence. "
+        yield "Second sentence. "
 
     async def gap_filler():
         return None
@@ -463,7 +464,11 @@ async def test_speak_streaming_combines_sentences_into_one_recall_upload():
         )
 
     assert answer == "First sentence. Second sentence."
-    assert posted_audio == [(b"<First sentence.><Second sentence.>", "bot123")]
+    # REQ-05: each sentence is a SEPARATE POST — not a single concatenated POST
+    assert posted_audio == [
+        (b"<First sentence.>", "bot123"),
+        (b"<Second sentence.>", "bot123"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -701,3 +706,229 @@ def test_split_sentence_incremental_inside_word_period():
     sentences, remainder = ja._split_sentence_incremental("Visit example.com today! ")
     assert sentences == ["Visit example.com today!"]
     assert remainder == ""
+
+
+@pytest.mark.asyncio
+async def test_speak_streaming_ordered_playback_despite_out_of_order_tts():
+    """REQ-03: PriorityQueue + stash preserves sentence order even when TTS completes out-of-order."""
+    _reset_meeting_state()
+
+    async def sentence_gen():
+        yield "First. "  # 5 chars before period — splitter min_chars check; use longer
+        yield "First sentence ready. "
+        yield "Second sentence ready. "
+        yield "Third sentence ready. "
+
+    async def gap_filler():
+        return None
+
+    posted_audio = []
+    synth_delays = {
+        "First sentence ready.": 0.20,   # slowest
+        "Second sentence ready.": 0.05,  # fastest
+        "Third sentence ready.": 0.10,
+    }
+
+    def fake_synthesize(text):
+        import time as _t
+        delay = synth_delays.get(text, 0.0)
+        _t.sleep(delay)
+        return f"<{text}>".encode()
+
+    def fake_post(audio_bytes, bot_id):
+        posted_audio.append((audio_bytes, bot_id))
+        return True
+
+    with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
+         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
+         patch.object(ja, "_get_audio_duration", return_value=0.0), \
+         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
+        await ja._speak_streaming(
+            sentence_gen(),
+            asyncio.create_task(gap_filler()),
+            "bot123",
+            ja.meeting_state["output_generation"],
+        )
+
+    # Note: "First. " has only 6 chars including space — the splitter's >=5 non-ws rule
+    # passes ("First." is 6 chars). So 4 sentences total.
+    assert [a for a, _ in posted_audio] == [
+        b"<First.>",
+        b"<First sentence ready.>",
+        b"<Second sentence ready.>",
+        b"<Third sentence ready.>",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_speak_streaming_waits_playback_duration_between_posts():
+    """REQ-04: consumer waits _get_audio_duration + drain buffer between POSTs."""
+    _reset_meeting_state()
+
+    async def sentence_gen():
+        yield "First sentence here. "
+        yield "Second sentence here. "
+
+    async def gap_filler():
+        return None
+
+    post_times = []
+
+    def fake_synthesize(text):
+        return f"<{text}>".encode()
+
+    def fake_post(audio_bytes, bot_id):
+        import time as _t
+        post_times.append(_t.monotonic())
+        return True
+
+    with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
+         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
+         patch.object(ja, "_get_audio_duration", return_value=0.30), \
+         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.10), \
+         patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
+        await ja._speak_streaming(
+            sentence_gen(),
+            asyncio.create_task(gap_filler()),
+            "bot123",
+            ja.meeting_state["output_generation"],
+        )
+
+    assert len(post_times) == 2
+    gap = post_times[1] - post_times[0]
+    # Expected: 0.30 (duration) + 0.10 (drain) = 0.40 s. Tolerance ±0.15 s for asyncio.sleep granularity.
+    assert 0.30 <= gap <= 0.60, f"Expected ~0.4s gap, got {gap:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_speak_streaming_generation_interrupt_stops_pipeline():
+    """REQ-06: output_generation change mid-playback prevents further POSTs."""
+    _reset_meeting_state()
+    ja.meeting_state["output_generation"] = 5
+
+    async def sentence_gen():
+        yield "First sentence here. "
+        yield "Second sentence here. "
+        yield "Third sentence here. "
+
+    async def gap_filler():
+        return None
+
+    posted_audio = []
+
+    def fake_synthesize(text):
+        return f"<{text}>".encode()
+
+    def fake_post(audio_bytes, bot_id):
+        posted_audio.append((audio_bytes, bot_id))
+        # After first post, bump generation to simulate interruption
+        if len(posted_audio) == 1:
+            ja.meeting_state["output_generation"] = 99
+        return True
+
+    with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
+         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
+         patch.object(ja, "_get_audio_duration", return_value=0.05), \
+         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
+        await ja._speak_streaming(
+            sentence_gen(),
+            asyncio.create_task(gap_filler()),
+            "bot123",
+            5,  # initial generation
+        )
+
+    # After the first POST, generation changed from 5 to 99 — remaining sentences MUST NOT be posted.
+    assert len(posted_audio) == 1, f"Expected exactly 1 POST after interruption, got {len(posted_audio)}"
+    assert posted_audio[0][0] == b"<First sentence here.>"
+
+
+@pytest.mark.asyncio
+async def test_speak_streaming_handles_abbreviation_in_stream():
+    """REQ-01+REQ-02: producer uses _split_sentence_incremental — 'Dr.' is NOT a sentence boundary."""
+    _reset_meeting_state()
+
+    async def sentence_gen():
+        # Streaming raw text including "Dr." — splitter must not break here
+        yield "Dr. Smith said hello today. "
+        yield "Goodbye now. "
+
+    async def gap_filler():
+        return None
+
+    posted_audio = []
+
+    def fake_synthesize(text):
+        return f"<{text}>".encode()
+
+    def fake_post(audio_bytes, bot_id):
+        posted_audio.append((audio_bytes, bot_id))
+        return True
+
+    with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
+         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
+         patch.object(ja, "_get_audio_duration", return_value=0.0), \
+         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
+        await ja._speak_streaming(
+            sentence_gen(),
+            asyncio.create_task(gap_filler()),
+            "bot123",
+            ja.meeting_state["output_generation"],
+        )
+
+    # Exactly TWO sentences — "Dr." must not be split off
+    assert [a for a, _ in posted_audio] == [
+        b"<Dr. Smith said hello today.>",
+        b"<Goodbye now.>",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_speak_streaming_acquires_lock_after_gap_filler():
+    """Pitfall 3: output_lock must NOT be held while awaiting gap_filler_task."""
+    _reset_meeting_state()
+
+    async def sentence_gen():
+        yield "First sentence here. "
+
+    gap_filler_acquired_lock = asyncio.Event()
+    gap_filler_released_lock = asyncio.Event()
+
+    async def gap_filler():
+        # Simulate gap_filler trying to use the same output_lock
+        lock = ja._get_output_lock()
+        async with lock:
+            gap_filler_acquired_lock.set()
+            await asyncio.sleep(0.05)
+            gap_filler_released_lock.set()
+
+    def fake_synthesize(text):
+        return f"<{text}>".encode()
+
+    posted = []
+
+    def fake_post(audio_bytes, bot_id):
+        posted.append((audio_bytes, bot_id))
+        return True
+
+    with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
+         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
+         patch.object(ja, "_get_audio_duration", return_value=0.0), \
+         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
+        await asyncio.wait_for(
+            ja._speak_streaming(
+                sentence_gen(),
+                asyncio.create_task(gap_filler()),
+                "bot123",
+                ja.meeting_state["output_generation"],
+            ),
+            timeout=3.0,
+        )
+
+    # If we got here without TimeoutError, no deadlock occurred.
+    assert gap_filler_acquired_lock.is_set()
+    assert gap_filler_released_lock.is_set()
+    assert len(posted) == 1
