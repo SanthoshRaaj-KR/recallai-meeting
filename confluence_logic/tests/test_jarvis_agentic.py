@@ -932,3 +932,142 @@ async def test_speak_streaming_acquires_lock_after_gap_filler():
     assert gap_filler_acquired_lock.is_set()
     assert gap_filler_released_lock.is_set()
     assert len(posted) == 1
+
+
+# REQ-07: Backward-compatibility tests — added by plan 01-003
+
+
+@pytest.mark.asyncio
+async def test_speak_guarded_still_concatenates():
+    """REQ-07: _speak_guarded is UNCHANGED — still does combined POST."""
+    _reset_meeting_state()
+
+    posted_audio = []
+
+    def fake_synthesize(text):
+        return f"<{text}>".encode()
+
+    def fake_post(audio_bytes, bot_id):
+        posted_audio.append((audio_bytes, bot_id))
+        return True
+
+    with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
+         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
+         patch.object(ja, "_get_audio_duration", return_value=0.0), \
+         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "JARVIS_SPEECH_HOLD_SECONDS", 0.0):
+        ok = await ja._speak_guarded(
+            "First sentence here. Second sentence here.",
+            "bot123",
+            ja.meeting_state["output_generation"],
+        )
+
+    assert ok is True
+    # REQ-07: _speak_guarded MUST still concatenate — one POST with combined audio
+    assert len(posted_audio) == 1
+    assert posted_audio[0] == (b"<First sentence here.><Second sentence here.>", "bot123")
+
+
+@pytest.mark.asyncio
+async def test_handle_meeting_summary_invokes_speak_streaming_with_correct_args():
+    """REQ-07: _handle_meeting_summary still calls _speak_streaming with (sentence_gen, gap_filler_task, bot_id, generation)."""
+    _reset_meeting_state()
+    ja.meeting_state["transcript_log"] = [{"speaker": "Alice", "text": "test"}]
+    ja.meeting_state["output_generation"] = 7
+
+    async def fake_stream(*args, **kwargs):
+        yield "Fake summary sentence here. "
+
+    async def fake_gap_filler(*args, **kwargs):
+        return None
+
+    with patch.object(ja, "summarize_meeting_streaming", side_effect=fake_stream), \
+         patch.object(ja, "_speak_gap_filler", side_effect=fake_gap_filler), \
+         patch.object(ja, "_speak_streaming", new=AsyncMock(return_value="Fake summary sentence here.")) as mock_stream:
+        await ja._handle_meeting_summary("give me a brief summary", "botX")
+
+    assert mock_stream.await_count == 1
+    args, kwargs = mock_stream.await_args
+    assert len(args) == 4
+    # arg 0: sentence_gen (async generator)
+    assert hasattr(args[0], "__aiter__")
+    # arg 1: gap_filler_task (asyncio.Task)
+    assert isinstance(args[1], asyncio.Task)
+    # arg 2: bot_id
+    assert args[2] == "botX"
+    # arg 3: generation
+    assert args[3] == 7
+
+
+@pytest.mark.asyncio
+async def test_handle_meeting_opinion_invokes_speak_streaming():
+    """REQ-07: _handle_meeting_opinion still calls _speak_streaming unchanged."""
+    _reset_meeting_state()
+    ja.meeting_state["transcript_log"] = [{"speaker": "Alice", "text": "test"}]
+    ja.meeting_state["output_generation"] = 3
+
+    async def fake_stream(*args, **kwargs):
+        yield "Fake opinion here. "
+
+    async def fake_gap_filler(*args, **kwargs):
+        return None
+
+    with patch.object(ja, "generate_opinion_streaming", side_effect=fake_stream), \
+         patch.object(ja, "_speak_gap_filler", side_effect=fake_gap_filler), \
+         patch.object(ja, "_speak_streaming", new=AsyncMock(return_value="Fake opinion here.")) as mock_stream:
+        await ja._handle_meeting_opinion("what's your opinion", "botY")
+
+    assert mock_stream.await_count == 1
+    args, _ = mock_stream.await_args
+    assert len(args) == 4
+    assert args[2] == "botY"
+    assert args[3] == 3
+
+
+@pytest.mark.asyncio
+async def test_handle_action_items_invokes_speak_streaming():
+    """REQ-07: _handle_action_items still calls _speak_streaming unchanged."""
+    _reset_meeting_state()
+    ja.meeting_state["transcript_log"] = [{"speaker": "Alice", "text": "test"}]
+    ja.meeting_state["output_generation"] = 11
+
+    async def fake_stream(*args, **kwargs):
+        yield "Action one here. "
+
+    async def fake_gap_filler(*args, **kwargs):
+        return None
+
+    with patch.object(ja, "extract_action_items_streaming", side_effect=fake_stream), \
+         patch.object(ja, "_speak_gap_filler", side_effect=fake_gap_filler), \
+         patch.object(ja, "_speak_streaming", new=AsyncMock(return_value="Action one here.")) as mock_stream:
+        await ja._handle_action_items("what are the action items", "botZ")
+
+    assert mock_stream.await_count == 1
+    args, _ = mock_stream.await_args
+    assert len(args) == 4
+    assert args[2] == "botZ"
+    assert args[3] == 11
+
+
+def test_local_repl_override_signature_compatibility():
+    """REQ-07: _speak_streaming signature must match local_repl.terminal_speak_streaming for monkey-patch compatibility.
+
+    Signature contract: (sentence_gen, gap_filler_task: asyncio.Task, bot_id: str, generation: int) -> Optional[str]
+    """
+    import inspect
+    sig = inspect.signature(ja._speak_streaming)
+    param_names = list(sig.parameters.keys())
+    assert param_names == ["sentence_gen", "gap_filler_task", "bot_id", "generation"], (
+        f"Signature drift detected — params are {param_names}, expected "
+        f"['sentence_gen', 'gap_filler_task', 'bot_id', 'generation']. "
+        f"This breaks confluence_logic/local_repl.py terminal_speak_streaming override."
+    )
+    # gap_filler_task annotation should be asyncio.Task
+    gap_filler_param = sig.parameters["gap_filler_task"]
+    assert gap_filler_param.annotation is asyncio.Task, (
+        f"gap_filler_task annotation drift: {gap_filler_param.annotation}"
+    )
+    # bot_id annotation should be str
+    assert sig.parameters["bot_id"].annotation is str
+    # generation annotation should be int
+    assert sig.parameters["generation"].annotation is int
