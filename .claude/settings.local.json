@@ -11,7 +11,10 @@
       "Bash(conda run *)",
       "Skill(gsd-code-review)",
       "Skill(gsd-ui-phase)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(not exist *)",
+      "Bash(C:\\\\ProgramData\\\\miniconda3\\\\envs\\\\ml\\\\python.exe -c \"from confluence_logic.agents.verifier_agent import _run_verifier; from confluence_logic.agents.page_qualifier import _run_page_qualifier; from confluence_logic.review import api; print\\('all imports OK'\\)\")",
+      "PowerShell(& \"C:\\\\ProgramData\\\\miniconda3\\\\envs\\\\ml\\\\python.exe\" -c \"from confluence_logic.agents.verifier_agent import _run_verifier; from confluence_logic.agents.page_qualifier import _run_page_qualifier; print\\('OK'\\)\" 2>&1)"
     ]
   }
 }

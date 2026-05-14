@@ -1,12 +1,11 @@
 """VerifierAgent — enriches draft proposals with confidence, risk, and verifier_note. Never drops a card (PIPE-03)."""
 
-import asyncio
 import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from openai import OpenAI
+from agents import Agent, Runner
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-VERIFIER_MODEL = os.getenv("JARVIS_VERIFIER_MODEL", "gpt-5.4-mini").strip()
+VERIFIER_MODEL = os.getenv("JARVIS_VERIFIER_MODEL", "gpt-5.4-nano").strip()
 VERIFIER_MAX_TOKENS = int(os.getenv("JARVIS_VERIFIER_MAX_TOKENS", "700"))
 
 # ---------------------------------------------------------------------------
@@ -40,9 +39,13 @@ VERIFIER_SYSTEM_PROMPT = (
     '  "should_drop": true | false\n'
     "}\n\n"
     "Confidence guidelines:\n"
-    "- 'high': the change is directly and explicitly supported by multiple clear transcript statements\n"
-    "- 'medium': the change is partially supported — some evidence but requires inference\n"
-    "- 'low': weak or ambiguous support; the proposal may be extrapolating beyond what was discussed\n\n"
+    "- 'high': TWO conditions must BOTH be true: (1) the change is directly and explicitly supported "
+    "by clear transcript statements, AND (2) after_content contains ONLY what was explicitly stated — "
+    "no inferred technical details, no expanded specifics, no implementation details not spoken in the meeting. "
+    "A Kafka migration proposal that adds consumer topology details not mentioned in the transcript is at most 'medium'.\n"
+    "- 'medium': the change is partially supported — transcript mentions the topic but after_content "
+    "includes reasonable inferences or additional context beyond exactly what was said\n"
+    "- 'low': weak or ambiguous support; the proposal extrapolates significantly beyond what was discussed\n\n"
     "Risk guidelines:\n"
     "- 'safe': change is additive or clearly replaces outdated content; low chance of breaking anything\n"
     "- 'review': change modifies important content or could affect other pages; human review recommended\n"
@@ -62,12 +65,13 @@ VERIFIER_SYSTEM_PROMPT = (
     "- 0: Completely wrong page — the change has nothing to do with this page's subject\n"
     "Compare draft.page_title and the proposed change subject against current_page_content to score this.\n\n"
     "content_type: Is draft.after_content actual page documentation or instructions to a writer?\n"
-    "- 'final_content': after_content is publishable documentation — facts, descriptions, specs, bullet lists of real information\n"
-    "  Examples: 'MS Dhoni is a former Indian cricket captain known for...', 'The team uses React for the frontend'\n"
-    "- 'meta_instruction': after_content contains writing directives, editorial guidance, or planning notes — NOT real page content\n"
-    "  Examples: 'Keep MS Dhoni as the primary subject', 'Add a clear differentiation section', "
-    "'Include Virat Kohli only as comparison', 'Maintain a professional and neutral tone', "
-    "'Use a structured format', 'This page should focus on...', 'Ensure the content covers...'\n"
+    "- 'final_content': publishable facts, descriptions, specs, bullet lists of real information\n"
+    "  Examples: 'The team uses React for the frontend and FastAPI for the backend', "
+    "'- Encryption at rest required before beta', 'Beta release: **August 20**'\n"
+    "- 'meta_instruction': writing directives, editorial guidance, or planning notes — NOT real page content\n"
+    "  Examples: 'Add a clear differentiation section explaining why X is better', "
+    "'Maintain a professional and neutral tone throughout', 'This page should focus on...', "
+    "'Ensure the content covers all migration steps', 'Use a structured format with clear headings'\n"
     "If after_content is null (delete/title change), set content_type to 'final_content'.\n\n"
     "should_drop (true/false): Set to true if this proposal should be discarded entirely.\n"
     "Set should_drop=true when ANY of:\n"
@@ -75,33 +79,11 @@ VERIFIER_SYSTEM_PROMPT = (
     "- page_relevance < 4 (wrong page — the change does not belong here)\n"
     "- confidence is 'low' AND page_relevance < 5 (weak transcript support AND weak page fit)\n"
     "Otherwise set should_drop=false.\n\n"
-    "transcript_evidence must contain 1-3 verbatim quotes copied exactly from the transcript_excerpt. "
+    "transcript_evidence: 1-3 DISTINCT verbatim quotes copied exactly from the transcript_excerpt. "
+    "Never repeat the same quote. If the same statement appears multiple times in the transcript, "
+    "include it only once. De-duplicate before returning.\n"
     "Return only valid JSON — no markdown, no explanation, no code blocks."
 )
-
-# ---------------------------------------------------------------------------
-# OpenAI client singleton
-# ---------------------------------------------------------------------------
-
-_openai_client: Optional[OpenAI] = None
-
-
-def _get_openai_client() -> OpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = OpenAI()
-    return _openai_client
-
-
-def _openai_completion_options(model: str, max_tokens: int, temperature: float = 0.2) -> Dict[str, Any]:
-    opts: Dict[str, Any] = {"model": model}
-    if model.startswith(("gpt-5", "o1", "o3", "o4")):
-        opts["max_completion_tokens"] = max_tokens
-    else:
-        opts["max_tokens"] = max_tokens
-        opts["temperature"] = temperature
-    return opts
-
 
 # ---------------------------------------------------------------------------
 # Core verification function
@@ -118,27 +100,27 @@ async def _run_verifier(
     Never drops the card. On failure, sets safe defaults and returns (PIPE-03).
     """
     try:
-        response = await asyncio.to_thread(
-            lambda: _get_openai_client().chat.completions.create(
-                **_openai_completion_options(VERIFIER_MODEL, VERIFIER_MAX_TOKENS),
-                messages=[
-                    {"role": "system", "content": VERIFIER_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "draft": draft,
-                                "transcript_excerpt": transcript_text[-6000:],
-                                "current_page_content": page_content[:2000],
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                response_format={"type": "json_object"},
-            )
+        user_input = json.dumps(
+            {
+                "draft": draft,
+                "transcript_excerpt": transcript_text[-6000:],
+                "current_page_content": page_content[:2000],
+            },
+            ensure_ascii=False,
         )
-        raw = json.loads(response.choices[0].message.content or "{}")
+
+        agent = Agent(
+            name="VerifierAgent",
+            model=VERIFIER_MODEL,
+            instructions=VERIFIER_SYSTEM_PROMPT,
+        )
+
+        result = await Runner.run(agent, user_input)
+        raw = result.final_output
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        elif not isinstance(raw, dict):
+            raw = {}
 
         content_type = str(raw.get("content_type") or "final_content").strip().lower()
         if content_type not in ("final_content", "meta_instruction"):

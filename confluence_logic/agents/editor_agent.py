@@ -29,6 +29,7 @@ class EditorAgent:
                 "- FETCH: use 'fetch_live_page(page_id, heading_string)' to retrieve true components. Use 'Root' only for top-of-page intro edits. Use 'FULL_PAGE' when the user wants to replace or delete the entire page body.\n"
                 "- PREVIEW: use 'preview_edit(page_id, heading_string, old_block_html, new_block_html)' to diff-test. Pass 'Root' for top intro edits and 'FULL_PAGE' for full-page rewrites.\n"
                 "- COMMIT: use 'commit_document_edit(page_id, expected_version, heading_string, old, new)'.\n"
+                "- APPEND (add content without removing anything): use commit_document_edit with append=True and new_block_html set to the content to add. Do NOT set old_block_html — the tool fetches the current section itself. This is conflict-safe even when multiple changes target the same page.\n"
                 "- If the user says to remove all content, replace the entire page, rewrite the whole page, or start fresh, you must use heading_string='FULL_PAGE'. Do not use 'Root' for that.\n"
                 "- If the user wants to replace visible text that is not a heading, use heading_string='FULL_PAGE' or the relevant real heading, and pass the visible text itself as old_block_html. The edit tools can resolve a unique visible-text block.\n"
                 "- Use a heading name only when the target is actually a page heading from available_headings. Do not treat arbitrary text like '14' as a heading unless you saw it in available_headings.\n"
