@@ -91,6 +91,8 @@ JARVIS_DELETE_CONFIRM_TIMEOUT = float(os.getenv("JARVIS_DELETE_CONFIRM_TIMEOUT",
 JARVIS_GARBLED_RECOVERY_ENABLED = os.getenv("JARVIS_GARBLED_RECOVERY_ENABLED", "true").strip().lower() == "true"
 JARVIS_CONFIDENCE_SIGNAL_ENABLED = os.getenv("JARVIS_CONFIDENCE_SIGNAL_ENABLED", "true").strip().lower() == "true"
 
+_SENTINEL_IDX = sys.maxsize  # Largest int — guarantees the sentinel is sorted LAST in asyncio.PriorityQueue
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -1318,85 +1320,152 @@ async def _speak_streaming(
     bot_id: str,
     generation: int,
 ) -> Optional[str]:
-    """Consume a streaming LLM response, then play it as one Recall audio clip.
+    """Priority-queued streaming TTS pipeline (REQ-01..REQ-06).
 
-    Recall's output_audio endpoint receives complete MP3 uploads, not a true
-    realtime stream. Sending one upload per sentence can overlap in the meeting
-    because local duration estimates and Recall playback buffering can drift.
-    This keeps the low-latency LLM/TTS pipeline, but concatenates all sentence
-    MP3s and sends a single output_audio request.
+    Architecture:
+    - Producer coroutine: iterates `sentence_gen`, accumulates tokens into a buffer,
+      calls `_split_sentence_incremental` to extract completed sentences, and fires
+      `asyncio.to_thread(synthesize_speech, sentence)` per sentence. Each task puts
+      (sentence_index, audio_bytes) into `pq` upon completion.
+    - Consumer coroutine: reads from `pq` in priority order with a stash dict for
+      out-of-order arrivals. POSTs each clip via `speak_cached_audio`, then waits
+      `_playback_wait_seconds(audio)` with 0.1s generation-guard polling.
+    - Sentinel: `_SENTINEL_IDX` (sys.maxsize) — sorted LAST, signals consumer to stop.
+    - Lock: `_get_output_lock()` acquired AFTER `await gap_filler_task` (Pitfall 3).
     """
-    syn_queue: asyncio.Queue = asyncio.Queue()
+    pq: asyncio.PriorityQueue = asyncio.PriorityQueue()
+    tts_tasks: list = []
+    sentence_texts: dict = {}  # idx -> sentence text (for transcript)
 
-    async def _produce():
+    async def _produce() -> int:
+        buffer = ""
+        sentence_index = 0
         try:
-            async for sentence in sentence_gen:
+            async for chunk in sentence_gen:
                 if generation != meeting_state["output_generation"]:
                     break
-                audio = await asyncio.to_thread(synthesize_speech, sentence)
-                await syn_queue.put((sentence, audio))
-        except Exception as exc:
-            logger.error("Streaming TTS producer failed: %s", exc)
-        finally:
-            await syn_queue.put(None)
+                buffer += chunk
+                completed, buffer = _split_sentence_incremental(buffer)
+                for sentence in completed:
+                    idx = sentence_index
+                    sentence_index += 1
+                    sentence_texts[idx] = sentence
 
+                    async def _tts(s: str = sentence, i: int = idx) -> None:
+                        try:
+                            audio = await asyncio.to_thread(synthesize_speech, s)
+                        except Exception as exc:
+                            logger.error("TTS failed for sentence %d: %s", i, exc)
+                            audio = b""
+                        await pq.put((i, audio))
+
+                    tts_tasks.append(asyncio.create_task(_tts()))
+        except Exception as exc:
+            logger.error("Streaming sentence producer failed: %s", exc)
+
+        # Flush any remaining partial sentence as the final sentence
+        remainder = buffer.strip()
+        if remainder:
+            idx = sentence_index
+            sentence_index += 1
+            sentence_texts[idx] = remainder
+
+            async def _flush(s: str = remainder, i: int = idx) -> None:
+                try:
+                    audio = await asyncio.to_thread(synthesize_speech, s)
+                except Exception as exc:
+                    logger.error("TTS failed for sentence %d: %s", i, exc)
+                    audio = b""
+                await pq.put((i, audio))
+
+            tts_tasks.append(asyncio.create_task(_flush()))
+
+        # Await all TTS tasks so all (idx, audio) items are in the priority queue
+        # before the sentinel is inserted. This ensures consumer won't see sentinel
+        # before all real audio items arrive.
+        if tts_tasks:
+            await asyncio.gather(*tts_tasks, return_exceptions=True)
+
+        return sentence_index
+
+    async def _consume(total: int) -> list:
+        next_expected = 0
+        stash: dict = {}
+        spoken: list = []
+
+        while next_expected < total:
+            idx, audio = await pq.get()
+            if idx == _SENTINEL_IDX:
+                break
+            stash[idx] = audio
+
+            # Flush all consecutive items starting at next_expected
+            while next_expected in stash:
+                ab = stash.pop(next_expected)
+                text = sentence_texts.get(next_expected, "")
+
+                if generation != meeting_state["output_generation"]:
+                    return spoken
+
+                if ab:
+                    ok = await asyncio.to_thread(speak_cached_audio, ab, bot_id)
+                    if ok:
+                        spoken.append(text)
+                        # Duration-aware wait with generation guard (mirrors _speak_guarded)
+                        duration = _playback_wait_seconds(ab)
+                        elapsed = 0.0
+                        while elapsed < duration:
+                            await asyncio.sleep(0.1)
+                            elapsed += 0.1
+                            if generation != meeting_state["output_generation"]:
+                                return spoken
+                    else:
+                        logger.warning("speak_cached_audio failed for sentence %d", next_expected)
+                else:
+                    logger.warning("Skipping sentence %d — empty audio bytes (TTS failure)", next_expected)
+
+                next_expected += 1
+
+        return spoken
+
+    # Start producer immediately so TTS overlaps with gap_filler playback
     producer_task = asyncio.create_task(_produce())
 
-    full_sentences = []
-    all_audio = []
-
     try:
-        while True:
-            if generation != meeting_state["output_generation"]:
-                producer_task.cancel()
-                return None
-
-            try:
-                item = await asyncio.wait_for(syn_queue.get(), timeout=0.5)
-            except asyncio.TimeoutError:
-                continue
-
-            if item is None:
-                break
-
-            sentence_text, audio_bytes = item
-            full_sentences.append(sentence_text)
-            all_audio.append(audio_bytes)
-    finally:
-        try:
-            await producer_task
-        except asyncio.CancelledError:
-            pass
-
-    await gap_filler_task
-
-    if not all_audio:
-        return None
+        await gap_filler_task
+    except asyncio.CancelledError:
+        pass
 
     output_lock = _get_output_lock()
     async with output_lock:
         if generation != meeting_state["output_generation"]:
+            producer_task.cancel()
+            for t in tts_tasks:
+                t.cancel()
             return None
 
-        combined = b"".join(all_audio)
-        ok = await asyncio.to_thread(speak_cached_audio, combined, bot_id)
-        if not ok:
+        try:
+            total = await producer_task
+        except Exception as exc:
+            logger.error("Producer task failed: %s", exc)
+            for t in tts_tasks:
+                t.cancel()
             return None
 
-        spoken_answer = " ".join(full_sentences) or None
-        if spoken_answer:
-            _record_jarvis_transcript(spoken_answer)
+        if total == 0:
+            return None
 
-        duration = _playback_wait_seconds(combined)
-        elapsed = 0.0
-        while elapsed < duration:
-            await asyncio.sleep(0.1)
-            elapsed += 0.1
-            if generation != meeting_state["output_generation"]:
-                return spoken_answer
+        # Sentinel: put after producer has awaited all TTS tasks — guarantees
+        # all real (idx, audio) items are already in pq before sentinel arrives.
+        await pq.put((_SENTINEL_IDX, b""))
+
+        spoken = await _consume(total)
+
+    if spoken:
+        _record_jarvis_transcript(" ".join(spoken))
 
     await asyncio.sleep(JARVIS_POST_SPEECH_PAUSE_SECONDS)
-    return spoken_answer
+    return " ".join(spoken) or None
 
 
 async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
