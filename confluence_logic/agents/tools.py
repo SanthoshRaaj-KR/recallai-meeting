@@ -467,15 +467,39 @@ def commit_delete(
         return CommitResponse(success=False, version=None, message=message)
 
 @function_tool
-def commit_document_edit(page_id: str, expected_version: int, heading_string: str, old_block_html: str = "", new_block_html: str = "") -> CommitResponse:
-    """Commits a parsed structural sub-section DOM replacement securely using Op-Locking bounds."""
+def commit_document_edit(
+    page_id: str,
+    expected_version: int,
+    heading_string: str,
+    old_block_html: str = "",
+    new_block_html: str = "",
+    append: bool = False,
+) -> CommitResponse:
+    """Commits a parsed structural sub-section DOM replacement securely using Op-Locking bounds.
+
+    When append=True, new_block_html is appended to the END of the existing section rather than
+    replacing it. The apply_fn always reads the current section from live HTML before appending,
+    so it is safe even when the page is modified by a concurrent commit in the same batch.
+    Use append=True whenever you want to ADD content without removing anything.
+    """
     try:
-        # Auto-convert markdown to Confluence HTML so agents can write either format.
         new_html = markdown_to_html(new_block_html) if new_block_html else new_block_html
         _emit_mutation_started("edit")
+
+        if append and heading_string:
+            # Append mode: fetch the current section on every attempt so the anchor
+            # never goes stale when other changes have already modified the same page.
+            def _append_fn(live_html: str) -> str:
+                current_section = get_section_html(live_html, heading_string)
+                merged = (current_section.rstrip() + "\n" + new_html) if current_section.strip() else new_html
+                return edit_block_in_section(live_html, heading_string, current_section, merged)
+            apply_fn = _append_fn
+        else:
+            apply_fn = lambda html: edit_block_in_section(html, heading_string, old_block_html, new_html)
+
         success, committed_version = _commit_with_retry(
             page_id,
-            apply_fn=lambda html: edit_block_in_section(html, heading_string, old_block_html, new_html),
+            apply_fn=apply_fn,
             expected_version=expected_version,
         )
 

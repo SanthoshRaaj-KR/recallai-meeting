@@ -1168,9 +1168,9 @@ def _format_approved_change_request(change: Dict[str, Any]) -> str:
                 f"---\n{after}\n---\n\n"
                 f"SAFETY RULES:\n"
                 f"- Use page_id '{page_id}' directly — do NOT search for or edit any other page.\n"
-                f"- Fetch the current section content first using fetch_live_page('{page_id}', '{heading or ''}').\n"
-                f"- Pass the FULL current section html as old_block_html and the FULL current section html PLUS the new content appended at the end as new_block_html.\n"
-                f"- NEVER pass empty string as old_block_html — that deletes the whole section.\n"
+                f"- Use commit_document_edit with append=True and new_block_html set to the content above.\n"
+                f"- Do NOT set old_block_html — the tool handles fetching and merging the section itself.\n"
+                f"- This is conflict-safe: the tool re-fetches the section on every retry.\n"
                 f"Reason: {rationale}"
             )
 
@@ -1198,7 +1198,7 @@ def _format_bundled_page_instruction(proposals: List[Dict[str, Any]]) -> str:
         f"- Use page_id '{page_id}' directly with fetch_live_page — do NOT search for any other page.",
         "- Make ONLY the listed changes. Do NOT delete, clear, or replace any other content.",
         "- For each replace change: if the exact text is not found on the page, SKIP that change.",
-        "- For each append change: fetch the section first, then add to the END — never pass empty old_block_html.",
+        "- For each append change: use commit_document_edit with append=True and only new_block_html set. The tool fetches and merges the section itself — this is conflict-safe.",
         "- After ALL changes are done, verify the page still contains all original content plus your additions.",
         "",
         f"Apply these {len(proposals)} changes in order:",
@@ -1229,7 +1229,7 @@ def _format_bundled_page_instruction(proposals: List[Dict[str, Any]]) -> str:
             lines += [
                 f"Change {i}: APPEND to {section_ref} (preserve existing content).",
                 f"  Add at the end: {after!r}",
-                f"  Fetch section html first; pass full section as old_block_html + new content appended as new_block_html.",
+                f"  Use commit_document_edit with append=True and new_block_html set to the content above. Do NOT set old_block_html.",
             ]
         if rationale:
             lines.append(f"  Reason: {rationale}")
