@@ -1149,6 +1149,87 @@ def _build_request_reference(task: VoiceTask) -> str:
     return "this request"
 
 
+_ABBREV_PATTERN = re.compile(
+    r'\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|U\.S|U\.K)\.$',
+    re.IGNORECASE,
+)
+_INITIAL_PATTERN = re.compile(r'\b[A-Z]\.$')
+
+
+def _split_sentence_incremental(buffer: str) -> tuple[list[str], str]:
+    """Split completed sentences from a streaming text buffer.
+
+    REQ-01: incremental, abbreviation-aware sentence boundary detection.
+
+    Rules (locked by phase CONTEXT.md):
+    - '!' and '?' followed by whitespace: unconditional sentence boundary.
+    - '.' followed by whitespace: boundary ONLY when ALL hold:
+        * candidate (text up to and including the period) has >=5 non-whitespace chars
+        * candidate does NOT end with an abbreviation prefix (_ABBREV_PATTERN)
+        * candidate does NOT end with a single-letter initial (_INITIAL_PATTERN)
+    - Punctuation NOT followed by whitespace (e.g. 'example.com', '3.14'): never a boundary;
+      cursor advances past it.
+    - Partial sentence at end-of-buffer stays entirely in the returned remainder.
+
+    Returns (completed_sentences, remaining_buffer).
+    """
+    sentences: list[str] = []
+    cursor = 0
+
+    while cursor < len(buffer):
+        m = re.search(r'[.!?]', buffer[cursor:])
+        if not m:
+            break
+        abs_pos = cursor + m.start()
+        punc = buffer[abs_pos]
+        after_punc = buffer[abs_pos + 1:]
+
+        # Must be followed by whitespace; if non-whitespace follows, punctuation is
+        # inside a word/number (URL, decimal) — skip past it and continue scanning.
+        if after_punc and not after_punc[0].isspace():
+            cursor = abs_pos + 1
+            continue
+
+        # If after_punc is empty (end of buffer), we cannot yet confirm a boundary —
+        # the next token might be non-whitespace. Stay where we are; remainder holds it.
+        if not after_punc:
+            break
+
+        candidate = buffer[:abs_pos + 1].strip()
+        before = buffer[:abs_pos]
+
+        if punc in ('!', '?'):
+            if candidate:
+                sentences.append(candidate)
+            next_cursor = abs_pos + 1
+            while next_cursor < len(buffer) and buffer[next_cursor].isspace():
+                next_cursor += 1
+            buffer = buffer[next_cursor:]
+            cursor = 0
+            continue
+
+        # punc == '.'
+        non_ws_count = len(re.sub(r'\s', '', candidate))
+        is_abbrev = bool(_ABBREV_PATTERN.search(before))
+        is_initial = bool(_INITIAL_PATTERN.search(before))
+
+        if non_ws_count < 5 or is_abbrev or is_initial:
+            # Not a real boundary — keep the period in the buffer so future tokens
+            # can extend the partial sentence. Advance cursor only.
+            cursor = abs_pos + 1
+            continue
+
+        if candidate:
+            sentences.append(candidate)
+        next_cursor = abs_pos + 1
+        while next_cursor < len(buffer) and buffer[next_cursor].isspace():
+            next_cursor += 1
+        buffer = buffer[next_cursor:]
+        cursor = 0
+
+    return sentences, buffer
+
+
 def _split_into_sentences(text: str) -> list:
     """Split text into sentences for pipelined TTS delivery."""
     parts = re.split(r'(?<=[.!?])\s+', (text or "").strip())
