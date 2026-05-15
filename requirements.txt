@@ -20,3 +20,6 @@ python-docx
 openpyxl
 odfpy
 lxml
+livekit==1.1.8
+livekit-api==1.1.0
+livekit-agents[codecs]==1.5.9
