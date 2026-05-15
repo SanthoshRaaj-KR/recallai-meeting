@@ -18,7 +18,7 @@ DRAFTER_TRANSCRIPT_BUDGET = int(os.getenv("JARVIS_DRAFTER_TRANSCRIPT_BUDGET", "8
 
 
 def _find_relevant_transcript_window(transcript: str, subject: str, window: int = 1500) -> str:
-    """Return a 1500-char window of the transcript centered on the first mention of subject.
+    """Return up to 1500-char window of the transcript centered on the first mention of subject.
 
     Used to give the drafter direct access to the relevant discussion even when it falls
     in the middle of a long transcript (which the head+tail excerpt would miss).
@@ -30,8 +30,9 @@ def _find_relevant_transcript_window(transcript: str, subject: str, window: int 
     pos = transcript.lower().find(needle)
     if pos < 0:
         return ""
-    start = max(0, pos - 400)
-    end = min(len(transcript), pos + window)
+    pre = min(400, pos)
+    start = pos - pre
+    end = min(len(transcript), start + window)
     return transcript[start:end]
 
 
