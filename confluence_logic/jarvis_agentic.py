@@ -28,6 +28,12 @@ from threading import Thread
 from typing import Any, Deque, Iterator, Optional
 from uuid import uuid4
 
+import datetime as _datetime_module
+import json
+import livekit.rtc as rtc
+from livekit import api as livekit_api
+from livekit.agents.utils.codecs import AudioStreamDecoder
+
 import requests
 import uvicorn
 from dotenv import load_dotenv
@@ -79,6 +85,14 @@ JARVIS_INTER_SENTENCE_GAP_SECONDS = float(os.getenv("JARVIS_INTER_SENTENCE_GAP_S
 JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS = float(os.getenv("JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", "0.35"))
 JARVIS_GENERAL_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_GENERAL_CLARIFICATION_TIMEOUT", "15.0"))
 JARVIS_LISTENING_TIMEOUT = float(os.getenv("JARVIS_LISTENING_TIMEOUT", "10.0"))
+LIVEKIT_URL = os.getenv("LIVEKIT_URL", "").strip()
+LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "").strip()
+LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "").strip()
+
+_LIVEKIT_SAMPLE_RATE = 48000          # D-10: 48 kHz PCM
+_LIVEKIT_NUM_CHANNELS = 1             # D-10: mono
+_LIVEKIT_SAMPLES_PER_CHANNEL = 960    # D-10: 20 ms frames (48000 * 0.020)
+_LIVEKIT_SUBSCRIBER_TTL_HOURS = 8     # D-16 pitfall 2: long-meeting tolerance
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "1.0"))
 JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "false").strip().lower() == "true"
 JARVIS_MICRO_ACK_ENABLED = os.getenv("JARVIS_MICRO_ACK_ENABLED", "true").strip().lower() == "true"
@@ -241,6 +255,8 @@ def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
         "invoker_participant": None,       # D-04: set when wake word is detected; D-03: cleared after dispatch
         "_pending_debounce_task": None,    # D-09: cancellable asyncio.Task for debounce window
         "_accumulated_query": "",          # D-07: space-joined query text from invoker segments
+        "livekit_room": None,         # rtc.Room — set by _create_livekit_room
+        "livekit_source": None,       # rtc.AudioSource — set by _create_livekit_room
     }
 
 
@@ -803,6 +819,162 @@ def build_transcript_provider_config() -> dict:
     }
 
 
+
+def _make_subscriber_token(room_name: str, ttl_hours: int = _LIVEKIT_SUBSCRIBER_TTL_HOURS) -> str:
+    """Generate a subscriber-only LiveKit JWT for bot.html (D-16).
+
+    Room name MUST be the session_id (a UUID from create_meeting_session) — this is
+    the same room name the publisher will use in _create_livekit_room. This is the
+    critical glue: subscriber-token room MUST equal publisher-token room.
+
+    TTL is long enough to cover an 8-hour meeting (Pitfall 2 in RESEARCH).
+    """
+    if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise RuntimeError(
+            "LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set to generate subscriber tokens."
+        )
+    return (
+        livekit_api.AccessToken(api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+        .with_identity("recall-bot-subscriber")
+        .with_name("RecallBot")
+        .with_grants(livekit_api.VideoGrants(
+            room_join=True,
+            room=room_name,
+            can_publish=False,
+            can_subscribe=True,
+        ))
+        .with_ttl(_datetime_module.timedelta(hours=ttl_hours))
+        .to_jwt()
+    )
+
+
+async def _create_livekit_room(session_id: str, bot_id: str) -> tuple:
+    """Create a LiveKit Room as publisher for this session (D-06, D-07, D-10, D-11).
+
+    Room name = session_id (UUID from create_meeting_session). bot_id is included in
+    the participant identity for traceability ONLY — it is NOT used as the room name,
+    because build_create_bot_payload() runs BEFORE bot_id exists and must generate the
+    subscriber token with the same room name we use here.
+
+    Stores Room + AudioSource in _meeting_sessions[session_id].
+    """
+    if not LIVEKIT_URL or not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise RuntimeError(
+            "LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET must be set before creating a LiveKit room."
+        )
+
+    publisher_token = (
+        livekit_api.AccessToken(api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+        .with_identity("jarvis-publisher-%s" % session_id)
+        .with_name("Jarvis")
+        .with_grants(livekit_api.VideoGrants(
+            room_join=True,
+            room=session_id,             # CRITICAL: room name = session_id (matches subscriber)
+            can_publish=True,
+            can_subscribe=False,
+        ))
+        .with_ttl(_datetime_module.timedelta(hours=_LIVEKIT_SUBSCRIBER_TTL_HOURS))
+        .to_jwt()
+    )
+
+    room = rtc.Room()
+    source = rtc.AudioSource(_LIVEKIT_SAMPLE_RATE, _LIVEKIT_NUM_CHANNELS)
+    track = rtc.LocalAudioTrack.create_audio_track("jarvis-audio", source)
+    options = rtc.TrackPublishOptions()
+    options.source = rtc.TrackSource.SOURCE_MICROPHONE
+
+    @room.on("disconnected")
+    def _on_disconnected(reason):
+        logger.warning("LiveKit room disconnected for session %s (bot %s): %s", session_id, bot_id, reason)
+
+    @room.on("reconnected")
+    def _on_reconnected():
+        logger.info("LiveKit room reconnected for session %s (bot %s)", session_id, bot_id)
+
+    await room.connect(LIVEKIT_URL, publisher_token)
+    await room.local_participant.publish_track(track, options)
+
+    state = _meeting_sessions.get(session_id)
+    if state is None:
+        state = _fresh_meeting_state(session_id)
+        _meeting_sessions[session_id] = state
+    state["livekit_room"] = room
+    state["livekit_source"] = source
+
+    logger.info("LiveKit room created — session=%s bot=%s room_name=%s", session_id, bot_id, session_id)
+    return room, source
+
+
+async def _teardown_livekit_room(session_id: str) -> None:
+    """Disconnect the LiveKit Room and clear session state (D-07)."""
+    state = _meeting_sessions.get(session_id)
+    if not state:
+        return
+    room = state.pop("livekit_room", None)
+    state.pop("livekit_source", None)
+    if room is None:
+        return
+    try:
+        await room.disconnect()
+    except Exception as exc:
+        logger.warning("LiveKit disconnect error for session %s: %s", session_id, exc)
+
+
+async def push_audio_to_livekit(
+    audio_bytes: bytes,
+    session_id: str,
+    generation: Optional[int] = None,
+) -> bool:
+    """Decode MP3 bytes to PCM and push to the session's LiveKit AudioSource.
+
+    Replaces speak() and speak_cached_audio() (D-13). Replaces the duration-wait
+    loop (D-12): source.capture_frame() provides natural backpressure.
+
+    If `generation` is provided, the loop aborts when meeting_state["output_generation"]
+    no longer matches (Pitfall 3 in RESEARCH — interruption mid-clip).
+
+    Returns True on success, False if there was no session/source or decode failed.
+    """
+    if not audio_bytes:
+        return False
+    state = _meeting_sessions.get(session_id)
+    if not state:
+        logger.warning("push_audio_to_livekit: no session state for %s", session_id)
+        return False
+    source = state.get("livekit_source")
+    if source is None:
+        logger.warning("push_audio_to_livekit: no livekit_source for session %s", session_id)
+        return False
+
+    decoder = AudioStreamDecoder(
+        format="mp3",
+        sample_rate=_LIVEKIT_SAMPLE_RATE,
+        num_channels=_LIVEKIT_NUM_CHANNELS,
+    )
+    try:
+        decoder.push(audio_bytes)
+        decoder.end_input()
+        async for frame in decoder:
+            if generation is not None and generation != meeting_state["output_generation"]:
+                await decoder.aclose()
+                return False
+            try:
+                await source.capture_frame(frame)
+            except Exception as exc:
+                logger.error("capture_frame error for session %s: %s", session_id, exc)
+                await decoder.aclose()
+                return False
+    except Exception as exc:
+        logger.error("AudioStreamDecoder failed for session %s: %s", session_id, exc)
+        return False
+    finally:
+        try:
+            await decoder.aclose()
+        except Exception:
+            pass
+    return True
+
+
 def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None) -> dict:
     stream_path = f"/recall-audio-stream/{session_id}" if session_id else "/recall-audio-stream"
     if not WEBHOOK_URL:
@@ -818,6 +990,28 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
         ws_base = WEBHOOK_URL
 
     ws_url = ws_base + stream_path
+
+    # D-02 / D-03 / D-14: Recall bot loads bot.html via output_media kind=webpage.
+    # D-16: pass LiveKit url, subscriber token, and room name as URL query params.
+    # CRITICAL: room name = session_id (a UUID). The publisher token in
+    # _create_livekit_room must use the SAME session_id as its room name. Otherwise
+    # the bot.html subscriber and Python publisher land in different rooms and no
+    # audio is delivered. Using session_id (not bot_id) avoids the chicken-and-egg
+    # problem where bot_id isn't available when this function runs.
+    room_name = session_id or _DEFAULT_SESSION_ID
+    subscriber_token = _make_subscriber_token(room_name)
+    # WEBHOOK_URL must be HTTPS (Recall requirement — Pitfall 5).
+    if not WEBHOOK_URL.startswith("https://"):
+        raise RuntimeError(
+            "WEBHOOK_URL must be HTTPS for Recall.ai output_media (got: %s)" % WEBHOOK_URL
+        )
+    bot_page_url = (
+        f"{WEBHOOK_URL.rstrip('/')}/bot-page"
+        f"?url={LIVEKIT_URL}"
+        f"&token={subscriber_token}"
+        f"&room={room_name}"
+    )
+
     return {
         "meeting_url": meeting_url,
         "bot_name": BOT_NAME,
@@ -835,6 +1029,12 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
                     "events": ["transcript.data"],
                 }
             ],
+        },
+        "output_media": {
+            "camera": {
+                "kind": "webpage",
+                "config": {"url": bot_page_url},
+            },
         },
     }
 
