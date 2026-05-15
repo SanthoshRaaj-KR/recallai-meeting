@@ -357,6 +357,18 @@ INTENT_DRAFTER_PROMPT = (
     "QUALITY RULES — read before writing after_content\n"
     "═══════════════════════════════════════════════\n"
 
+    "RULE 0 — VERBATIM CONTENT (HIGHEST PRIORITY — check this first):\n"
+    "If `intent.verbatim_content` is non-empty, it contains EXACT WORDS from the meeting "
+    "describing what to add. You MUST use it as the sole factual source for `after_content`.\n"
+    "- Do NOT add, remove, or change any specific items listed in verbatim_content.\n"
+    "- You MAY format it (markdown bullets, bold key terms) but keep all facts verbatim.\n"
+    "- Do NOT supplement with additional points you infer from the transcript.\n"
+    "WRONG: verbatim_content='A is slow, B crashes' → you write 5 detailed technical concerns\n"
+    "CORRECT: verbatim_content='A is slow, B crashes' → after_content:\n"
+    "  - A is slow\n"
+    "  - B crashes\n"
+    "If `intent.verbatim_content` is empty, fall through to RULE 1 below.\n\n"
+
     "RULE 1 — TRANSCRIPT GROUNDING (most critical):\n"
     "Every sentence in after_content must be DIRECTLY traceable to a specific statement made in the "
     "transcript. Do NOT add implementation details, technical specifics, methodology, or best practices "
