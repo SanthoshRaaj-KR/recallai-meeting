@@ -39,6 +39,7 @@ class ChangeIntent(BaseModel):
     new_value: str = ""          # specific new value to write
     action: str = "replace"      # replace | add | remove | rename | create
     rationale: str = ""          # why: "Akshat is busy", "migration to Claude SDK"
+    verbatim_content: str = ""   # NEW: for add/create actions, exact quoted content from transcript
 
 
 class ExtractedFacts(BaseModel):
@@ -141,6 +142,23 @@ FACT_EXTRACTION_PROMPT = (
     "subject: \"order fulfillment SLA\", target_hint: \"fulfillment, order processing\", "
     "old_value: \"48 hours\", new_value: \"24 hours\", action: \"replace\", "
     "rationale: \"New warehouse routing reduces processing time\"}\n"
+    "    CRITICAL RULE A — FINAL STATE ONLY:\n"
+    "    Extract the NET FINAL agreed state, not intermediate positions. "
+    "If the group first proposes X and then reverts or revises to Y, produce ONE intent for Y. "
+    "If the final decision is 'keep as-is / no change', produce ZERO intents for that topic. "
+    "NEVER produce two intents for the same topic with different new_values — that means you captured "
+    "an intermediate step that was overruled.\n"
+    "    CRITICAL RULE B — NO DUPLICATES:\n"
+    "    Each distinct change must appear exactly once. If the same update was mentioned at multiple "
+    "points in the meeting (e.g. someone reminded the group of a decision made earlier), extract it "
+    "only once with the most complete information available.\n"
+    "    CRITICAL RULE C — verbatim_content for add/create:\n"
+    "    For action='add' or action='create' intents where participants named SPECIFIC items to add "
+    "(a list of concerns, features, names, metrics, etc.): copy the EXACT items from the transcript "
+    "into `verbatim_content`. This must be a verbatim quote — do NOT paraphrase or summarize. "
+    "Example: meeting says 'we have three problems: A is too slow, B crashes on mobile, C loses user data' "
+    "→ verbatim_content='A is too slow, B crashes on mobile, C loses user data'. "
+    "Leave verbatim_content empty ('') for replace/remove/rename actions or when no specific list was named.\n"
     "    Use [] only if no documentation changes were discussed.\n"
     "    Be EXHAUSTIVE — if a meeting decision implies a documentation update, capture an intent. "
     "Capture both explicit changes (numbers, names, versions) and contextual ones "
@@ -193,7 +211,6 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
     query_terms: List[str] = []
     mentioned_page_titles: List[str] = []
     content_phrases: List[str] = []
-    change_intents: List[ChangeIntent] = []
     owners: Dict[str, str] = {}
     deadlines: Dict[str, str] = {}
 
@@ -204,7 +221,6 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
     seen_terms: set = set()
     seen_page_titles: set = set()
     seen_phrases: set = set()
-    seen_intents: set = set()
 
     for chunk in chunks:
         for item in chunk.decisions:
@@ -242,18 +258,31 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
             if key and key not in seen_phrases:
                 seen_phrases.add(key)
                 content_phrases.append(item)
-        for intent in chunk.change_intents:
-            # Dedup by subject+new_value+action (instruction-level uniqueness)
-            key = (
-                intent.subject.strip().lower(),
-                intent.new_value.strip().lower(),
-                intent.action.strip().lower(),
-            )
-            if any(key) and key not in seen_intents:
-                seen_intents.add(key)
-                change_intents.append(intent)
         owners.update(chunk.owners)
         deadlines.update(chunk.deadlines)
+
+    # Dedup by (normalized_subject, action) keeping LAST occurrence.
+    # "Last" = most recent in transcript order = final agreed state.
+    # This prevents contradictory intents (e.g. "change Q3 to Q1" then "Q3 is fine")
+    # from both passing through — the final state wins.
+    def _norm(text: str) -> str:
+        import re as _re
+        t = _re.sub(r"[^\w\s]", " ", (text or "").lower())
+        return _re.sub(r"\s+", " ", t).strip()[:60]
+
+    intent_key_order: list = []          # insertion-ordered unique keys
+    intent_last: dict = {}               # key -> last ChangeIntent seen
+
+    for chunk in chunks:
+        for intent in chunk.change_intents:
+            key = (_norm(intent.subject), intent.action.strip().lower())
+            if not any(key):
+                continue
+            if key not in intent_last:
+                intent_key_order.append(key)
+            intent_last[key] = intent    # LAST wins — final state of the discussion
+
+    change_intents = [intent_last[k] for k in intent_key_order]
 
     return ExtractedFacts(
         decisions=decisions,
