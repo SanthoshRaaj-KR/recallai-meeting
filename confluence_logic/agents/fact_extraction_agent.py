@@ -276,7 +276,7 @@ def _merge_facts(chunks: List[ExtractedFacts]) -> ExtractedFacts:
     for chunk in chunks:
         for intent in chunk.change_intents:
             key = (_norm(intent.subject), intent.action.strip().lower())
-            if not any(key):
+            if not all(key):
                 continue
             if key not in intent_last:
                 intent_key_order.append(key)
