@@ -296,6 +296,9 @@ INTENT_DRAFTER_PROMPT = (
     "Use this to pick the section that ALREADY discusses the intent's subject, not just one whose name matches.\n"
     "- meeting_context: full meeting brief (all decisions, action items, requirements from the entire meeting) "
     "plus a transcript excerpt. Use this to understand the FULL scope of what was discussed.\n\n"
+    "- relevant_transcript_window: a targeted excerpt (~1500 chars) from the part of the transcript "
+    "where `intent.subject` was specifically discussed. Use this as the AUTHORITATIVE source for what "
+    "was said about this intent's subject — it may contain details not visible in meeting_context.\n\n"
 
     "═══════════════════════════════════════════════\n"
     "STEP 1 — Does this intent apply to this page? (STRICT)\n"
