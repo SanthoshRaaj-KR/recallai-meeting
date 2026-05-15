@@ -17,6 +17,24 @@ DRAFTER_MODEL = os.getenv("JARVIS_AGENT_MODEL", "gpt-5-mini").strip()
 DRAFTER_TRANSCRIPT_BUDGET = int(os.getenv("JARVIS_DRAFTER_TRANSCRIPT_BUDGET", "8000"))
 
 
+def _find_relevant_transcript_window(transcript: str, subject: str, window: int = 1500) -> str:
+    """Return a 1500-char window of the transcript centered on the first mention of subject.
+
+    Used to give the drafter direct access to the relevant discussion even when it falls
+    in the middle of a long transcript (which the head+tail excerpt would miss).
+    Returns empty string if subject is empty or not found.
+    """
+    if not transcript or not subject:
+        return ""
+    needle = subject.strip().lower()[:40]
+    pos = transcript.lower().find(needle)
+    if pos < 0:
+        return ""
+    start = max(0, pos - 400)
+    end = min(len(transcript), pos + window)
+    return transcript[start:end]
+
+
 def _build_meeting_context(
     transcript_text: str,
     facts: Any = None,
