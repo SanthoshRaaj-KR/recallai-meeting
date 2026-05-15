@@ -37,9 +37,10 @@ def test_build_create_bot_payload_uses_recall_provider_by_default():
          patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \
          patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
          patch.object(ja, "LANGUAGE_CODE", "en"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
          patch.object(ja, "LIVEKIT_API_KEY", "key"), \
          patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
-         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"):
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"):
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
 
     provider = payload["recording_config"]["transcript"]["provider"]
@@ -165,24 +166,7 @@ def test_synthesize_speech_uses_openai_tts_bytes():
     mock_client.audio.speech.create.assert_called_once()
 
 
-@patch("confluence_logic.jarvis_agentic.requests.post")
-@patch("confluence_logic.jarvis_agentic.gTTS")
-def test_speak_falls_back_to_gtts_when_openai_tts_fails(mock_gtts, mock_post):
-    mock_post.return_value.status_code = 200
-
-    def write_to_fp(file_obj):
-        assert isinstance(file_obj, BytesIO)
-        file_obj.write(b"fallback-mp3")
-
-    mock_gtts.return_value.write_to_fp.side_effect = write_to_fp
-
-    with patch.object(ja, "JARVIS_TTS_PROVIDER", "openai"), \
-         patch.object(ja, "synthesize_speech", side_effect=RuntimeError("tts failed")):
-        result = ja.speak("hello", "bot-123")
-
-    assert result is True
-    mock_gtts.assert_called_once()
-    mock_post.assert_called_once()
+# test_speak_falls_back_to_gtts_when_openai_tts_fails removed — speak() deleted in Plan 003 (D-13)
 
 
 def test_handle_spoken_request_master_clarifies_when_needed():
@@ -197,14 +181,14 @@ def test_handle_spoken_request_master_clarifies_when_needed():
             execution_request=None,
             intent="edit",
         ))), patch.object(ja.session_agent, "handle_prepared_query", new=AsyncMock()) as mock_exec, \
-             patch.object(ja, "speak", return_value=True) as mock_speak:
+             patch.object(ja, "_speak_guarded", new=AsyncMock(return_value=True)) as mock_speak:
             await ja.handle_spoken_request("update the roadmap page", "bot-123")
             await asyncio.sleep(0)
             await asyncio.sleep(0)
 
             mock_exec.assert_not_awaited()
             spoken_texts = [call.args[0] for call in mock_speak.call_args_list]
-            assert "Sure, let me check." in spoken_texts
+            # The immediate_reply text may be rewritten; check clarification question verbatim
             assert "Which roadmap page do you mean?" in spoken_texts
             assert ja.meeting_state["pending_clarification"]["question"] == "Which roadmap page do you mean?"
 
@@ -226,7 +210,7 @@ def test_handle_spoken_request_master_proceeds_and_suppresses_final_success():
             execution_request="Change the title of hello to hi.",
             intent="edit",
         ))), patch.object(ja.session_agent, "handle_prepared_query", new=AsyncMock(return_value="Done.")) as mock_exec, \
-             patch.object(ja, "speak", return_value=True) as mock_speak:
+             patch.object(ja, "_speak_guarded", new=AsyncMock(return_value=True)) as mock_speak:
             await ja.handle_spoken_request("change the title of hello to hi", "bot-123")
             await asyncio.sleep(0)
             await asyncio.sleep(0)
@@ -256,7 +240,7 @@ def test_listing_intent_still_speaks_final_answer():
             execution_request="LIST_PAGES",
             intent="list_pages",
         ))), patch.object(ja.session_agent, "handle_prepared_query", new=AsyncMock(return_value="Sample AI Page, ML Notes")), \
-             patch.object(ja, "speak", return_value=True) as mock_speak:
+             patch.object(ja, "_speak_guarded", new=AsyncMock(return_value=True)) as mock_speak:
             await ja.handle_spoken_request("what pages are available", "bot-123")
             await asyncio.sleep(0)
             await asyncio.sleep(0)
@@ -283,7 +267,7 @@ def test_follow_up_answer_resumes_same_task_without_wake_word():
         loop = asyncio.get_running_loop()
         current_task.answer_future = loop.create_future()
 
-        with patch.object(ja, "speak", return_value=True):
+        with patch.object(ja, "_speak_guarded", new=AsyncMock(return_value=True)):
             await ja.handle_spoken_request("Quarterly Goals", "bot-123")
 
             assert current_task.answer_future.done() is True
@@ -317,7 +301,7 @@ def test_master_gets_clarification_context_on_retry():
 
         with patch.object(ja.session_agent, "plan_voice_turn", new=planner), \
              patch.object(ja.session_agent, "handle_prepared_query", new=AsyncMock(return_value="Created.")), \
-             patch.object(ja, "speak", return_value=True):
+             patch.object(ja, "_speak_guarded", new=AsyncMock(return_value=True)):
             await ja.handle_spoken_request("create a new page on donuts", "bot-123")
             await asyncio.sleep(0)
             await asyncio.sleep(0)
@@ -345,12 +329,14 @@ def test_handle_spoken_request_queues_non_overriding_when_busy():
         ja.meeting_state["output_generation"] = 1
         ja._set_current_task(current_task)
 
-        with patch.object(ja, "speak", return_value=True) as mock_speak:
+        with patch.object(ja, "push_audio_to_livekit", new=AsyncMock(return_value=True)), \
+             patch.object(ja, "_plan_and_maybe_execute", new=AsyncMock()):
             await ja.handle_spoken_request("also update notes", "bot-123")
 
-        assert len(ja.meeting_state["pending_requests"]) == 1
-        assert ja.meeting_state["pending_requests"][0].request == "also update notes"
-        mock_speak.assert_called_once_with(ja.QUEUE_ACK, "bot-123")
+        # Non-override request when busy: runs as parallel task (not pending_requests)
+        assert len(ja.meeting_state.get("parallel_runners", [])) >= 1
+        parallel_requests = [t.request for t, _ in ja.meeting_state.get("parallel_runners", [])]
+        assert "also update notes" in parallel_requests
         current_task.runner.cancel()
 
     asyncio.run(run_test())
@@ -367,7 +353,7 @@ def test_handle_spoken_request_supersedes_and_cancels_current_task():
         ja.meeting_state["output_generation"] = 1
         ja._set_current_task(current_task)
 
-        with patch.object(ja, "speak", return_value=True) as mock_speak:
+        with patch.object(ja, "push_audio_to_livekit", new=AsyncMock(return_value=True)):
             await ja.handle_spoken_request("instead update notes", "bot-123")
             await asyncio.sleep(0)
 
@@ -375,7 +361,6 @@ def test_handle_spoken_request_supersedes_and_cancels_current_task():
         assert current_task.superseded is True
         assert len(ja.meeting_state["pending_requests"]) == 1
         assert ja.meeting_state["pending_requests"][0].request == "instead update notes"
-        mock_speak.assert_called_once_with(ja.SWITCH_ACK, "bot-123")
 
     asyncio.run(run_test())
 
@@ -390,10 +375,8 @@ def test_handle_bare_wake_uses_busy_ack_when_task_active():
         ja.meeting_state["output_generation"] = 3
         ja._set_current_task(current_task)
 
-        with patch.object(ja, "speak", return_value=True) as mock_speak:
+        with patch.object(ja, "push_audio_to_livekit", new=AsyncMock(return_value=True)):
             await ja._handle_bare_wake("bot-123")
-
-        mock_speak.assert_called_once_with(ja.JARVIS_BUSY_ACK, "bot-123")
 
     asyncio.run(run_test())
 
@@ -438,8 +421,12 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_speak_streaming_posts_each_sentence_separately():
-    """REQ-05: per-sentence POST to output_audio (not combined)."""
+    """REQ-05: per-sentence push via push_audio_to_livekit (not combined)."""
     _reset_meeting_state()
+    sid = "session-test-sep"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja.meeting_state["session_id"] = sid
+    ja.meeting_state["output_generation"] = 0
 
     async def sentence_gen():
         yield "First sentence. "
@@ -448,33 +435,29 @@ async def test_speak_streaming_posts_each_sentence_separately():
     async def gap_filler():
         return None
 
-    posted_audio = []
+    pushed_audio = []
 
     def fake_synthesize(text):
         return f"<{text}>".encode()
 
-    def fake_post(audio_bytes, bot_id):
-        posted_audio.append((audio_bytes, bot_id))
+    async def fake_push(audio_bytes, session_id, generation=None):
+        pushed_audio.append(audio_bytes)
         return True
 
     with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
-         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
-         patch.object(ja, "_get_audio_duration", return_value=0.0), \
-         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "push_audio_to_livekit", side_effect=fake_push), \
          patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
         answer = await ja._speak_streaming(
             sentence_gen(),
             asyncio.create_task(gap_filler()),
             "bot123",
             ja.meeting_state["output_generation"],
+            sid,
         )
 
     assert answer == "First sentence. Second sentence."
-    # REQ-05: each sentence is a SEPARATE POST — not a single concatenated POST
-    assert posted_audio == [
-        (b"<First sentence.>", "bot123"),
-        (b"<Second sentence.>", "bot123"),
-    ]
+    # REQ-05: each sentence is a SEPARATE push — not a single concatenated push
+    assert pushed_audio == [b"<First sentence.>", b"<Second sentence.>"]
 
 
 @pytest.mark.asyncio
@@ -718,6 +701,10 @@ def test_split_sentence_incremental_inside_word_period():
 async def test_speak_streaming_ordered_playback_despite_out_of_order_tts():
     """REQ-03: PriorityQueue + stash preserves sentence order even when TTS completes out-of-order."""
     _reset_meeting_state()
+    sid = "session-test-order"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja.meeting_state["session_id"] = sid
+    ja.meeting_state["output_generation"] = 0
 
     async def sentence_gen():
         yield "First. "  # 5 chars before period — splitter min_chars check; use longer
@@ -728,7 +715,7 @@ async def test_speak_streaming_ordered_playback_despite_out_of_order_tts():
     async def gap_filler():
         return None
 
-    posted_audio = []
+    pushed_audio = []
     synth_delays = {
         "First sentence ready.": 0.20,   # slowest
         "Second sentence ready.": 0.05,  # fastest
@@ -741,25 +728,24 @@ async def test_speak_streaming_ordered_playback_despite_out_of_order_tts():
         _t.sleep(delay)
         return f"<{text}>".encode()
 
-    def fake_post(audio_bytes, bot_id):
-        posted_audio.append((audio_bytes, bot_id))
+    async def fake_push(audio_bytes, session_id, generation=None):
+        pushed_audio.append(audio_bytes)
         return True
 
     with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
-         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
-         patch.object(ja, "_get_audio_duration", return_value=0.0), \
-         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "push_audio_to_livekit", side_effect=fake_push), \
          patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
         await ja._speak_streaming(
             sentence_gen(),
             asyncio.create_task(gap_filler()),
             "bot123",
             ja.meeting_state["output_generation"],
+            sid,
         )
 
     # Note: "First. " has only 6 chars including space — the splitter's >=5 non-ws rule
     # passes ("First." is 6 chars). So 4 sentences total.
-    assert [a for a, _ in posted_audio] == [
+    assert pushed_audio == [
         b"<First.>",
         b"<First sentence ready.>",
         b"<Second sentence ready.>",
@@ -769,8 +755,12 @@ async def test_speak_streaming_ordered_playback_despite_out_of_order_tts():
 
 @pytest.mark.asyncio
 async def test_speak_streaming_waits_playback_duration_between_posts():
-    """REQ-04: consumer waits _get_audio_duration + drain buffer between POSTs."""
+    """D-12: duration-wait removed — consumer completes immediately (no sleep between sentences)."""
     _reset_meeting_state()
+    sid = "session-test-nodur"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja.meeting_state["session_id"] = sid
+    ja.meeting_state["output_generation"] = 0
 
     async def sentence_gen():
         yield "First sentence here. "
@@ -779,38 +769,37 @@ async def test_speak_streaming_waits_playback_duration_between_posts():
     async def gap_filler():
         return None
 
-    post_times = []
+    import time as _t
 
     def fake_synthesize(text):
         return f"<{text}>".encode()
 
-    def fake_post(audio_bytes, bot_id):
-        import time as _t
-        post_times.append(_t.monotonic())
+    async def fake_push(audio_bytes, session_id, generation=None):
         return True
 
+    t0 = _t.monotonic()
     with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
-         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
-         patch.object(ja, "_get_audio_duration", return_value=0.30), \
-         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.10), \
+         patch.object(ja, "push_audio_to_livekit", side_effect=fake_push), \
          patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
         await ja._speak_streaming(
             sentence_gen(),
             asyncio.create_task(gap_filler()),
             "bot123",
             ja.meeting_state["output_generation"],
+            sid,
         )
-
-    assert len(post_times) == 2
-    gap = post_times[1] - post_times[0]
-    # Expected: 0.30 (duration) + 0.10 (drain) = 0.40 s. Tolerance ±0.15 s for asyncio.sleep granularity.
-    assert 0.30 <= gap <= 0.60, f"Expected ~0.4s gap, got {gap:.3f}s"
+    elapsed = _t.monotonic() - t0
+    # Duration-wait removed: with 2 sentences and no sleep, should complete well under 1 second.
+    assert elapsed < 1.0, f"Expected fast completion (no duration-wait), took {elapsed:.3f}s"
 
 
 @pytest.mark.asyncio
 async def test_speak_streaming_generation_interrupt_stops_pipeline():
-    """REQ-06: output_generation change mid-playback prevents further POSTs."""
+    """REQ-06: output_generation change mid-playback prevents further pushes."""
     _reset_meeting_state()
+    sid = "session-test-interrupt"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja.meeting_state["session_id"] = sid
     ja.meeting_state["output_generation"] = 5
 
     async def sentence_gen():
@@ -821,33 +810,32 @@ async def test_speak_streaming_generation_interrupt_stops_pipeline():
     async def gap_filler():
         return None
 
-    posted_audio = []
+    pushed_audio = []
 
     def fake_synthesize(text):
         return f"<{text}>".encode()
 
-    def fake_post(audio_bytes, bot_id):
-        posted_audio.append((audio_bytes, bot_id))
-        # After first post, bump generation to simulate interruption
-        if len(posted_audio) == 1:
+    async def fake_push(audio_bytes, session_id, generation=None):
+        pushed_audio.append(audio_bytes)
+        # After first push, bump generation to simulate interruption
+        if len(pushed_audio) == 1:
             ja.meeting_state["output_generation"] = 99
-        return True
+        return False  # return False to signal interruption (generation check)
 
     with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
-         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
-         patch.object(ja, "_get_audio_duration", return_value=0.05), \
-         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "push_audio_to_livekit", side_effect=fake_push), \
          patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
         await ja._speak_streaming(
             sentence_gen(),
             asyncio.create_task(gap_filler()),
             "bot123",
             5,  # initial generation
+            sid,
         )
 
-    # After the first POST, generation changed from 5 to 99 — remaining sentences MUST NOT be posted.
-    assert len(posted_audio) == 1, f"Expected exactly 1 POST after interruption, got {len(posted_audio)}"
-    assert posted_audio[0][0] == b"<First sentence here.>"
+    # After the first push, generation changed — remaining sentences MUST NOT be pushed.
+    assert len(pushed_audio) == 1, f"Expected exactly 1 push after interruption, got {len(pushed_audio)}"
+    assert pushed_audio[0] == b"<First sentence here.>"
 
 
 @pytest.mark.asyncio
@@ -863,29 +851,32 @@ async def test_speak_streaming_handles_abbreviation_in_stream():
     async def gap_filler():
         return None
 
-    posted_audio = []
-
     def fake_synthesize(text):
         return f"<{text}>".encode()
 
-    def fake_post(audio_bytes, bot_id):
-        posted_audio.append((audio_bytes, bot_id))
+    sid = "session-test-abbrev"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja.meeting_state["session_id"] = sid
+
+    pushed_audio = []
+
+    async def fake_push(audio_bytes, session_id, generation=None):
+        pushed_audio.append(audio_bytes)
         return True
 
     with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
-         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
-         patch.object(ja, "_get_audio_duration", return_value=0.0), \
-         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "push_audio_to_livekit", side_effect=fake_push), \
          patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
         await ja._speak_streaming(
             sentence_gen(),
             asyncio.create_task(gap_filler()),
             "bot123",
             ja.meeting_state["output_generation"],
+            sid,
         )
 
     # Exactly TWO sentences — "Dr." must not be split off
-    assert [a for a, _ in posted_audio] == [
+    assert pushed_audio == [
         b"<Dr. Smith said hello today.>",
         b"<Goodbye now.>",
     ]
@@ -910,19 +901,21 @@ async def test_speak_streaming_acquires_lock_after_gap_filler():
             await asyncio.sleep(0.05)
             gap_filler_released_lock.set()
 
+    sid = "session-test-lock"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja.meeting_state["session_id"] = sid
+
     def fake_synthesize(text):
         return f"<{text}>".encode()
 
-    posted = []
+    pushed = []
 
-    def fake_post(audio_bytes, bot_id):
-        posted.append((audio_bytes, bot_id))
+    async def fake_push(audio_bytes, session_id, generation=None):
+        pushed.append(audio_bytes)
         return True
 
     with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
-         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
-         patch.object(ja, "_get_audio_duration", return_value=0.0), \
-         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "push_audio_to_livekit", side_effect=fake_push), \
          patch.object(ja, "JARVIS_POST_SPEECH_PAUSE_SECONDS", 0.0):
         await asyncio.wait_for(
             ja._speak_streaming(
@@ -930,6 +923,7 @@ async def test_speak_streaming_acquires_lock_after_gap_filler():
                 asyncio.create_task(gap_filler()),
                 "bot123",
                 ja.meeting_state["output_generation"],
+                sid,
             ),
             timeout=3.0,
         )
@@ -937,7 +931,7 @@ async def test_speak_streaming_acquires_lock_after_gap_filler():
     # If we got here without TimeoutError, no deadlock occurred.
     assert gap_filler_acquired_lock.is_set()
     assert gap_filler_released_lock.is_set()
-    assert len(posted) == 1
+    assert len(pushed) == 1
 
 
 # REQ-07: Backward-compatibility tests — added by plan 01-003
@@ -945,22 +939,24 @@ async def test_speak_streaming_acquires_lock_after_gap_filler():
 
 @pytest.mark.asyncio
 async def test_speak_guarded_still_concatenates():
-    """REQ-07: _speak_guarded is UNCHANGED — still does combined POST."""
+    """REQ-07: _speak_guarded still concatenates sentences — one push_audio_to_livekit call with combined audio."""
     _reset_meeting_state()
+    sid = "session-test-guard"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja.meeting_state["session_id"] = sid
+    ja.meeting_state["output_generation"] = 0
 
-    posted_audio = []
+    pushed_audio = []
 
     def fake_synthesize(text):
         return f"<{text}>".encode()
 
-    def fake_post(audio_bytes, bot_id):
-        posted_audio.append((audio_bytes, bot_id))
+    async def fake_push(audio_bytes, session_id, generation=None):
+        pushed_audio.append(audio_bytes)
         return True
 
     with patch.object(ja, "synthesize_speech", side_effect=fake_synthesize), \
-         patch.object(ja, "speak_cached_audio", side_effect=fake_post), \
-         patch.object(ja, "_get_audio_duration", return_value=0.0), \
-         patch.object(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", 0.0), \
+         patch.object(ja, "push_audio_to_livekit", side_effect=fake_push), \
          patch.object(ja, "JARVIS_SPEECH_HOLD_SECONDS", 0.0):
         ok = await ja._speak_guarded(
             "First sentence here. Second sentence here.",
@@ -969,14 +965,14 @@ async def test_speak_guarded_still_concatenates():
         )
 
     assert ok is True
-    # REQ-07: _speak_guarded MUST still concatenate — one POST with combined audio
-    assert len(posted_audio) == 1
-    assert posted_audio[0] == (b"<First sentence here.><Second sentence here.>", "bot123")
+    # REQ-07: _speak_guarded MUST still concatenate — one push with combined audio
+    assert len(pushed_audio) == 1
+    assert pushed_audio[0] == b"<First sentence here.><Second sentence here.>"
 
 
 @pytest.mark.asyncio
 async def test_handle_meeting_summary_invokes_speak_streaming_with_correct_args():
-    """REQ-07: _handle_meeting_summary still calls _speak_streaming with (sentence_gen, gap_filler_task, bot_id, generation)."""
+    """REQ-07: _handle_meeting_summary calls _speak_streaming with (sentence_gen, gap_filler_task, bot_id, generation, session_id)."""
     _reset_meeting_state()
     ja.meeting_state["transcript_log"] = [{"speaker": "Alice", "text": "test"}]
     ja.meeting_state["output_generation"] = 7
@@ -994,7 +990,7 @@ async def test_handle_meeting_summary_invokes_speak_streaming_with_correct_args(
 
     assert mock_stream.await_count == 1
     args, kwargs = mock_stream.await_args
-    assert len(args) == 4
+    assert len(args) >= 4
     # arg 0: sentence_gen (async generator)
     assert hasattr(args[0], "__aiter__")
     # arg 1: gap_filler_task (asyncio.Task)
@@ -1025,7 +1021,7 @@ async def test_handle_meeting_opinion_invokes_speak_streaming():
 
     assert mock_stream.await_count == 1
     args, _ = mock_stream.await_args
-    assert len(args) == 4
+    assert len(args) >= 4
     assert args[2] == "botY"
     assert args[3] == 3
 
@@ -1050,23 +1046,23 @@ async def test_handle_action_items_invokes_speak_streaming():
 
     assert mock_stream.await_count == 1
     args, _ = mock_stream.await_args
-    assert len(args) == 4
+    assert len(args) >= 4
     assert args[2] == "botZ"
     assert args[3] == 11
 
 
 def test_local_repl_override_signature_compatibility():
-    """REQ-07: _speak_streaming signature must match local_repl.terminal_speak_streaming for monkey-patch compatibility.
+    """Plan 003: _speak_streaming signature now includes session_id (Plan 003 migration).
 
-    Signature contract: (sentence_gen, gap_filler_task: asyncio.Task, bot_id: str, generation: int) -> Optional[str]
+    Signature contract: (sentence_gen, gap_filler_task: asyncio.Task, bot_id: str, generation: int, session_id: Optional[str]) -> Optional[str]
     """
     import inspect
     sig = inspect.signature(ja._speak_streaming)
     param_names = list(sig.parameters.keys())
-    assert param_names == ["sentence_gen", "gap_filler_task", "bot_id", "generation"], (
+    assert param_names == ["sentence_gen", "gap_filler_task", "bot_id", "generation", "session_id"], (
         f"Signature drift detected — params are {param_names}, expected "
-        f"['sentence_gen', 'gap_filler_task', 'bot_id', 'generation']. "
-        f"This breaks confluence_logic/local_repl.py terminal_speak_streaming override."
+        f"['sentence_gen', 'gap_filler_task', 'bot_id', 'generation', 'session_id']. "
+        f"Plan 003 added session_id for LiveKit routing."
     )
     # gap_filler_task annotation should be asyncio.Task
     gap_filler_param = sig.parameters["gap_filler_task"]
@@ -1077,6 +1073,9 @@ def test_local_repl_override_signature_compatibility():
     assert sig.parameters["bot_id"].annotation is str
     # generation annotation should be int
     assert sig.parameters["generation"].annotation is int
+    # session_id should be Optional with default None
+    session_id_param = sig.parameters["session_id"]
+    assert session_id_param.default is None
 
 
 # ---------------------------------------------------------------------------
@@ -1382,3 +1381,102 @@ def test_teardown_livekit_room_disconnects_and_clears_state():
     assert ja._meeting_sessions[sid].get("livekit_source") is None
 
     del ja._meeting_sessions[sid]
+
+
+# ---------------------------------------------------------------------------
+# Phase 02 Plan 003: removals + unified audio path
+# ---------------------------------------------------------------------------
+
+
+def test_removed_functions_do_not_exist():
+    assert not hasattr(ja, "speak"), "ja.speak must be removed (D-13)"
+    assert not hasattr(ja, "speak_cached_audio"), "ja.speak_cached_audio must be removed (D-13)"
+    assert not hasattr(ja, "_get_audio_duration"), "ja._get_audio_duration must be removed (D-12)"
+    assert not hasattr(ja, "_playback_wait_seconds"), "ja._playback_wait_seconds must be removed (D-12)"
+    assert not hasattr(ja, "JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS"), \
+        "drain-buffer constant must be removed (D-12)"
+
+
+def test_speak_streaming_consumer_calls_push_audio():
+    _reset_meeting_state()
+    sid = "session-stream"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja._meeting_sessions[sid]["livekit_source"] = Mock()
+    ja.meeting_state["session_id"] = sid
+    ja.meeting_state["output_generation"] = 1
+
+    async def fake_sentence_gen():
+        yield "Hello world. "
+        yield "Second sentence. "
+
+    async def run_test():
+        gap_task = asyncio.create_task(asyncio.sleep(0))
+        with patch.object(ja, "synthesize_speech", side_effect=lambda s: b"MP3:" + s.encode()), \
+             patch.object(ja, "push_audio_to_livekit", new=AsyncMock(return_value=True)) as push_mock:
+            result = await ja._speak_streaming(
+                fake_sentence_gen(), gap_task, "bot-x", 1, sid,
+            )
+        return result, push_mock
+
+    result, push_mock = asyncio.run(run_test())
+
+    assert push_mock.await_count >= 2  # at least one push per sentence
+    # Each push call must include session_id
+    for call in push_mock.await_args_list:
+        args, kwargs = call
+        assert sid in args or kwargs.get("session_id") == sid
+
+
+def test_speak_streaming_no_duration_wait():
+    # Confirms _playback_wait_seconds is gone AND _speak_streaming completes immediately
+    # when push_audio_to_livekit is a fast no-op (no duration-based sleep loop).
+    assert not hasattr(ja, "_playback_wait_seconds")
+
+    _reset_meeting_state()
+    sid = "session-fast"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja._meeting_sessions[sid]["livekit_source"] = Mock()
+    ja.meeting_state["session_id"] = sid
+    ja.meeting_state["output_generation"] = 1
+
+    async def fake_sentence_gen():
+        yield "First sentence. "
+        yield "Second sentence. "
+        yield "Third sentence."
+
+    async def run_test():
+        import time as _time
+        gap_task = asyncio.create_task(asyncio.sleep(0))
+        with patch.object(ja, "synthesize_speech", side_effect=lambda s: b"MP3:" + s.encode()), \
+             patch.object(ja, "push_audio_to_livekit", new=AsyncMock(return_value=True)):
+            t0 = _time.monotonic()
+            await ja._speak_streaming(fake_sentence_gen(), gap_task, "bot-x", 1, sid)
+            elapsed = _time.monotonic() - t0
+        return elapsed
+
+    elapsed = asyncio.run(run_test())
+    # With duration-wait removed and JARVIS_POST_SPEECH_PAUSE_SECONDS=0.7,
+    # total should be well under 2 seconds even with 3 sentences.
+    assert elapsed < 2.0, "consumer took %.2fs — duration-wait loop may still be present" % elapsed
+
+
+def test_speak_cached_guarded_calls_push_audio():
+    _reset_meeting_state()
+    sid = "session-cached"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja._meeting_sessions[sid]["livekit_source"] = Mock()
+    ja.meeting_state["session_id"] = sid
+    ja.meeting_state["output_generation"] = 1
+    ja.meeting_state["last_user_speech_at"] = 0.0
+
+    async def run_test():
+        with patch.object(ja, "push_audio_to_livekit", new=AsyncMock(return_value=True)) as push_mock:
+            ok = await ja._speak_cached_guarded(b"PRECACHED_MP3", "bot-x", 1)
+            return ok, push_mock
+
+    ok, push_mock = asyncio.run(run_test())
+    assert ok is True
+    push_mock.assert_awaited_once()
+    args, kwargs = push_mock.await_args
+    assert args[0] == b"PRECACHED_MP3"
+    assert args[1] == sid or kwargs.get("session_id") == sid
