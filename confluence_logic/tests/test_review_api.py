@@ -356,7 +356,11 @@ async def test_start_bot_uses_explicit_session_state():
 
     session_id = "test-session-review-api"
 
-    with patch.object(jarvis_agentic, "create_bot", return_value="bot-for-session"):
+    async def _fake_create_room(sid, bid):
+        return (Mock(), Mock())
+
+    with patch.object(jarvis_agentic, "create_bot", return_value="bot-for-session"), \
+         patch.object(jarvis_agentic, "_create_livekit_room", new=_fake_create_room):
         response = await api._start_bot_for_session(
             api.StartBotRequest(meeting_url="https://meet.google.com/abc-defg-hij"),
             session_id=session_id,
