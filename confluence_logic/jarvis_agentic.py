@@ -82,7 +82,6 @@ JARVIS_WAKE_ACK = os.getenv("JARVIS_WAKE_ACK", "Yes?").strip()
 JARVIS_BUSY_ACK = os.getenv("JARVIS_BUSY_ACK", "I'm already on it. Give me a moment.").strip()
 JARVIS_SPEECH_HOLD_SECONDS = float(os.getenv("JARVIS_SPEECH_HOLD_SECONDS", "0.8"))
 JARVIS_INTER_SENTENCE_GAP_SECONDS = float(os.getenv("JARVIS_INTER_SENTENCE_GAP_SECONDS", "0.18"))
-JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS = float(os.getenv("JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS", "0.35"))
 JARVIS_GENERAL_CLARIFICATION_TIMEOUT = float(os.getenv("JARVIS_GENERAL_CLARIFICATION_TIMEOUT", "15.0"))
 JARVIS_LISTENING_TIMEOUT = float(os.getenv("JARVIS_LISTENING_TIMEOUT", "10.0"))
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "").strip()
@@ -343,6 +342,18 @@ def bind_bot_to_session(bot_id: str, session_id: str) -> None:
 
 def get_session_id_for_bot(bot_id: str) -> Optional[str]:
     return _bot_session_ids.get(bot_id)
+
+
+def _resolve_session_id(bot_id: Optional[str] = None) -> str:
+    """Resolve the active session_id from meeting_state, bot_id mapping, or default."""
+    sid = meeting_state.get("session_id") if meeting_state else None
+    if sid:
+        return sid
+    if bot_id:
+        mapped = get_session_id_for_bot(bot_id)
+        if mapped:
+            return mapped
+    return _DEFAULT_SESSION_ID
 
 
 def set_current_meeting_session(session_id: Optional[str] = None):
@@ -1098,150 +1109,8 @@ def synthesize_speech(text: str) -> bytes:
         return response.read()
 
 
-def speak(text: str, bot_id: str) -> bool:
-    try:
-        audio_bytes = synthesize_speech(text)
-        audio_b64 = base64.b64encode(audio_bytes).decode()
-        resp = requests.post(
-            f"{RECALL_BASE_URL}/bot/{bot_id}/output_audio/",
-            headers={"Authorization": f"Token {RECALL_API_KEY}", "Content-Type": "application/json"},
-            json={"kind": "mp3", "b64_data": audio_b64},
-            timeout=10,
-        )
-        return resp.status_code == 200
-    except Exception as e:
-        logger.error("speak() error: %s", e)
-        if JARVIS_TTS_PROVIDER != "gtts":
-            try:
-                buffer = BytesIO()
-                gTTS(text, lang=LANGUAGE_CODE).write_to_fp(buffer)
-                resp = requests.post(
-                    f"{RECALL_BASE_URL}/bot/{bot_id}/output_audio/",
-                    headers={"Authorization": f"Token {RECALL_API_KEY}", "Content-Type": "application/json"},
-                    json={"kind": "mp3", "b64_data": base64.b64encode(buffer.getvalue()).decode()},
-                    timeout=10,
-                )
-                return resp.status_code == 200
-            except Exception as fallback_error:
-                logger.error("gTTS fallback failed: %s", fallback_error)
-        return False
-
-
-def speak_cached_audio(audio_bytes: bytes, bot_id: str) -> bool:
-    """Send pre-cached MP3 audio bytes directly to the Recall bot, skipping TTS synthesis."""
-    try:
-        audio_b64 = base64.b64encode(audio_bytes).decode()
-        resp = requests.post(
-            f"{RECALL_BASE_URL}/bot/{bot_id}/output_audio/",
-            headers={"Authorization": f"Token {RECALL_API_KEY}", "Content-Type": "application/json"},
-            json={"kind": "mp3", "b64_data": audio_b64},
-            timeout=10,
-        )
-        return resp.status_code == 200
-    except Exception as e:
-        logger.error("speak_cached_audio() error: %s", e)
-        return False
-
-
-def _get_audio_duration(audio_bytes: bytes) -> float:
-    """Compute exact MP3 playback duration by counting all MPEG Layer III frames.
-
-    Algorithm:
-    1. Skip ID3v2 tag to reach the first frame sync.
-    2. Check for a Xing/Info VBR header in the first frame — if present, use
-       stored frame_count × 1152 / sample_rate for exact VBR duration.
-    3. Otherwise hop frame-by-frame (CBR: all frames same size ± 1 padding byte),
-       count them, and return frame_count × 1152 / sample_rate.
-    4. Final fallback: file_size / (bitrate / 8).
-
-    This gives exact duration regardless of TTS provider, voice, or speed setting.
-    """
-    _BITRATES = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0]
-    _SAMPLERATES = [44100, 48000, 32000, 0]
-    SAMPLES_PER_FRAME = 1152  # MPEG-1 Layer III constant
-    MIN_DURATION = 0.1
-
-    data = audio_bytes
-    if not data:
-        return MIN_DURATION
-
-    # Step 1: skip ID3v2 tag
-    offset = 0
-    if data[:3] == b"ID3" and len(data) >= 10:
-        sz = (
-            (data[6] & 0x7F) << 21
-            | (data[7] & 0x7F) << 14
-            | (data[8] & 0x7F) << 7
-            | (data[9] & 0x7F)
-        )
-        offset = 10 + sz
-
-    # Step 2: find first valid frame header
-    first_bitrate = 0
-    first_samplerate = 0
-    first_pos = offset
-    pos = offset
-    while pos + 4 < len(data):
-        b = data[pos:pos + 4]
-        if b[0] == 0xFF and (b[1] & 0xE0) == 0xE0:
-            layer = (b[1] >> 1) & 0x3
-            bi = (b[2] >> 4) & 0xF
-            si = (b[2] >> 2) & 0x3
-            padding = (b[2] >> 1) & 0x1
-            if layer == 1 and 0 < bi < 15 and si < 3:
-                bitrate = _BITRATES[bi] * 1000
-                samplerate = _SAMPLERATES[si]
-                if bitrate > 0 and samplerate > 0:
-                    first_bitrate = bitrate
-                    first_samplerate = samplerate
-                    first_pos = pos
-                    # Step 3: check for Xing/Info VBR header
-                    # Offset within frame: 4-byte header + 32-byte side info (stereo MPEG-1)
-                    xing_off = pos + 36
-                    if xing_off + 12 <= len(data):
-                        tag = data[xing_off:xing_off + 4]
-                        if tag in (b"Xing", b"Info"):
-                            flags = int.from_bytes(data[xing_off + 4:xing_off + 8], "big")
-                            if flags & 0x1:  # Frames field present
-                                frame_count = int.from_bytes(data[xing_off + 8:xing_off + 12], "big")
-                                if frame_count > 0:
-                                    return max(MIN_DURATION, frame_count * SAMPLES_PER_FRAME / samplerate)
-                    break
-        pos += 1
-
-    if not first_bitrate or not first_samplerate:
-        # No valid frame found — fallback to 224 kbps assumption
-        return max(MIN_DURATION, len(data) / 28000)
-
-    # Step 4: CBR frame-hopping — count all frames
-    frame_count = 0
-    pos = first_pos
-    while pos + 4 < len(data):
-        b = data[pos:pos + 4]
-        if b[0] == 0xFF and (b[1] & 0xE0) == 0xE0:
-            layer = (b[1] >> 1) & 0x3
-            bi = (b[2] >> 4) & 0xF
-            si = (b[2] >> 2) & 0x3
-            padding = (b[2] >> 1) & 0x1
-            if layer == 1 and 0 < bi < 15 and si < 3:
-                bitrate = _BITRATES[bi] * 1000
-                samplerate = _SAMPLERATES[si]
-                if bitrate > 0 and samplerate > 0:
-                    frame_size = 144 * bitrate // samplerate + padding
-                    frame_count += 1
-                    pos += max(frame_size, 1)
-                    continue
-        pos += 1
-
-    if frame_count > 0:
-        return max(MIN_DURATION, frame_count * SAMPLES_PER_FRAME / first_samplerate)
-
-    # Final fallback: size / bitrate
-    return max(MIN_DURATION, (len(data) - offset) / (first_bitrate / 8))
-
-
 async def _speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int) -> bool:
-    """Like _speak_guarded but sends pre-cached audio bytes instead of synthesizing."""
+    """Like _speak_guarded but pushes pre-cached audio bytes through LiveKit (D-08)."""
     output_lock = _get_output_lock()
     async with output_lock:
         if generation != meeting_state["output_generation"]:
@@ -1253,16 +1122,9 @@ async def _speak_cached_guarded(audio_bytes: bytes, bot_id: str, generation: int
             await asyncio.sleep(min(remaining, 0.2))
             if generation != meeting_state["output_generation"]:
                 return False
-        ok = await asyncio.to_thread(speak_cached_audio, audio_bytes, bot_id)
-        if ok:
-            duration = _playback_wait_seconds(audio_bytes)
-            elapsed = 0.0
-            while elapsed < duration:
-                await asyncio.sleep(0.1)
-                elapsed += 0.1
-                if generation != meeting_state["output_generation"]:
-                    break
-        return ok
+        session_id = _resolve_session_id(bot_id)
+        ok = await push_audio_to_livekit(audio_bytes, session_id, generation=generation)
+        return bool(ok)
 
 
 def _format_pending_clarification(task: Optional[VoiceTask] = None) -> str:
@@ -1438,18 +1300,13 @@ def _split_into_sentences(text: str) -> list:
     return [p.strip() for p in parts if p.strip()]
 
 
-def _playback_wait_seconds(audio_bytes: bytes) -> float:
-    """Return how long to hold the output lock after posting audio to Recall."""
-    return _get_audio_duration(audio_bytes) + max(0.0, JARVIS_RECALL_AUDIO_DRAIN_BUFFER_SECONDS)
-
-
 async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: bool = False,
                          _preloaded_all: Optional[list] = None) -> bool:
     """Speak text as a single concatenated MP3 clip to eliminate inter-sentence overlap.
 
     All sentences are synthesised in parallel, their raw MP3 bytes are joined, and the
-    result is sent to Recall.ai in one POST.  Because Recall.ai receives a single
-    continuous audio stream there is no timing-based gap needed between sentences.
+    result is pushed through LiveKit via push_audio_to_livekit (D-08). Because
+    capture_frame() provides natural backpressure there is no duration-wait loop needed.
 
     _preloaded_all: list of pre-synthesized audio bytes for each sentence, in order.
     When provided, skips all TTS synthesis entirely.
@@ -1488,23 +1345,14 @@ async def _speak_guarded(text: str, bot_id: str, generation: int, allow_stale: b
         if not allow_stale and generation != meeting_state["output_generation"]:
             return False
 
-        # Concatenate into one MP3 stream — single POST, zero timing gaps needed
+        # Concatenate all sentence MP3s into one byte stream and push to LiveKit.
         combined = b"".join(all_audio)
-        ok = await asyncio.to_thread(speak_cached_audio, combined, bot_id)
+        session_id = _resolve_session_id(bot_id)
+        ok = await push_audio_to_livekit(combined, session_id, generation=generation)
         if not ok:
             return False
 
         _record_jarvis_transcript(" ".join(sentences))
-
-        # Wait for the exact playback duration of the combined clip
-        duration = _playback_wait_seconds(combined)
-        elapsed = 0.0
-        while elapsed < duration:
-            await asyncio.sleep(0.1)
-            elapsed += 0.1
-            if generation != meeting_state["output_generation"]:
-                return True
-
         return True
 
 
@@ -1519,6 +1367,7 @@ async def _speak_streaming(
     gap_filler_task: asyncio.Task,
     bot_id: str,
     generation: int,
+    session_id: Optional[str] = None,
 ) -> Optional[str]:
     """Priority-queued streaming TTS pipeline (REQ-01..REQ-06).
 
@@ -1528,11 +1377,13 @@ async def _speak_streaming(
       `asyncio.to_thread(synthesize_speech, sentence)` per sentence. Each task puts
       (sentence_index, audio_bytes) into `pq` upon completion.
     - Consumer coroutine: reads from `pq` in priority order with a stash dict for
-      out-of-order arrivals. POSTs each clip via `speak_cached_audio`, then waits
-      `_playback_wait_seconds(audio)` with 0.1s generation-guard polling.
+      out-of-order arrivals. Pushes each clip through LiveKit via `push_audio_to_livekit`.
+      `source.capture_frame()` provides backpressure — no duration computation needed.
     - Sentinel: `_SENTINEL_IDX` (sys.maxsize) — sorted LAST, signals consumer to stop.
     - Lock: `_get_output_lock()` acquired AFTER `await gap_filler_task` (Pitfall 3).
     """
+    if session_id is None:
+        session_id = _resolve_session_id(bot_id)
     pq: asyncio.PriorityQueue = asyncio.PriorityQueue()
     tts_tasks: list = []
     sentence_texts: dict = {}  # idx -> sentence text (for transcript)
@@ -1608,19 +1459,11 @@ async def _speak_streaming(
                     return spoken
 
                 if ab:
-                    ok = await asyncio.to_thread(speak_cached_audio, ab, bot_id)
+                    ok = await push_audio_to_livekit(ab, session_id, generation=generation)
                     if ok:
                         spoken.append(text)
-                        # Duration-aware wait with generation guard (mirrors _speak_guarded)
-                        duration = _playback_wait_seconds(ab)
-                        elapsed = 0.0
-                        while elapsed < duration:
-                            await asyncio.sleep(0.1)
-                            elapsed += 0.1
-                            if generation != meeting_state["output_generation"]:
-                                return spoken
                     else:
-                        logger.warning("speak_cached_audio failed for sentence %d", next_expected)
+                        logger.warning("push_audio_to_livekit failed for sentence %d", next_expected)
                 else:
                     logger.warning("Skipping sentence %d — empty audio bytes (TTS failure)", next_expected)
 
@@ -1705,7 +1548,7 @@ async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
     try:
         if play_wake_ack:
             cached_ack = get_random_ack_audio()
-            if cached_ack and _get_audio_duration(cached_ack[1]) <= _MICRO_ACK_MAX_SECONDS:
+            if cached_ack and len(cached_ack[1]) <= _MICRO_ACK_MAX_BYTES:
                 await _speak_cached_guarded(cached_ack[1], bot_id, generation)
             else:
                 await _speak_guarded(JARVIS_WAKE_ACK, bot_id, generation, allow_stale=True)
@@ -1724,7 +1567,8 @@ async def _speak_gap_filler(query: str, bot_id: str, generation: int) -> None:
                 meeting_state["active_gap_filler_task"] = None
 
 
-_MICRO_ACK_MAX_SECONDS = 1.2  # cached clips longer than this are gap-fillers, not acks
+# ~1.2s of MP3 at typical 32 kbps mono ≈ 4800 bytes; use 7 kB as a generous cap.
+_MICRO_ACK_MAX_BYTES = 7_000
 
 
 async def _emit_micro_ack(bot_id: str) -> None:
@@ -1744,16 +1588,17 @@ async def _emit_micro_ack(bot_id: str) -> None:
         return
     try:
         cached = get_random_ack_audio()
+        session_id = _resolve_session_id(bot_id)
         if cached:
             _, ack_bytes = cached
-            if _get_audio_duration(ack_bytes) > _MICRO_ACK_MAX_SECONDS:
-                # All cached files are long gap-fillers; the handler will play one shortly.
-                # Suppress the micro-ack so the user doesn't hear two filler phrases.
+            if len(ack_bytes) > _MICRO_ACK_MAX_BYTES:
                 logger.debug("Micro-ack skipped — cached audio too long (gap-filler only cache)")
                 return
-            await asyncio.to_thread(speak_cached_audio, ack_bytes, bot_id)
+            await push_audio_to_livekit(ack_bytes, session_id)
         else:
-            await asyncio.to_thread(speak, JARVIS_MICRO_ACK_TEXT, bot_id)
+            audio = await asyncio.to_thread(synthesize_speech, JARVIS_MICRO_ACK_TEXT)
+            if audio:
+                await push_audio_to_livekit(audio, session_id)
         logger.debug("Micro-ack emitted for bot %s", bot_id)
     except Exception as e:
         logger.debug("Micro-ack failed (non-fatal): %s", e)
@@ -2364,7 +2209,8 @@ async def _handle_meeting_summary(query: str, bot_id: str) -> None:
         transcript_log = list(meeting_state["transcript_log"])
         sentence_gen = summarize_meeting_streaming(transcript_log, detail_level=detail_level)
         gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
-        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation)
+        session_id = _resolve_session_id(bot_id)
+        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation, session_id)
         if answer:
             meeting_state["last_jarvis_response"] = {"intent": "meeting_summary", "query": query, "answer": answer}
     except Exception as e:
@@ -2378,7 +2224,8 @@ async def _handle_meeting_opinion(query: str, bot_id: str) -> None:
         transcript_log = list(meeting_state["transcript_log"])
         sentence_gen = generate_opinion_streaming(transcript_log, query=query)
         gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
-        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation)
+        session_id = _resolve_session_id(bot_id)
+        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation, session_id)
         if answer:
             meeting_state["last_jarvis_response"] = {"intent": "meeting_opinion", "query": query, "answer": answer}
     except Exception as e:
@@ -2427,7 +2274,8 @@ async def _handle_action_items(query: str, bot_id: str) -> None:
         transcript_log = list(meeting_state["transcript_log"])
         sentence_gen = extract_action_items_streaming(transcript_log)
         gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
-        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation)
+        session_id = _resolve_session_id(bot_id)
+        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation, session_id)
         if answer:
             meeting_state["last_jarvis_response"] = {"intent": "action_items", "query": query, "answer": answer}
     except Exception as e:
@@ -2467,7 +2315,8 @@ async def _handle_speaker_query(query: str, bot_id: str) -> None:
         transcript_log = list(meeting_state["transcript_log"])
         sentence_gen = summarize_speaker_streaming(transcript_log, speaker_name, topic=topic)
         gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
-        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation)
+        session_id = _resolve_session_id(bot_id)
+        answer = await _speak_streaming(sentence_gen, gap_filler_task, bot_id, generation, session_id)
         if answer:
             meeting_state["last_jarvis_response"] = {"intent": "speaker_query", "query": query, "answer": answer}
     except Exception as e:
