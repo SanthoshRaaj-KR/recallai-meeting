@@ -2,14 +2,15 @@
 
 ## Overview
 
-This milestone builds the full end-to-end pipeline from "meeting ends" to "accepted changes applied to Confluence." Phase 1 fixes broken dependencies and extends the data schema so every downstream agent has a solid foundation. Phase 2 wires up the multi-agent core: FactExtractionAgent, merged RAG retrieval, parallel DrafterAgent pool, and VerifierAgent. Phase 3 adds the SSE progress stream and the complete review UI in sync-sage-bot so users can watch the pipeline run and act on proposal cards. Phase 4 hardens the safe apply layer and closes the re-indexing loop so accepted changes immediately reflect in the RAG graph.
+This milestone builds the full end-to-end pipeline from "meeting ends" to "accepted changes applied to Confluence." Phase 1 fixes broken dependencies and extends the data schema so every downstream agent has a solid foundation. Phase 2 wires up the multi-agent core: FactExtractionAgent, merged RAG retrieval, parallel DrafterAgent pool, and VerifierAgent. Phase 3 adds the SSE progress stream and the complete review UI in sync-sage-bot so users can watch the pipeline run and act on proposal cards. Phase 4 hardens proposal quality — no contradictions, duplicates, or hallucinated content. Phase 5 hardens the safe apply layer and closes the re-indexing loop so accepted changes immediately reflect in the RAG graph.
 
 ## Phases
 
 - [ ] **Phase 1: Schema & Blockers** - Fix broken dependencies, extend ChangeItem schema, add pipeline_jobs table
 - [x] **Phase 2: Multi-Agent Pipeline Core** - FactExtractionAgent, merged RAG retrieval, parallel DrafterAgent pool, VerifierAgent, background job endpoints (completed 2026-05-12)
 - [x] **Phase 3: Async Progress Streaming + Review UI** - SSE stream endpoint, sync-sage-bot pipeline progress component, full proposal card review experience (completed 2026-05-12)
-- [ ] **Phase 4: Safe Apply Hardening + Re-indexing** - Section anchor pre-flight, stale-version chain prevention, Neo4j + Pinecone re-index after commit
+- [x] **Phase 4: Pipeline Proposal Quality Fixes** - Final-state dedup in FactExtractionAgent, verbatim grounding in DrafterAgent, no contradictions/duplicates/hallucinations (completed 2026-05-15)
+- [ ] **Phase 5: Safe Apply Hardening + Re-indexing** - Section anchor pre-flight, stale-version chain prevention, Neo4j + Pinecone re-index after commit
 
 ## Phase Details
 
@@ -63,7 +64,21 @@ Plans:
 - [x] 03-02-PLAN.md — Frontend types + api client + routing + MeetingSummary button & banner (UI-01)
 - [x] 03-03-PLAN.md — StageIndicator + ProposalCard + ProposalCardGroup + PipelinePage with SSE wiring (UI-02 through UI-06)
 
-### Phase 4: Safe Apply Hardening + Re-indexing
+### Phase 4: Pipeline Proposal Quality Fixes
+**Goal**: The auto-propose-changes pipeline produces exactly one correct proposal per distinct decision — no contradictions (reverted discussions don't generate two opposing cards), no duplicates (same change mentioned twice generates one card), and no hallucinated content (drafter uses verbatim meeting text for additive changes)
+**Depends on**: Phase 3
+**Requirements**: QUAL-01, QUAL-02, QUAL-03
+**Success Criteria** (what must be TRUE):
+  1. A meeting that says "change Q3 to Q1, actually Q3 is fine" produces ZERO proposals for that topic (final state = no change)
+  2. The same change mentioned twice at different points in the meeting produces exactly ONE proposal
+  3. "Add these X concerns to the page" produces after_content that contains only those exact X concerns, not invented ones
+**Plans**: 2 plans
+
+Plans:
+- [x] 04-01-PLAN.md — Fix FactExtractionAgent: final-state extraction, normalized dedup, verbatim_content field (Wave 1)
+- [x] 04-02-PLAN.md — Fix DrafterAgent: verbatim grounding rule + relevant transcript window (Wave 1)
+
+### Phase 5: Safe Apply Hardening + Re-indexing
 **Goal**: Accepted changes are applied to Confluence safely — section anchors are verified before any edit, multi-card sequences on the same page never use stale version numbers, and every committed page is immediately re-indexed in both Pinecone and the Neo4j confluence_page_graph so the RAG layer stays current
 **Depends on**: Phase 3
 **Requirements**: APPLY-01, APPLY-02, APPLY-03
@@ -75,11 +90,12 @@ Plans:
 
 ## Progress
 
-**Execution Order:** 1 → 2 → 3 → 4
+**Execution Order:** 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Schema & Blockers | 0/3 | Ready to execute | - |
-| 2. Multi-Agent Pipeline Core | 4/4 | Complete   | 2026-05-12 |
-| 3. Async Progress Streaming + Review UI | 3/3 | Complete   | 2026-05-12 |
-| 4. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |
+| 2. Multi-Agent Pipeline Core | 4/4 | Complete | 2026-05-12 |
+| 3. Async Progress Streaming + Review UI | 3/3 | Complete | 2026-05-12 |
+| 4. Pipeline Proposal Quality Fixes | 2/2 | Complete | 2026-05-15 |
+| 5. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |
