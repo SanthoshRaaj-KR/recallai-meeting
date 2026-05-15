@@ -478,6 +478,7 @@ async def _run_intent_drafter(
                 "new_value": getattr(intent, "new_value", "") or "",
                 "action": getattr(intent, "action", "replace") or "replace",
                 "rationale": getattr(intent, "rationale", "") or "",
+                "verbatim_content": getattr(intent, "verbatim_content", "") or "",
             },
             "page": {
                 "page_id": page_id,
@@ -487,6 +488,9 @@ async def _run_intent_drafter(
                 "section_content_map": page.get("section_content_map") or {},
             },
             "meeting_context": _build_meeting_context(transcript_text, facts=facts, summary_json=summary_json),
+            "relevant_transcript_window": _find_relevant_transcript_window(
+                transcript_text, getattr(intent, "subject", "") or ""
+            ),
         },
         ensure_ascii=False,
     )
