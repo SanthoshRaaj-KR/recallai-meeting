@@ -1480,3 +1480,73 @@ def test_speak_cached_guarded_calls_push_audio():
     args, kwargs = push_mock.await_args
     assert args[0] == b"PRECACHED_MP3"
     assert args[1] == sid or kwargs.get("session_id") == sid
+
+
+# ---------------------------------------------------------------------------
+# Phase 02 Plan 004: /bot-page route + lifecycle wiring
+# ---------------------------------------------------------------------------
+
+from fastapi.testclient import TestClient
+
+
+def test_bot_page_route_serves_html():
+    client = TestClient(ja.app)
+    resp = client.get("/bot-page")
+    assert resp.status_code == 200, "expected 200 got %s" % resp.status_code
+    ctype = resp.headers.get("content-type", "")
+    assert "text/html" in ctype, "expected text/html content-type, got %r" % ctype
+    body = resp.text
+    assert "livekit-client.umd.min.js" in body
+    assert "RoomEvent.TrackSubscribed" in body
+    assert "URLSearchParams" in body
+
+
+def test_start_bot_for_session_creates_livekit_room():
+    # Import lazily — review.api triggers its own jarvis_agentic import chain.
+    from confluence_logic.review import api as review_api
+    from confluence_logic.review.api import StartBotRequest
+
+    captured = {}
+
+    async def _fake_create_room(session_id, bot_id):
+        captured["args"] = (session_id, bot_id)
+        return (Mock(), Mock())
+
+    async def run_test():
+        with patch.object(ja, "create_bot", return_value="bot-uuid-xyz"), \
+             patch.object(ja, "_create_livekit_room", new=_fake_create_room), \
+             patch.object(ja, "_teardown_livekit_room", new=AsyncMock()):
+            body = StartBotRequest(meeting_url="https://meet.google.com/abc-defg-hij")
+            result = await review_api._start_bot_for_session(body)
+        return result
+
+    result = asyncio.run(run_test())
+    assert result["status"] == "in_meeting"
+    assert result["bot_id"] == "bot-uuid-xyz"
+    assert captured["args"][1] == "bot-uuid-xyz"
+
+
+def test_start_bot_for_session_tears_down_on_livekit_failure():
+    from confluence_logic.review import api as review_api
+    from confluence_logic.review.api import StartBotRequest
+
+    teardown_calls = []
+
+    async def _fake_create_room_fail(session_id, bot_id):
+        raise RuntimeError("simulated LiveKit failure")
+
+    async def _fake_teardown(session_id):
+        teardown_calls.append(session_id)
+
+    async def run_test():
+        with patch.object(ja, "create_bot", return_value="bot-uuid-xyz"), \
+             patch.object(ja, "_create_livekit_room", new=_fake_create_room_fail), \
+             patch.object(ja, "_teardown_livekit_room", new=_fake_teardown):
+            body = StartBotRequest(meeting_url="https://meet.google.com/abc-defg-hij")
+            result = await review_api._start_bot_for_session(body)
+        return result
+
+    result = asyncio.run(run_test())
+    assert result["status"] == "error"
+    assert "LiveKit room creation failed" in (result.get("error") or "")
+    assert len(teardown_calls) == 1
