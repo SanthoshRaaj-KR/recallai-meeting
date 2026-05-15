@@ -39,6 +39,7 @@ class ChangeIntent(BaseModel):
     new_value: str = ""          # specific new value to write
     action: str = "replace"      # replace | add | remove | rename | create
     rationale: str = ""          # why: "Akshat is busy", "migration to Claude SDK"
+    verbatim_content: str = ""   # NEW: for add/create actions, exact quoted content from transcript
 
 
 class ExtractedFacts(BaseModel):
