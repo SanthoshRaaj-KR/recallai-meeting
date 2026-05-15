@@ -40,6 +40,7 @@ from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from gtts import gTTS
 from openai import OpenAI
 
@@ -59,6 +60,9 @@ from confluence_logic.agents.proposed_changes_agent import ProposedChangesAgent
 _MODULE_DIR = Path(__file__).resolve().parent
 load_dotenv(_MODULE_DIR.parent / ".env")
 load_dotenv(_MODULE_DIR / ".env", override=True)
+
+_STATIC_DIR = _MODULE_DIR / "static"
+_BOT_HTML_PATH = _STATIC_DIR / "bot.html"
 
 RECALL_API_KEY = os.getenv("RECALL_API_KEY")
 RECALL_API_REGION = os.getenv("RECALL_API_REGION", "ap-northeast-1")
@@ -2542,6 +2546,15 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.websocket("/recall-audio-stream/{session_id}")
 async def websocket_endpoint_for_session(websocket: WebSocket, session_id: str):
     await _websocket_endpoint_for_session(websocket, session_id)
+
+
+@app.get("/bot-page")
+async def serve_bot_page():
+    """Serve the LiveKit subscriber page that Recall's headless Chrome loads (D-15)."""
+    if not _BOT_HTML_PATH.exists():
+        logger.error("bot.html not found at %s", _BOT_HTML_PATH)
+        return FileResponse(_BOT_HTML_PATH, status_code=404)
+    return FileResponse(_BOT_HTML_PATH, media_type="text/html")
 
 
 async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str):

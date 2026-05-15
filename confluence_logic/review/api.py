@@ -45,6 +45,24 @@ _openai_client: Optional[OpenAI] = None
 _confluence_connector = None
 
 
+def _schedule_livekit_teardown(session_id: str) -> None:
+    """Schedule LiveKit room teardown without blocking the current sync caller."""
+    try:
+        from confluence_logic.jarvis_agentic import _teardown_livekit_room  # noqa: PLC0415
+        import asyncio  # noqa: PLC0415
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            loop.create_task(_teardown_livekit_room(session_id))
+        else:
+            # Fallback: synchronous run for non-async contexts (e.g., script cleanup).
+            asyncio.run(_teardown_livekit_room(session_id))
+    except Exception as exc:
+        logger.warning("LiveKit teardown scheduling failed for session %s: %s", session_id, exc)
+
+
 def _get_connector():
     """Lazy singleton ConfluenceConnector. Raises ValueError if credentials are missing."""
     global _confluence_connector
@@ -683,10 +701,15 @@ def _refresh_session_status_from_recall(state: Dict[str, Any]) -> None:
     except requests.HTTPError as exc:
         status_code = getattr(exc.response, "status_code", None)
         if status_code == 404:
+            previous = state.get("session_status")
             state["is_active"] = False
             state["session_status"] = "ended"
             state["ended_at"] = _utc_now_iso()
             state["end_reason"] = "Recall no longer returns this bot session."
+            if previous not in {"ended", "error"}:
+                sid = state.get("session_id")
+                if sid:
+                    _schedule_livekit_teardown(sid)
             return
         logger.warning("Recall bot status lookup failed: %s", exc)
         return
@@ -702,15 +725,25 @@ def _refresh_session_status_from_recall(state: Dict[str, Any]) -> None:
         "latest_code": code,
     }
     if mapped == "ended":
+        previous = state.get("session_status")
         state["is_active"] = False
         state["session_status"] = "ended"
         state["ended_at"] = _utc_now_iso()
         state["end_reason"] = code or "Recall reported the bot left the meeting."
+        if previous not in {"ended", "error"}:
+            sid = state.get("session_id")
+            if sid:
+                _schedule_livekit_teardown(sid)
     elif mapped == "error":
+        previous = state.get("session_status")
         state["is_active"] = False
         state["session_status"] = "error"
         state["ended_at"] = _utc_now_iso()
         state["end_reason"] = code or "Recall reported a bot error."
+        if previous not in {"ended", "error"}:
+            sid = state.get("session_id")
+            if sid:
+                _schedule_livekit_teardown(sid)
     elif mapped == "in_meeting":
         state["is_active"] = True
         state["session_status"] = "in_meeting"
@@ -736,6 +769,8 @@ async def _start_bot_for_session(
         create_bot,
         create_meeting_session,
         get_meeting_session_state,
+        _create_livekit_room,
+        _teardown_livekit_room,
     )  # noqa: PLC0415
 
     meeting_url = body.meeting_url.strip()
@@ -762,6 +797,32 @@ async def _start_bot_for_session(
     state["recall_status_code"] = None
     state["last_recall_status_checked_at"] = 0.0
     bind_bot_to_session(bot_id, resolved_session_id)
+
+    # D-06 / D-07: create the LiveKit room as publisher immediately after bot exists.
+    try:
+        await _create_livekit_room(resolved_session_id, bot_id)
+    except Exception as exc:
+        logger.error(
+            "LiveKit room creation failed for session %s (bot %s): %s",
+            resolved_session_id, bot_id, exc,
+        )
+        # Cleanup any partial state, then surface failure.
+        try:
+            await _teardown_livekit_room(resolved_session_id)
+        except Exception:
+            pass
+        state["session_status"] = "error"
+        state["is_active"] = False
+        state["end_reason"] = "LiveKit room creation failed: %s" % exc
+        return {
+            "status": "error",
+            "session_id": resolved_session_id,
+            "bot_id": bot_id,
+            "meeting_url": meeting_url,
+            "change_count": 0,
+            "error": "LiveKit room creation failed — check LIVEKIT_URL/API_KEY/API_SECRET",
+        }
+
     _persist_history_snapshot(state, user)
 
     logger.info("Bot started: session=%s bot_id=%s meeting=%s", resolved_session_id, bot_id, meeting_url)
