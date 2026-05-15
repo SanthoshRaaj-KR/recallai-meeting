@@ -8,7 +8,7 @@ This milestone builds the full end-to-end pipeline from "meeting ends" to "accep
 
 - [ ] **Phase 1: Schema & Blockers** - Fix broken dependencies, extend ChangeItem schema, add pipeline_jobs table
 - [x] **Phase 2: Multi-Agent Pipeline Core** - FactExtractionAgent, merged RAG retrieval, parallel DrafterAgent pool, VerifierAgent, background job endpoints (completed 2026-05-12)
-- [x] **Phase 3: Async Progress Streaming + Review UI** - SSE stream endpoint, sync-sage-bot pipeline progress component, full proposal card review experience (completed 2026-05-12)
+- [x] **Phase 3: Async Progress Streaming + Review UI** - SSE stream endpoint, sync-sage-bot pipeline progress component, full proposal card review experience (completed 2026-05-12)
 - [x] **Phase 4: Pipeline Proposal Quality Fixes** - Final-state dedup in FactExtractionAgent, verbatim grounding in DrafterAgent, no contradictions/duplicates/hallucinations (completed 2026-05-15)
 - [ ] **Phase 5: Safe Apply Hardening + Re-indexing** - Section anchor pre-flight, stale-version chain prevention, Neo4j + Pinecone re-index after commit
 
@@ -86,7 +86,11 @@ Plans:
   1. Accepting an edit card whose `section_heading` no longer exists in the live Confluence page returns a clear error to the UI rather than silently creating a misplaced edit
   2. When two accepted cards target the same page, the second card's commit uses the page version returned by the first card's successful commit — a stale-version conflict error never occurs for sequential same-page accepts
   3. After a page is committed, querying the RAG pipeline with a topic from that page's new content surfaces the updated page within the same session — stale graph nodes are not returned
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 05-01-PLAN.md — Failing tests for pre-flight heading check, version chain, and post-commit re-index (Wave 0)
+- [ ] 05-02-PLAN.md — Implementation: _version_cache, heading pre-flight, version chain, _fire_reindex, refresh_page_in_graph, _execute_pipeline_proposal rewire (Wave 1)
 
 ## Progress
 
@@ -98,4 +102,4 @@ Plans:
 | 2. Multi-Agent Pipeline Core | 4/4 | Complete | 2026-05-12 |
 | 3. Async Progress Streaming + Review UI | 3/3 | Complete | 2026-05-12 |
 | 4. Pipeline Proposal Quality Fixes | 2/2 | Complete | 2026-05-15 |
-| 5. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |
+| 5. Safe Apply Hardening + Re-indexing | 0/2 | Not started | - |
