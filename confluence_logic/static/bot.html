@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Jarvis LiveKit Bridge</title>
+</head>
+<body>
+  <div id="status">Connecting...</div>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.18.9/dist/livekit-client.umd.min.js"></script>
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      const lkUrl = params.get('url');
+      const token = params.get('token');
+      const roomName = params.get('room');
+      const statusEl = document.getElementById('status');
+
+      function setStatus(msg) {
+        statusEl.textContent = msg;
+        console.log('[bot.html]', msg);
+      }
+
+      if (!lkUrl || !token) {
+        setStatus('Missing url or token query param');
+        return;
+      }
+
+      const room = new LivekitClient.Room({
+        adaptiveStream: false,
+        dynacast: false,
+      });
+
+      room.on(LivekitClient.RoomEvent.Connected, () => {
+        setStatus('Connected to room ' + (roomName || '<unknown>'));
+        // Defensive: ensure audio playback is allowed (Recall headless Chrome usually permits).
+        if (typeof room.startAudio === 'function') {
+          room.startAudio().catch((e) => console.warn('[bot.html] startAudio() rejected:', e));
+        }
+      });
+
+      room.on(LivekitClient.RoomEvent.Disconnected, (reason) => {
+        setStatus('Disconnected: ' + reason);
+      });
+
+      room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+        console.log('[bot.html] TrackSubscribed kind=', track.kind);
+        if (track.kind === LivekitClient.Track.Kind.Audio) {
+          const audioEl = track.attach();
+          audioEl.volume = 1.0;
+          audioEl.autoplay = true;
+          document.body.appendChild(audioEl);
+          const playPromise = audioEl.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch((e) => console.warn('[bot.html] audioEl.play() blocked:', e));
+          }
+        }
+      });
+
+      room.connect(lkUrl, token)
+        .then(() => setStatus('room.connect resolved'))
+        .catch((e) => {
+          console.error('[bot.html] room.connect failed:', e);
+          setStatus('Connect failed: ' + e.message);
+        });
+    })();
+  </script>
+</body>
+</html>
