@@ -36,7 +36,10 @@ def test_build_create_bot_payload_uses_recall_provider_by_default():
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
          patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \
          patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
-         patch.object(ja, "LANGUAGE_CODE", "en"):
+         patch.object(ja, "LANGUAGE_CODE", "en"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"):
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
 
     provider = payload["recording_config"]["transcript"]["provider"]
@@ -92,7 +95,10 @@ def test_build_create_bot_payload_supports_assembly_provider_opt_in():
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
          patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "assembly_ai_v3_streaming"), \
          patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
-         patch.object(ja, "LANGUAGE_CODE", "en"):
+         patch.object(ja, "LANGUAGE_CODE", "en"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"):
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
 
     provider = payload["recording_config"]["transcript"]["provider"]
@@ -1071,3 +1077,308 @@ def test_local_repl_override_signature_compatibility():
     assert sig.parameters["bot_id"].annotation is str
     # generation annotation should be int
     assert sig.parameters["generation"].annotation is int
+
+
+# ---------------------------------------------------------------------------
+# Phase 02: LiveKit audio infrastructure tests (Plan 002)
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+
+
+def _make_fake_frame(label=""):
+    f = Mock()
+    f.label = label
+    return f
+
+
+def _async_iter_frames(frames):
+    """Return an async iterator that yields the given frames."""
+    async def _gen():
+        for f in frames:
+            yield f
+    return _gen()
+
+
+def _make_decoder_mock(frames):
+    """Mock AudioStreamDecoder: push/end_input are sync no-ops; async iter yields frames; aclose is async no-op."""
+    decoder = Mock()
+    decoder.push = Mock()
+    decoder.end_input = Mock()
+    decoder.aclose = AsyncMock()
+    decoder.__aiter__ = Mock(return_value=_async_iter_frames(frames))
+    return decoder
+
+
+def test_push_audio_to_livekit_decodes_mp3():
+    _reset_meeting_state()
+
+    frame_a = _make_fake_frame("a")
+    frame_b = _make_fake_frame("b")
+    frame_c = _make_fake_frame("c")
+
+    decoder_mock = _make_decoder_mock([frame_a, frame_b, frame_c])
+    source = Mock()
+    source.capture_frame = AsyncMock()
+
+    sid = "session-decode"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja._meeting_sessions[sid]["livekit_source"] = source
+
+    with patch.object(ja, "AudioStreamDecoder", return_value=decoder_mock):
+        result = asyncio.run(ja.push_audio_to_livekit(b"fake-mp3-bytes", sid))
+
+    assert result is True
+    decoder_mock.push.assert_called_once_with(b"fake-mp3-bytes")
+    decoder_mock.end_input.assert_called_once()
+    assert source.capture_frame.await_count == 3
+    awaited_args = [c.args[0] for c in source.capture_frame.await_args_list]
+    assert awaited_args == [frame_a, frame_b, frame_c]
+
+    del ja._meeting_sessions[sid]
+
+
+def test_push_audio_to_livekit_interrupts_on_generation_change():
+    _reset_meeting_state()
+
+    frame_a = _make_fake_frame("a")
+    frame_b = _make_fake_frame("b")
+    frame_c = _make_fake_frame("c")
+
+    ja.meeting_state["output_generation"] = 5
+    ja._meeting_sessions[ja._DEFAULT_SESSION_ID]["output_generation"] = 5
+
+    async def _flip_after_first(frame):
+        if frame is frame_a:
+            ja.meeting_state["output_generation"] = 6
+            ja._meeting_sessions[ja._DEFAULT_SESSION_ID]["output_generation"] = 6
+
+    source = Mock()
+    source.capture_frame = AsyncMock(side_effect=_flip_after_first)
+
+    sid = "session-interrupt"
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja._meeting_sessions[sid]["livekit_source"] = source
+    ja._meeting_sessions[sid]["output_generation"] = 5
+
+    decoder_mock = _make_decoder_mock([frame_a, frame_b, frame_c])
+
+    with patch.object(ja, "AudioStreamDecoder", return_value=decoder_mock):
+        result = asyncio.run(ja.push_audio_to_livekit(b"fake", sid, generation=5))
+
+    assert result is False
+    # frame_a was pushed; loop aborted before frame_b on next iteration's generation check
+    assert source.capture_frame.await_count == 1
+
+    del ja._meeting_sessions[sid]
+
+
+def test_push_audio_to_livekit_returns_false_when_no_session():
+    _reset_meeting_state()
+    with patch.object(ja, "AudioStreamDecoder") as decoder_cls:
+        result = asyncio.run(ja.push_audio_to_livekit(b"x", "session-missing"))
+    assert result is False
+    decoder_cls.assert_not_called()
+
+
+def test_build_create_bot_payload_has_output_media():
+    with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "_make_subscriber_token", return_value="JWT_FAKE_TOKEN"):
+        payload = ja.build_create_bot_payload(
+            "https://meet.google.com/abc-defg-hij", session_id="sess-1"
+        )
+
+    assert "output_media" in payload
+    assert payload["output_media"]["camera"]["kind"] == "webpage"
+    url = payload["output_media"]["camera"]["config"]["url"]
+    assert url.startswith("https://example.ngrok-free.app/bot-page?")
+    assert "token=JWT_FAKE_TOKEN" in url
+    assert "room=sess-1" in url
+    assert "url=wss://test.livekit.cloud" in url
+
+
+def test_build_create_bot_payload_subscriber_room_matches_publisher():
+    captured_room = {}
+
+    def fake_make_subscriber_token(room_name, ttl_hours=8):
+        captured_room["name"] = room_name
+        return "JWT_FAKE"
+
+    with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "_make_subscriber_token", side_effect=fake_make_subscriber_token):
+        payload = ja.build_create_bot_payload(
+            "https://meet.google.com/abc-defg-hij", session_id="abc-123-uuid"
+        )
+
+    assert captured_room["name"] == "abc-123-uuid"
+    url = payload["output_media"]["camera"]["config"]["url"]
+    assert "room=abc-123-uuid" in url
+
+
+def test_build_create_bot_payload_retains_websocket_endpoint():
+    with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"):
+        payload = ja.build_create_bot_payload(
+            "https://meet.google.com/abc-defg-hij", session_id="sess-1"
+        )
+
+    endpoints = payload["recording_config"]["realtime_endpoints"]
+    assert len(endpoints) == 1
+    assert endpoints[0]["type"] == "websocket"
+    assert endpoints[0]["url"].startswith("wss://")
+    assert endpoints[0]["events"] == ["transcript.data"]
+
+
+def test_build_create_bot_payload_rejects_non_https_webhook():
+    with patch.object(ja, "WEBHOOK_URL", "http://insecure.example.com"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"):
+        try:
+            ja.build_create_bot_payload(
+                "https://meet.google.com/abc-defg-hij", session_id="sess-1"
+            )
+        except RuntimeError as exc:
+            assert "HTTPS" in str(exc) or "https" in str(exc)
+        else:
+            raise AssertionError("Expected RuntimeError for non-HTTPS WEBHOOK_URL")
+
+
+def test_build_create_bot_payload_has_no_automatic_audio_output():
+    with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"):
+        payload = ja.build_create_bot_payload(
+            "https://meet.google.com/abc-defg-hij", session_id="sess-1"
+        )
+    assert "automatic_audio_output" not in payload
+
+
+def test_make_subscriber_token_uses_room_name_and_has_ttl():
+    captured = {}
+
+    chain = Mock()
+    chain.with_identity.return_value = chain
+    chain.with_name.return_value = chain
+
+    def _capture_grants(grants):
+        captured["grants"] = grants
+        return chain
+    chain.with_grants.side_effect = _capture_grants
+
+    def _capture_ttl(td):
+        captured["ttl"] = td
+        return chain
+    chain.with_ttl.side_effect = _capture_ttl
+    chain.to_jwt.return_value = "JWT_RESULT"
+
+    fake_access_token_cls = Mock(return_value=chain)
+
+    with patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja.livekit_api, "AccessToken", fake_access_token_cls):
+        token = ja._make_subscriber_token("my-room", ttl_hours=8)
+
+    assert token == "JWT_RESULT"
+    fake_access_token_cls.assert_called_once_with(api_key="key", api_secret="secret")
+    assert captured["grants"].room == "my-room"
+    assert captured["grants"].can_subscribe is True
+    assert captured["grants"].can_publish is False
+    assert isinstance(captured["ttl"], _dt.timedelta)
+    assert captured["ttl"] == _dt.timedelta(hours=8)
+
+
+def test_make_subscriber_token_raises_without_credentials():
+    with patch.object(ja, "LIVEKIT_API_KEY", ""), \
+         patch.object(ja, "LIVEKIT_API_SECRET", ""):
+        try:
+            ja._make_subscriber_token("room-x")
+        except RuntimeError as exc:
+            assert "LIVEKIT_API_KEY" in str(exc)
+        else:
+            raise AssertionError("Expected RuntimeError when LiveKit credentials are empty")
+
+
+def test_create_livekit_room_uses_session_id_as_room_name():
+    _reset_meeting_state()
+    sid = "session-create-room-uuid-abc"
+    bot_id = "recall-bot-uuid-123"
+
+    captured = {}
+
+    chain = Mock()
+    chain.with_identity.return_value = chain
+    chain.with_name.return_value = chain
+    def _cap_grants(grants):
+        captured["grants"] = grants
+        return chain
+    chain.with_grants.side_effect = _cap_grants
+    chain.with_ttl.return_value = chain
+    chain.to_jwt.return_value = "PUB_JWT"
+    fake_access_token_cls = Mock(return_value=chain)
+
+    fake_room = Mock()
+    fake_room.connect = AsyncMock()
+    fake_room.local_participant = Mock()
+    fake_room.local_participant.publish_track = AsyncMock()
+    fake_room.on = Mock(side_effect=lambda *a, **kw: (lambda f: f))
+
+    fake_source = Mock()
+    fake_track = Mock()
+    fake_options = Mock()
+
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+
+    with patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja.livekit_api, "AccessToken", fake_access_token_cls), \
+         patch.object(ja.rtc, "Room", return_value=fake_room), \
+         patch.object(ja.rtc, "AudioSource", return_value=fake_source), \
+         patch.object(ja.rtc, "LocalAudioTrack") as fake_lat, \
+         patch.object(ja.rtc, "TrackPublishOptions", return_value=fake_options), \
+         patch.object(ja.rtc, "TrackSource", create=True) as fake_ts:
+        fake_lat.create_audio_track = Mock(return_value=fake_track)
+        fake_ts.SOURCE_MICROPHONE = "SOURCE_MICROPHONE"
+        room, source = asyncio.run(ja._create_livekit_room(sid, bot_id))
+
+    assert room is fake_room
+    assert source is fake_source
+    assert captured["grants"].room == sid
+    assert captured["grants"].room != bot_id
+    assert captured["grants"].can_publish is True
+    assert ja._meeting_sessions[sid]["livekit_room"] is fake_room
+    assert ja._meeting_sessions[sid]["livekit_source"] is fake_source
+
+    del ja._meeting_sessions[sid]
+
+
+def test_teardown_livekit_room_disconnects_and_clears_state():
+    _reset_meeting_state()
+    sid = "session-teardown"
+    fake_room = Mock()
+    fake_room.disconnect = AsyncMock()
+    fake_source = Mock()
+    ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
+    ja._meeting_sessions[sid]["livekit_room"] = fake_room
+    ja._meeting_sessions[sid]["livekit_source"] = fake_source
+
+    asyncio.run(ja._teardown_livekit_room(sid))
+
+    fake_room.disconnect.assert_awaited_once()
+    assert ja._meeting_sessions[sid].get("livekit_room") is None
+    assert ja._meeting_sessions[sid].get("livekit_source") is None
+
+    del ja._meeting_sessions[sid]
