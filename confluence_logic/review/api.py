@@ -1390,12 +1390,51 @@ async def _find_editable_page_for_topic(title: str, context: str) -> Optional[Di
     return None
 
 
-async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
+# Version cache for APPLY-02: keyed by (session_id, page_id), stores committed version + 1.
+# In-memory per-process; lost on restart (acceptable — review flow is per-session).
+_version_cache: dict[tuple[str, str], int] = {}
+
+
+def _fire_reindex(resolved_id: str, proposal: Dict[str, Any], session_id: Optional[str]) -> None:
+    """Schedule a fire-and-forget re-index of `resolved_id` after a successful commit (APPLY-03).
+
+    Swallows all scheduling errors — re-index failure must not affect the accept response (D-10).
+    """
+    user_id = proposal.get("user_id")
+    graph_user_id = _confluence_graph_user_id(
+        {"id": user_id} if user_id else None,
+        session_id,
+    )
+
+    async def _reindex_task() -> None:
+        # Pinecone re-index via IngestionPipeline.process_page (synchronous — run in thread)
+        try:
+            from confluence_logic.ingestion.doc_pipeline import IngestionPipeline  # noqa: PLC0415
+            await asyncio.to_thread(IngestionPipeline().process_page, resolved_id)
+            logger.info("Pinecone re-index complete for page %s", resolved_id)
+        except Exception as exc:
+            logger.warning("Pinecone re-index failed for page %s (non-fatal): %s", resolved_id, exc)
+
+        # Neo4j re-index via refresh_page_in_graph (async)
+        try:
+            await confluence_page_graph.refresh_page_in_graph(graph_user_id, resolved_id)
+            logger.info("Neo4j re-index complete for page %s", resolved_id)
+        except Exception as exc:
+            logger.warning("Neo4j re-index failed for page %s (non-fatal): %s", resolved_id, exc)
+
+    try:
+        asyncio.create_task(_reindex_task())
+    except Exception as exc:
+        logger.warning("Could not schedule re-index task for page %s: %s", resolved_id, exc)
+
+
+async def _direct_apply_change(proposal: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
     """Execute a pipeline proposal directly via Confluence REST API calls.
 
     Does NOT route through the AI EditorAgent — all data was already determined
     in the proposal stage, so re-deriving it with AI only adds error surface.
     Markdown in after_content is converted to Confluence Storage Format HTML.
+    `session_id` is used for the APPLY-02 version cache keyed by (session_id, page_id).
 
     Returns {"success": bool, "error": str|None}.
     """
@@ -1410,6 +1449,11 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
     heading = proposal.get("section_heading")
     after_content = proposal.get("after_content") or ""
     rationale = proposal.get("rationale") or ""
+
+    # APPLY-02: fall back to session_id stored in the proposal dict when not passed explicitly.
+    # Tests and legacy callers may store session_id in the proposal payload rather than as a kwarg.
+    if session_id is None:
+        session_id = proposal.get("session_id") or None
 
     try:
         connector = _get_connector()
@@ -1492,6 +1536,21 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
 
                 # Fuzzy heading match against available headings
                 available = extract_headings(live_html)
+
+                # APPLY-01: pre-flight — confirm heading still exists (case-insensitive substring)
+                if heading:
+                    h_lower = heading.strip().lower()
+                    heading_present = any(h_lower in h.strip().lower() for h in available)
+                    if not heading_present:
+                        return {
+                            "success": False,
+                            "error": "heading_not_found",
+                            "message": (
+                                f"Section '{heading}' no longer exists in the live page. "
+                                "The page may have been edited since this proposal was generated."
+                            ),
+                        }
+
                 matched_heading = heading
                 h_lower = heading.lower()
                 for h in available:
@@ -1501,6 +1560,9 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
 
                 new_html = delete_content_in_section(live_html, matched_heading, "", delete_entire_section=True)
                 success = await asyncio.to_thread(connector.push_update, resolved_id, new_html, version)
+                if success and session_id:
+                    _version_cache[(session_id, resolved_id)] = version + 1
+                    _fire_reindex(resolved_id, proposal, session_id)
                 return {"success": success, "error": None if success else "push_update returned false"}
             else:
                 # Delete the entire page
@@ -1595,6 +1657,21 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
             live_html = await asyncio.to_thread(connector.fetch_page_html, resolved_id)
             meta = await asyncio.to_thread(connector.get_page_metadata, resolved_id)
             version = meta.get("version", {}).get("number", 1)
+
+            # APPLY-01: pre-flight heading check (edit only — create/title are excluded by change_type guards above)
+            if heading:
+                _pf_available = extract_headings(live_html)
+                _pf_lower = heading.strip().lower()
+                _pf_present = any(_pf_lower in h.strip().lower() for h in _pf_available)
+                if not _pf_present:
+                    return {
+                        "success": False,
+                        "error": "heading_not_found",
+                        "message": (
+                            f"Section '{heading}' no longer exists in the live page. "
+                            "The page may have been edited since this proposal was generated."
+                        ),
+                    }
 
             new_block_html = markdown_to_html(after_content)
 
@@ -1829,8 +1906,23 @@ async def _direct_apply_change(proposal: Dict[str, Any]) -> Dict[str, Any]:
                 else:
                     new_html = edit_block_in_section(live_html, target_heading, "", new_block_html)
 
-            success = await asyncio.to_thread(connector.push_update, resolved_id, new_html, version)
+            # APPLY-02: use cached version as expected_version if available
+            _cache_key = (session_id, resolved_id) if session_id else None
+            _expected_version = _version_cache.get(_cache_key) if _cache_key else None
+            try:
+                success = await asyncio.to_thread(
+                    connector.push_update, resolved_id, new_html, _expected_version if _expected_version is not None else version
+                )
+            except ValueError as _ve:
+                if "Version Conflict" in str(_ve):
+                    if _cache_key:
+                        _version_cache.pop(_cache_key, None)
+                    return {"success": False, "error": "version_conflict"}
+                raise
             if success:
+                if _cache_key:
+                    _version_cache[_cache_key] = version + 1
+                _fire_reindex(resolved_id, proposal, session_id)
                 return {"success": True}
             return {"success": False, "error": "push_update returned false"}
 
@@ -1945,11 +2037,10 @@ async def _execute_pipeline_proposals_batched(
 
 
 async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[str, Any]:
-    """Execute a pipeline proposal through the master EditorAgent.
+    """Execute a pipeline proposal via _direct_apply_change (APPLY-01/02/03 hardened path).
 
-    Routes through the same EditorAgent path as in-memory proposals so all the
-    agent's live-search, fetch, preview, version-conflict, and sub-agent
-    capabilities are available — not just the brittle direct REST path.
+    Bypasses EditorAgent in favour of the direct REST path so that the pre-flight
+    heading check, version-chain cache, and post-commit re-index all fire correctly.
     """
     proposal = supabase_store.get_proposal_by_id(proposal_id)
     if not proposal:
@@ -1963,45 +2054,20 @@ async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[
 
     supabase_store.update_proposal_status(proposal_id, "executing")
 
-    # Build a structured step-by-step instruction for the EditorAgent.
-    # _format_approved_change_request handles all change_types (edit/delete/create/title).
-    prepared_query = _format_approved_change_request(proposal)
-
-    # Set up per-user Confluence graph context from the proposal row.
-    user_id = proposal.get("user_id")
-    graph_user_id = _confluence_graph_user_id(
-        {"id": user_id} if user_id else None,
-        session_id,
-    )
-
     page_id = proposal.get("page_id")
     page_title_for_lock = proposal.get("page_title") or ""
     lock = _page_lock(page_id, page_title_for_lock)
-    editor_agent = _get_editor_agent()
-    graph_token = confluence_page_graph.set_current_graph_user_id(graph_user_id)
-    try:
-        async with lock:
-            answer = await editor_agent.handle_prepared_query(
-                prepared_query,
-                original_query=f"Execute pipeline proposal {proposal_id}",
-            )
-    except Exception as exc:
-        logger.error("EditorAgent raised during pipeline proposal %s: %s", proposal_id, exc)
+
+    async with lock:
+        result = await _direct_apply_change(proposal, session_id=session_id)
+
+    if result.get("success"):
+        supabase_store.update_proposal_status(proposal_id, "executed")
+        return {"success": True, "message": "Change applied to Confluence."}
+    else:
         supabase_store.update_proposal_status(proposal_id, "failed")
-        return {"success": False, "message": f"Execution error: {exc}"}
-    finally:
-        confluence_page_graph.reset_current_graph_user_id(graph_token)
-
-    normalized = (answer or "").strip()
-    failed = normalized.lower().startswith((
-        "error:", "the requested change did not complete", "i encountered an issue",
-    ))
-
-    supabase_store.update_proposal_status(proposal_id, "failed" if failed else "executed")
-
-    if failed:
-        return {"success": False, "message": normalized}
-    return {"success": True, "message": "Change applied to Confluence."}
+        error = result.get("error") or result.get("message") or "Unknown error"
+        return {"success": False, "message": error}
 
 
 async def _execute_single_change(
