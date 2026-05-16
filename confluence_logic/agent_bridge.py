@@ -59,7 +59,22 @@ def get_transcript_log_for_session(session_id: str) -> List[Dict[str, Any]]:
 
 
 def _session_id_from_context(context: RunContext) -> str:
-    """Extract session_id from RunContext.job.metadata JSON (set by AgentDispatchService — Plan 05)."""
+    """Extract session_id from RunContext.
+
+    In-process path (Phase 03): reads from context.session.userdata["session_id"]
+    set by _start_in_process_agent_session in jarvis_agentic.py.
+    Agent worker path (fallback): reads from context.job.metadata JSON.
+    """
+    # In-process path: userdata set on AgentSession constructor
+    try:
+        userdata = context.session.userdata
+        if isinstance(userdata, dict):
+            sid = userdata.get("session_id")
+            if sid:
+                return str(sid)
+    except Exception:
+        pass
+    # Agent worker fallback: session_id in job metadata JSON
     try:
         meta = json.loads(context.job.metadata or "{}")
         return str(meta.get("session_id") or "")

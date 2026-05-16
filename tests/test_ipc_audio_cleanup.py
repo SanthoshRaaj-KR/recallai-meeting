@@ -132,11 +132,16 @@ async def test_in_process_session_stored_in_meeting_sessions(monkeypatch):
     mock_session.start = AsyncMock()
     mock_session.agent_state = "listening"
 
+    mock_http_ctx = AsyncMock()
+    mock_http_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+    mock_http_ctx.__aexit__ = AsyncMock(return_value=False)
+
     with patch("confluence_logic.jarvis_agentic.AgentSession", return_value=mock_session), \
-         patch("confluence_logic.jarvis_agentic.cartesia") as mock_cartesia, \
+         patch("confluence_logic.jarvis_agentic._OpenAITTS", return_value=MagicMock()), \
          patch("confluence_logic.jarvis_agentic._OpenAILLM", return_value=MagicMock()), \
+         patch("confluence_logic.jarvis_agentic._lk_http_context") as mock_lk_http, \
          patch("confluence_logic.jarvis_agentic.asyncio.create_task", return_value=MagicMock()):
-        mock_cartesia.TTS.return_value = MagicMock()
+        mock_lk_http.open.return_value = mock_http_ctx
         await ja._start_in_process_agent_session("sid-1")
 
     state = ja._meeting_sessions["sid-1"]

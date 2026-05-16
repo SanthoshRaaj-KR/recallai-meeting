@@ -105,7 +105,7 @@ _LIVEKIT_SAMPLE_RATE = 48000          # D-10: 48 kHz PCM
 _LIVEKIT_NUM_CHANNELS = 1             # D-10: mono
 _LIVEKIT_SAMPLES_PER_CHANNEL = 960    # D-10: 20 ms frames (48000 * 0.020)
 _LIVEKIT_SUBSCRIBER_TTL_HOURS = 8     # D-16 pitfall 2: long-meeting tolerance
-JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "1.0"))
+JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "0.6"))
 JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "false").strip().lower() == "true"
 JARVIS_MICRO_ACK_ENABLED = os.getenv("JARVIS_MICRO_ACK_ENABLED", "true").strip().lower() == "true"
 JARVIS_MICRO_ACK_TEXT = os.getenv("JARVIS_MICRO_ACK_TEXT", "Mhm.").strip()
@@ -1072,6 +1072,7 @@ async def _start_in_process_agent_session(session_id: str) -> Optional["AgentSes
             llm=_OpenAILLM(model=JARVIS_LK_LLM),
             tts=_OpenAITTS(model=JARVIS_TTS_MODEL, voice=JARVIS_TTS_VOICE, speed=JARVIS_TTS_SPEED),
             turn_detection=None,
+            userdata={"session_id": session_id},
         )
         await session.start(agent=_InProcessJarvisAgent(), room=room)
 
@@ -1728,11 +1729,29 @@ async def _handle_interruption(bot_id: str) -> None:
     return
 
 
+def _flush_agent_queue(q: "asyncio.Queue") -> int:
+    """Drain all pending items from the agent query queue. Returns count flushed."""
+    flushed = 0
+    while not q.empty():
+        try:
+            q.get_nowait()
+            q.task_done()
+            flushed += 1
+        except asyncio.QueueEmpty:
+            break
+    return flushed
+
+
 async def _debounced_dispatch(query: str, bot_id: str) -> None:
     """Wait JARVIS_DEBOUNCE_SECONDS then dispatch query to the in-process AgentSession.
 
     Per Plan 06 (REQ-17): legacy voice paths removed — AgentSession owns all voice output now.
     Per D-06: cancellable task. Per D-08: clears invoker_participant after firing.
+
+    Interruption: if the agent is already speaking or thinking when a new query arrives,
+    interrupt current speech (so the latest question gets answered immediately) and flush
+    any stale queued items. Consumer resurrection: if the consumer task has died unexpectedly,
+    restart it before queuing the new query.
     """
     await asyncio.sleep(JARVIS_DEBOUNCE_SECONDS)
     meeting_state["invoker_participant"] = None
@@ -1752,6 +1771,35 @@ async def _debounced_dispatch(query: str, bot_id: str) -> None:
                 session_id,
             )
             return
+
+        # Consumer resurrection: if the consumer task died unexpectedly, restart it.
+        consumer_task = _state.get("_agent_consumer_task")
+        if consumer_task is not None and consumer_task.done() and not consumer_task.cancelled():
+            exc = consumer_task.exception() if not consumer_task.cancelled() else None
+            logger.warning(
+                "_debounced_dispatch: consumer task died for session %s (%s) — restarting",
+                session_id, exc,
+            )
+            new_consumer = asyncio.create_task(
+                _query_consumer(_agent_session, _agent_queue),
+                name=f"jarvis-consumer-{session_id[:8]}",
+            )
+            _state["_agent_consumer_task"] = new_consumer
+
+        # Interruption: if already speaking/thinking, interrupt and flush stale queue items
+        # so the newest query is answered immediately instead of waiting behind old responses.
+        if _agent_session.agent_state in ("speaking", "thinking"):
+            try:
+                _agent_session.interrupt()
+            except RuntimeError:
+                pass
+            flushed = _flush_agent_queue(_agent_queue)
+            if flushed:
+                logger.info(
+                    "_debounced_dispatch: interrupted session %s, flushed %d stale queue items",
+                    session_id, flushed,
+                )
+
         try:
             _agent_queue.put_nowait(query)
             return
