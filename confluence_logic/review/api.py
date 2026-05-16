@@ -1560,8 +1560,9 @@ async def _direct_apply_change(proposal: Dict[str, Any], session_id: Optional[st
 
                 new_html = delete_content_in_section(live_html, matched_heading, "", delete_entire_section=True)
                 success = await asyncio.to_thread(connector.push_update, resolved_id, new_html, version)
-                if success and session_id:
-                    _version_cache[(session_id, resolved_id)] = version + 1
+                if success:
+                    if session_id:
+                        _version_cache[(session_id, resolved_id)] = version + 1
                     _fire_reindex(resolved_id, proposal, session_id)
                 return {"success": success, "error": None if success else "push_update returned false"}
             else:

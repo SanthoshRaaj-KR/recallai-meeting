@@ -474,9 +474,9 @@ async def refresh_page_in_graph(user_id: str, page_id: str) -> bool:
     try:
         # 1. Detach-delete the existing CfPage node (cascades to CfSection children via DETACH DELETE)
         await driver.execute_query(
-            "MATCH (p:CfPage {user_id: $user_id, page_id: $page_id, graph_kind: $graph_kind}) "
+            "MATCH (p:CfPage {user_id: $user_id, page_id: $page_id}) "
             "DETACH DELETE p",
-            {"user_id": user_id, "page_id": page_id, "graph_kind": GRAPH_KIND},
+            {"user_id": user_id, "page_id": page_id},
             routing_=neo4j.RoutingControl.WRITE,
         )
 
