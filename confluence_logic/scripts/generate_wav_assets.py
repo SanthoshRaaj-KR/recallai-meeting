@@ -23,6 +23,11 @@ AUDIO_DIR = Path(__file__).resolve().parent.parent / "assets" / "audio"
 
 # Acknowledgement phrases to cache — these replace _INSTANT_ACKS TTS calls
 ACK_PHRASES = [
+    # Wake-word acknowledgements (used by _handle_bare_wake via get_wake_ack_audio /
+    # get_busy_ack_audio — must keep these exact keys).
+    ("yes", "Yes?"),
+    ("busy", "I'm already on it. Give me a moment."),
+    # General micro-acks
     ("on_it", "On it."),
     ("sure_thing", "Sure thing."),
     ("give_me_a_sec", "Give me a sec."),

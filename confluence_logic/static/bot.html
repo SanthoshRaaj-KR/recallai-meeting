@@ -30,6 +30,9 @@
         dynacast: false,
       });
 
+      // Track sid -> <audio> element map so we can clean up on unsubscribe.
+      const audioElements = new Map();
+
       room.on(LivekitClient.RoomEvent.Connected, () => {
         setStatus('Connected to room ' + (roomName || '<unknown>'));
         // Defensive: ensure audio playback is allowed (Recall headless Chrome usually permits).
@@ -43,15 +46,35 @@
       });
 
       room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        console.log('[bot.html] TrackSubscribed kind=', track.kind);
+        console.log('[bot.html] TrackSubscribed kind=', track.kind, 'sid=', track.sid);
         if (track.kind === LivekitClient.Track.Kind.Audio) {
+          // Remove any stale element for this sid before attaching a fresh one.
+          if (audioElements.has(track.sid)) {
+            const stale = audioElements.get(track.sid);
+            stale.pause();
+            stale.remove();
+            audioElements.delete(track.sid);
+          }
           const audioEl = track.attach();
           audioEl.volume = 1.0;
           audioEl.autoplay = true;
           document.body.appendChild(audioEl);
+          audioElements.set(track.sid, audioEl);
           const playPromise = audioEl.play();
           if (playPromise && typeof playPromise.catch === 'function') {
             playPromise.catch((e) => console.warn('[bot.html] audioEl.play() blocked:', e));
+          }
+        }
+      });
+
+      room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+        console.log('[bot.html] TrackUnsubscribed kind=', track.kind, 'sid=', track.sid);
+        if (track.kind === LivekitClient.Track.Kind.Audio) {
+          const audioEl = audioElements.get(track.sid);
+          if (audioEl) {
+            audioEl.pause();
+            audioEl.remove();
+            audioElements.delete(track.sid);
           }
         }
       });

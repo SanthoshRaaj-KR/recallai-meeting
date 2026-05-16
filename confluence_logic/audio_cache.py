@@ -84,6 +84,39 @@ def get_random_filler_audio() -> Optional[Tuple[str, bytes]]:
     return (key, _cache[key])
 
 
+def get_wake_ack_audio() -> Optional[Tuple[str, bytes]]:
+    """
+    Return ("yes", audio_bytes) if the wake-ack clip is cached, else None.
+    Used by _handle_bare_wake to play a pre-generated "Yes?" without a live TTS call.
+    Lazily loads the cache on first call.
+    """
+    global _cache_loaded
+    if not _cache_loaded:
+        load_audio_cache()
+
+    data = _cache.get("yes")
+    if data is None:
+        return None
+    return ("yes", data)
+
+
+def get_busy_ack_audio() -> Optional[Tuple[str, bytes]]:
+    """
+    Return ("busy", audio_bytes) if the busy-ack clip is cached, else None.
+    Used by _handle_bare_wake to play a pre-generated "I'm already on it" without a
+    live TTS call.
+    Lazily loads the cache on first call.
+    """
+    global _cache_loaded
+    if not _cache_loaded:
+        load_audio_cache()
+
+    data = _cache.get("busy")
+    if data is None:
+        return None
+    return ("busy", data)
+
+
 def get_cache_size() -> int:
     """Return the number of cached audio files."""
     if not _cache_loaded:

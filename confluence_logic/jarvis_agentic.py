@@ -35,8 +35,7 @@ from livekit import api as livekit_api
 from livekit.agents.utils.codecs import AudioStreamDecoder
 from livekit.agents.utils import http_context as _lk_http_context
 from livekit.agents import Agent, AgentSession
-from livekit.plugins import cartesia
-from livekit.plugins.openai import LLM as _OpenAILLM
+from livekit.plugins.openai import LLM as _OpenAILLM, TTS as _OpenAITTS
 
 import requests
 import uvicorn
@@ -50,7 +49,7 @@ from openai import OpenAI
 
 from .agents.editor_agent import EditorAgent
 from .classifier import classify_intent
-from .audio_cache import get_random_ack_audio, get_random_filler_audio
+from .audio_cache import get_random_ack_audio, get_random_filler_audio, get_wake_ack_audio, get_busy_ack_audio
 from .general_responder import answer_general_question
 from .meeting_responder import (
     summarize_meeting, generate_opinion, extract_action_items, summarize_speaker,
@@ -88,11 +87,8 @@ JARVIS_TTS_VOICE = os.getenv("JARVIS_TTS_VOICE", "echo").strip()
 JARVIS_TTS_SPEED = float(os.getenv("JARVIS_TTS_SPEED", "1.0"))
 
 # LiveKit AgentSession in-process config — same env vars read by agent_worker.py (REQ-14)
-JARVIS_LK_TTS_PROVIDER = os.getenv("JARVIS_LK_TTS_PROVIDER", "cartesia").strip().lower()
-JARVIS_LK_TTS_VOICE = os.getenv(
-    "JARVIS_LK_TTS_VOICE",
-    "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
-).strip()
+# TTS uses JARVIS_TTS_MODEL / JARVIS_TTS_VOICE (OpenAI plugin) for voice consistency with
+# push_audio_to_livekit. Cartesia constants have been removed.
 JARVIS_LK_LLM = os.getenv("JARVIS_LK_LLM", "gpt-4o-mini").strip()
 
 JARVIS_WAKE_ACK = os.getenv("JARVIS_WAKE_ACK", "Yes?").strip()
@@ -1039,9 +1035,9 @@ async def _query_consumer(
 async def _start_in_process_agent_session(session_id: str) -> Optional["AgentSession"]:
     """Create and start an in-process LiveKit AgentSession for the given session (REQ-14).
 
-    Uses cartesia.TTS (plugin-direct) and openai.LLM (plugin-direct). STT is disabled
-    (stt=None) — Recall.ai provides meeting transcripts; the AgentSession only handles
-    LLM response generation + Cartesia TTS output.
+    Uses openai.TTS (plugin-direct, same voice as push_audio_to_livekit) and openai.LLM
+    (plugin-direct). STT is disabled (stt=None) — Recall.ai provides meeting transcripts;
+    the AgentSession only handles LLM response generation + OpenAI TTS output.
 
     Also creates a serializing _query_consumer task and a per-session asyncio.Queue so
     _debounced_dispatch can call put_nowait(query) instead of calling generate_reply
@@ -1064,7 +1060,7 @@ async def _start_in_process_agent_session(session_id: str) -> Optional["AgentSes
         )
         return None
     try:
-        # Cartesia plugin calls http_context.http_session() internally; that requires
+        # OpenAI TTS plugin calls http_context.http_session() internally; that requires
         # a LiveKit job context. Running in-process (no agent worker) has none, so we
         # open one manually and keep it alive for the session lifetime.
         http_ctx = _lk_http_context.open()
@@ -1074,7 +1070,7 @@ async def _start_in_process_agent_session(session_id: str) -> Optional["AgentSes
         session = AgentSession(
             stt=None,
             llm=_OpenAILLM(model=JARVIS_LK_LLM),
-            tts=cartesia.TTS(voice=JARVIS_LK_TTS_VOICE),
+            tts=_OpenAITTS(model=JARVIS_TTS_MODEL, voice=JARVIS_TTS_VOICE, speed=JARVIS_TTS_SPEED),
             turn_detection=None,
         )
         await session.start(agent=_InProcessJarvisAgent(), room=room)
@@ -1089,8 +1085,8 @@ async def _start_in_process_agent_session(session_id: str) -> Optional["AgentSes
         state["_agent_consumer_task"] = consumer_task
 
         logger.info(
-            "_start_in_process_agent_session: started — session=%s llm=%s voice=%s",
-            session_id, JARVIS_LK_LLM, JARVIS_LK_TTS_VOICE,
+            "_start_in_process_agent_session: started — session=%s llm=%s tts_model=%s tts_voice=%s",
+            session_id, JARVIS_LK_LLM, JARVIS_TTS_MODEL, JARVIS_TTS_VOICE,
         )
         return session
     except Exception as exc:
@@ -1141,15 +1137,41 @@ async def push_audio_to_livekit(
     try:
         decoder.push(audio_bytes)
         decoder.end_input()
+        # Rechunk decoded PCM into exact 960-sample frames to eliminate variable-frame-
+        # size jitter caused by MP3 frame boundaries (D-10: _LIVEKIT_SAMPLES_PER_CHANNEL).
+        sample_buf: list[int] = []
         async for frame in decoder:
             if generation is not None and generation != meeting_state["output_generation"]:
                 await decoder.aclose()
                 return False
+            sample_buf.extend(frame.data)
+            while len(sample_buf) >= _LIVEKIT_SAMPLES_PER_CHANNEL:
+                chunk = sample_buf[:_LIVEKIT_SAMPLES_PER_CHANNEL]
+                sample_buf = sample_buf[_LIVEKIT_SAMPLES_PER_CHANNEL:]
+                out_frame = rtc.AudioFrame(
+                    data=bytes(chunk),
+                    sample_rate=_LIVEKIT_SAMPLE_RATE,
+                    num_channels=_LIVEKIT_NUM_CHANNELS,
+                    samples_per_channel=_LIVEKIT_SAMPLES_PER_CHANNEL,
+                )
+                try:
+                    await source.capture_frame(out_frame)
+                except Exception as exc:
+                    logger.error("capture_frame error for session %s: %s", session_id, exc)
+                    await decoder.aclose()
+                    return False
+        # Flush tail (< 960 samples) — acceptable for end-of-clip.
+        if sample_buf:
+            out_frame = rtc.AudioFrame(
+                data=bytes(sample_buf),
+                sample_rate=_LIVEKIT_SAMPLE_RATE,
+                num_channels=_LIVEKIT_NUM_CHANNELS,
+                samples_per_channel=len(sample_buf),
+            )
             try:
-                await source.capture_frame(frame)
+                await source.capture_frame(out_frame)
             except Exception as exc:
-                logger.error("capture_frame error for session %s: %s", session_id, exc)
-                await decoder.aclose()
+                logger.error("capture_frame tail error for session %s: %s", session_id, exc)
                 return False
     except Exception as exc:
         logger.error("AudioStreamDecoder failed for session %s: %s", session_id, exc)
@@ -1886,12 +1908,24 @@ async def _handle_bare_wake(bot_id: str) -> None:
         generation = meeting_state["output_generation"]
 
     if current is not None:
-        # Already busy — let the user know and clear listening state
+        # Already busy — let the user know and clear listening state.
+        # Prefer pre-cached audio ("busy.mp3") for instant playback; fall back to live TTS.
         meeting_state["jarvis_listening"] = False
-        await _speak_guarded(JARVIS_BUSY_ACK, bot_id, generation)
+        busy_cached = get_busy_ack_audio()
+        if busy_cached is not None:
+            _, busy_bytes = busy_cached
+            await _speak_cached_guarded(busy_bytes, bot_id, generation)
+        else:
+            await _speak_guarded(JARVIS_BUSY_ACK, bot_id, generation)
     else:
-        # Speak "Yes" to signal readiness — user can now ask without repeating the wake word
-        await _speak_guarded(JARVIS_WAKE_ACK, bot_id, generation)
+        # Speak "Yes?" to signal readiness — user can now ask without repeating the wake word.
+        # Prefer pre-cached audio ("yes.mp3") for instant playback; fall back to live TTS.
+        wake_cached = get_wake_ack_audio()
+        if wake_cached is not None:
+            _, wake_bytes = wake_cached
+            await _speak_cached_guarded(wake_bytes, bot_id, generation)
+        else:
+            await _speak_guarded(JARVIS_WAKE_ACK, bot_id, generation)
 
 
 def _should_speak_final_answer(task: VoiceTask, answer: str) -> bool:
