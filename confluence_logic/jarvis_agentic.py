@@ -148,6 +148,8 @@ _DYNAMIC_ACK_FALLBACKS = {
     "switching": "On it, switching now.",
     "error": "Sorry, I hit a snag there.",
 }
+QUEUE_ACK = _DYNAMIC_ACK_FALLBACKS["queued"]
+SWITCH_ACK = _DYNAMIC_ACK_FALLBACKS["switching"]
 
 _INSTANT_ACKS = [
     "On it.",

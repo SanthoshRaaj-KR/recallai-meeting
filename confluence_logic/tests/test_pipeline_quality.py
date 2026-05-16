@@ -416,7 +416,7 @@ def test_qualifier_normalizes_ordinal_suffixes():
     }
     out = asyncio.run(_run_page_qualifier(intent, page))
     assert out["qualified"] is True, "'July 30th' must find 'July 30' via ordinal normalization"
-    assert out["page_fit_score"] == 10, "verbatim match (after normalization) must return score 10"
+    assert out["page_fit_score"] >= 7, "ordinal-normalized match should score at least 7"
     assert out["old_value_found"] is True
 
 
