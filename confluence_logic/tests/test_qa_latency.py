@@ -41,13 +41,21 @@ async def test_qa_pipeline_latency_under_3000ms():
             final_output="SOC2 audit scheduled for Q3 2025 per Performance SLA section."
         )
 
-    # Synthesis mock introduces 20ms latency (gpt-4o-mini call)
+    # Synthesis mock introduces 20ms latency — asyncio.to_thread runs this in a thread pool,
+    # so time.sleep(0.020) accurately simulates the gpt-4o-mini network round-trip overhead.
+    import time as _time
+
     mock_oai_response = MagicMock()
     mock_oai_response.choices = [
         SimpleNamespace(message=SimpleNamespace(content="SOC2 is planned for Q3 2025."))
     ]
+
+    def _mock_synthesis_call(**kwargs):
+        _time.sleep(0.020)
+        return mock_oai_response
+
     mock_oai_client = MagicMock()
-    mock_oai_client.chat.completions.create.return_value = mock_oai_response
+    mock_oai_client.chat.completions.create.side_effect = _mock_synthesis_call
 
     with patch("confluence_logic.agents.confluence_qa_agent.Runner") as mock_runner_cls, \
          patch("confluence_logic.agents.confluence_qa_agent.get_store") as mock_get_store, \

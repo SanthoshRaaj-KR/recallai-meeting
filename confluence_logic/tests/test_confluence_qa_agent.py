@@ -1,6 +1,7 @@
 """Tests for ConfluenceQAAgent — Confluence Document Q&A Agent (QA-01, QA-02, QA-03, QA-04)."""
 import asyncio
 import json
+import os
 import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -44,13 +45,14 @@ async def test_qa_returns_answer_from_pinecone():
         mock_runner_cls.run = AsyncMock(return_value=mock_runner_result)
         mock_get_store.return_value.search.return_value = [
             {
+                "score": 0.85,  # Above the 0.3 threshold — exercises the Pinecone path
                 "metadata": {
                     "page_id": "p99",
                     "title": "Security Roadmap",
                     "heading": "SOC2 Timeline",
                     "text_summary": "SOC2 is planned for Q3 2025.",
                     "space_key": "SEC",
-                }
+                },
             }
         ]
         mock_graph.ensure_user_confluence_graph = AsyncMock(return_value=True)
@@ -122,9 +124,11 @@ async def test_qa_model_split_tools_gpt5mini_synthesis_gpt4omini():
     """
     agent = ConfluenceQAAgent()
 
-    # Structural assertion: agent SDK object must use gpt-5-mini for tool orchestration
-    assert agent.agent.model == "gpt-5-mini", (
-        f"Tool orchestration model should be 'gpt-5-mini', got {agent.agent.model!r}"
+    # Structural assertion: agent SDK object uses the configured agent model (via JARVIS_AGENT_MODEL).
+    # Evaluated here (after all imports + load_dotenv) to stay in sync with the runtime env var.
+    expected_agent_model = os.environ.get("JARVIS_AGENT_MODEL", "gpt-4o-mini")
+    assert agent.agent.model == expected_agent_model, (
+        f"Tool orchestration model should be {expected_agent_model!r}, got {agent.agent.model!r}"
     )
 
     mock_runner_result = SimpleNamespace(final_output="The roadmap covers Q3 SOC2 timeline.")
@@ -141,13 +145,14 @@ async def test_qa_model_split_tools_gpt5mini_synthesis_gpt4omini():
         mock_runner_cls.run = AsyncMock(return_value=mock_runner_result)
         mock_get_store.return_value.search.return_value = [
             {
+                "score": 0.92,  # Above the 0.3 threshold — exercises the Pinecone path
                 "metadata": {
                     "page_id": "p1",
                     "title": "Roadmap",
                     "heading": "Timeline",
                     "text_summary": "Q3 SOC2",
                     "space_key": "ENG",
-                }
+                },
             }
         ]
         mock_graph.ensure_user_confluence_graph = AsyncMock(return_value=True)
@@ -164,13 +169,13 @@ async def test_qa_model_split_tools_gpt5mini_synthesis_gpt4omini():
         f"Synthesis model should be 'gpt-4o-mini', got {synthesis_model!r}"
     )
 
-    # Runner.run call should not override the model (it uses the Agent's gpt-5-mini)
+    # Runner.run uses the Agent's configured model; any override must match it
     runner_call = mock_runner_cls.run.call_args
     runner_kwargs = runner_call.kwargs if runner_call else {}
-    # The call should not pass a model override that would be gpt-4o-mini
     if "model" in runner_kwargs:
-        assert runner_kwargs["model"] == "gpt-5-mini", (
-            f"Runner.run model override, if present, must be 'gpt-5-mini', got {runner_kwargs['model']!r}"
+        assert runner_kwargs["model"] == expected_agent_model, (
+            f"Runner.run model override must match agent model {expected_agent_model!r}, "
+            f"got {runner_kwargs['model']!r}"
         )
 
 

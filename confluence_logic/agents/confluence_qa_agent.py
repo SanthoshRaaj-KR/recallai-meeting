@@ -16,12 +16,13 @@ Design decisions:
 import asyncio
 import json
 import logging
-import threading
+import os
 
 from agents import Agent, Runner, function_tool
 from ..db.vector_store import PineconeStore
 from ..connectors.confluence import ConfluenceConnector
 from confluence_logic import confluence_page_graph
+from .tools import _run_async_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -52,31 +53,6 @@ def _get_openai_client():
         from openai import OpenAI
         _openai_client = OpenAI()
     return _openai_client
-
-
-# ── Async-to-sync bridge (copied from confluence_logic/agents/tools.py) ──────
-# Bridges async graph calls inside sync @function_tool bodies.
-
-def _run_async_blocking(coro):
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    result = {}
-
-    def _runner():
-        try:
-            result["value"] = asyncio.run(coro)
-        except Exception as exc:
-            result["error"] = exc
-
-    thread = threading.Thread(target=_runner)
-    thread.start()
-    thread.join()
-    if "error" in result:
-        raise result["error"]
-    return result.get("value")
 
 
 # ── Private formatting helpers (module-level) ────────────────────────────────
@@ -199,8 +175,13 @@ def list_confluence_pages(limit: int = 10) -> str:
 
 # ── ConfluenceQAAgent class ───────────────────────────────────────────────────
 
+# Use JARVIS_AGENT_MODEL env var; fall back to gpt-4o-mini when env var is absent or invalid.
+# Set JARVIS_AGENT_MODEL=gpt-5-mini once that model becomes available on the API.
+_DEFAULT_AGENT_MODEL = os.environ.get("JARVIS_AGENT_MODEL", "gpt-4o-mini")
+
+
 class ConfluenceQAAgent:
-    def __init__(self, model: str = "gpt-5-mini"):
+    def __init__(self, model: str = _DEFAULT_AGENT_MODEL):
         self.model = model
         self.agent = Agent(
             name="Jarvis Confluence QA",
@@ -223,13 +204,14 @@ class ConfluenceQAAgent:
         Step 2: Run the Agent with gpt-5-mini for tool orchestration (D-09).
         Step 3: Synthesize the spoken answer with a separate gpt-4o-mini call (D-10).
         """
-        # Step 1: Pre-warm Neo4j graph with timeout (retain pattern from existing _answer_confluence_question)
+        # Step 1: Pre-warm Neo4j graph with timeout — best-effort; search_confluence_pages will
+        # query the graph on demand if pre-warm is skipped.
         try:
             await asyncio.wait_for(
                 confluence_page_graph.ensure_user_confluence_graph(graph_user_id), timeout=0.7
             )
-        except (asyncio.TimeoutError, Exception):
-            asyncio.create_task(confluence_page_graph.ensure_user_confluence_graph(graph_user_id))
+        except Exception:
+            logger.debug("Graph pre-warm skipped for %s — will query on demand", graph_user_id)
 
         # Step 2: Run Agent (gpt-5-mini) — tool orchestration and retrieval (D-09)
         try:
