@@ -113,6 +113,7 @@ _RECALL_AUDIO_BYTES_PER_INPUT_SAMPLE = 2     # S16LE
 _RECALL_AUDIO_BYTES_PER_OUTPUT_FRAME = _LIVEKIT_SAMPLES_PER_CHANNEL * 2  # 960 * 2 = 1920 bytes
 _RECALL_RELAY_TRACK_NAME = "recall-meeting-audio"
 _RECALL_RELAY_IDENTITY_PREFIX = "recall-relay-"
+RECALL_AUDIO_STREAM_PATH = "/recall-audio-mixed"   # Phase 4 / D-01 — distinct from /recall-audio-stream (transcripts)
 
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "0.6"))
 JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "false").strip().lower() == "true"
@@ -1296,7 +1297,11 @@ async def push_audio_to_livekit(
 
 
 def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None) -> dict:
-    stream_path = f"/recall-audio-stream/{session_id}" if session_id else "/recall-audio-stream"
+    # Transcript stream path (UNCHANGED — D-03/D-04: Confluence pipeline depends on this).
+    transcript_path = f"/recall-audio-stream/{session_id}" if session_id else "/recall-audio-stream"
+    # Audio stream path (Phase 4 / D-01 — new dedicated endpoint for audio_mixed_raw).
+    audio_path = f"{RECALL_AUDIO_STREAM_PATH}/{session_id}" if session_id else RECALL_AUDIO_STREAM_PATH
+
     if not WEBHOOK_URL:
         raise RuntimeError(
             "WEBHOOK_URL is not configured. Set it in confluence_logic/.env or the process environment."
@@ -1309,7 +1314,8 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
     else:
         ws_base = WEBHOOK_URL
 
-    ws_url = ws_base + stream_path
+    transcript_ws_url = ws_base + transcript_path
+    audio_ws_url = ws_base + audio_path
 
     # D-02 / D-03 / D-14: Recall bot loads bot.html via output_media kind=webpage.
     # D-16: pass LiveKit url, subscriber token, and room name as URL query params.
@@ -1339,15 +1345,27 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
             "session_id": session_id or _DEFAULT_SESSION_ID,
         },
         "recording_config": {
+            # Phase 4 / D-01: enable mixed audio streaming — Recall publishes
+            # base64 S16LE 16 kHz mono PCM as audio_mixed_raw.data events.
+            "audio_mixed_raw": {},
+            # D-03 / D-04: transcript provider stays for Confluence pipeline.
             "transcript": {
                 "provider": build_transcript_provider_config()
             },
             "realtime_endpoints": [
+                # Transcript endpoint (UNCHANGED — D-03/D-04 — feeds transcript_log → Confluence review).
                 {
                     "type": "websocket",
-                    "url": ws_url,
+                    "url": transcript_ws_url,
                     "events": ["transcript.data"],
-                }
+                },
+                # Audio endpoint (NEW — Phase 4 / D-01 — feeds STT relay).
+                # Separate endpoint per Pitfall 3 to avoid mixing JSON-transcript and audio handlers.
+                {
+                    "type": "websocket",
+                    "url": audio_ws_url,
+                    "events": ["audio_mixed_raw.data"],
+                },
             ],
         },
         "output_media": {

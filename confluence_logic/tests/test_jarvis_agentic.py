@@ -1232,10 +1232,14 @@ def test_build_create_bot_payload_retains_websocket_endpoint():
         )
 
     endpoints = payload["recording_config"]["realtime_endpoints"]
-    assert len(endpoints) == 1
+    # Phase 4: now 2 endpoints — transcript (index 0) and audio_mixed_raw (index 1)
+    assert len(endpoints) == 2
     assert endpoints[0]["type"] == "websocket"
     assert endpoints[0]["url"].startswith("wss://")
     assert endpoints[0]["events"] == ["transcript.data"]
+    assert endpoints[1]["type"] == "websocket"
+    assert endpoints[1]["url"].endswith("/recall-audio-mixed/sess-1")
+    assert endpoints[1]["events"] == ["audio_mixed_raw.data"]
 
 
 def test_build_create_bot_payload_rejects_non_https_webhook():
