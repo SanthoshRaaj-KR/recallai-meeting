@@ -452,65 +452,23 @@ async def _queue_confluence_proposal(task: VoiceTask, prepared_request: str) -> 
     return "I could not find a concrete Confluence change to queue from that request."
 
 
-async def _answer_confluence_question(query: str) -> str:
-    graph_user_id = _current_confluence_graph_user_id()
-    try:
-        await asyncio.wait_for(confluence_page_graph.ensure_user_confluence_graph(graph_user_id), timeout=0.7)
-    except (asyncio.TimeoutError, Exception):
-        asyncio.create_task(confluence_page_graph.ensure_user_confluence_graph(graph_user_id))
+_qa_agent = None
 
-    if re.search(r"\b(?:list|show|what).*(?:pages|documents|docs)\b", query, re.IGNORECASE):
-        pages = await confluence_page_graph.list_user_confluence_pages(graph_user_id, limit=10)
-        if pages:
-            titles = ", ".join(page.get("title") or "Untitled" for page in pages[:10])
-            return f"I found these Confluence pages in the graph: {titles}."
 
-    try:
-        contexts = await asyncio.wait_for(
-            confluence_page_graph.query_user_confluence_graph(graph_user_id, query, limit=6),
-            timeout=0.8,
-        )
-    except (asyncio.TimeoutError, Exception):
-        contexts = []
-
-    if not contexts:
-        return "I could not find a relevant Confluence page for that yet. The workspace graph may still be refreshing."
-
-    context_text = json.dumps(
-        [
-            {
-                "page_title": item.get("title"),
-                "heading": item.get("heading"),
-                "content": item.get("relevant_content"),
-            }
-            for item in contexts
-        ],
-        ensure_ascii=False,
-    )
-    response = await asyncio.to_thread(
-        lambda: get_openai_client().chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You answer questions about Confluence pages using only the retrieved page/section context. "
-                        "Keep the answer concise and useful for spoken delivery. If context is insufficient, say so."
-                    ),
-                },
-                {"role": "user", "content": f"Question: {query}\n\nRetrieved Confluence context:\n{context_text}"},
-            ],
-            max_tokens=220,
-            temperature=0.2,
-        )
-    )
-    return (response.choices[0].message.content or "").strip() or "I could not answer that from the Confluence graph."
+def _get_qa_agent():
+    """Lazy singleton getter for ConfluenceQAAgent. Deferred import avoids circular imports."""
+    global _qa_agent
+    if _qa_agent is None:
+        from confluence_logic.agents.confluence_qa_agent import ConfluenceQAAgent  # noqa: PLC0415
+        _qa_agent = ConfluenceQAAgent()
+    return _qa_agent
 
 
 async def _handle_confluence_question(query: str, bot_id: str) -> None:
     generation = meeting_state["output_generation"]
     try:
-        answer_task = asyncio.create_task(_answer_confluence_question(query))
+        graph_user_id = _current_confluence_graph_user_id()
+        answer_task = asyncio.create_task(_get_qa_agent().run(query, graph_user_id))
         gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
         answer = await answer_task
         await gap_filler_task
