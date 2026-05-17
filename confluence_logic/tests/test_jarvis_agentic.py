@@ -1,4 +1,5 @@
 import asyncio
+import json
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -1684,3 +1685,44 @@ def test_create_recall_relay_room_uses_distinct_identity():
     assert captured["grants"]["can_subscribe"] is False
     assert ja._meeting_sessions["sess-xyz"]["recall_relay_room"] is room
     assert ja._meeting_sessions["sess-xyz"]["recall_relay_source"] is source
+
+
+def test_recall_audio_mixed_stream_resamples_and_pushes_frames():
+    """D-01: audio_mixed_raw.data -> resample -> capture_frame on the relay source."""
+    import base64 as _b64
+    from fastapi.testclient import TestClient
+
+    captured_frames = []
+
+    async def _fake_capture(frame):
+        captured_frames.append(frame)
+
+    fake_source = Mock()
+    fake_source.capture_frame = AsyncMock(side_effect=_fake_capture)
+    fake_room = Mock()
+
+    async def _fake_create_relay(session_id):
+        ja._meeting_sessions.setdefault(session_id, ja._fresh_meeting_state(session_id))
+        ja._meeting_sessions[session_id]["recall_relay_room"] = fake_room
+        ja._meeting_sessions[session_id]["recall_relay_source"] = fake_source
+        return fake_room, fake_source
+
+    # 100 ms of silence at 16 kHz mono = 1600 samples x 2 bytes = 3200 bytes
+    silence_b64 = _b64.b64encode(bytes(3200)).decode("ascii")
+
+    with patch.object(ja, "_create_recall_relay_room", side_effect=_fake_create_relay):
+        client = TestClient(ja.app)
+        with client.websocket_connect("/recall-audio-mixed/test-sess") as ws:
+            ws.send_text(json.dumps({
+                "event": "audio_mixed_raw.data",
+                "data": {"buffer": silence_b64, "timestamp": {"absolute": 0.0, "relative": 0.0}},
+            }))
+            # Send a non-audio event to ensure it's skipped, then close
+            ws.send_text(json.dumps({"event": "transcript.data", "data": {}}))
+            ws.close()
+
+    assert captured_frames, "expected at least one 20 ms output frame from 100 ms of input"
+    first = captured_frames[0]
+    assert first.sample_rate == 48000
+    assert first.num_channels == 1
+    assert first.samples_per_channel == 960
