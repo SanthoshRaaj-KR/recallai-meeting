@@ -3644,15 +3644,43 @@ async def _run_pipeline(
                         getattr(intent_obj, "rationale", "") or instruction
                         or f"Document this change: {subject}"
                     )
+
+                    # ── D-01: build after_content from intent.verbatim_content when present ──
+                    # When the user named specific items in the meeting, preserve them verbatim
+                    # as a bullet list. This is the root fix for the "ignored my points" bug.
+                    verbatim = (getattr(intent_obj, "verbatim_content", "") or "").strip()
+                    items: List[str] = []
+                    if verbatim:
+                        # Split on commas (primary), then semicolons (secondary), trim, drop empties
+                        raw_items = re.split(r"[,;]\s+", verbatim)
+                        items = [s.strip() for s in raw_items if s.strip()]
+                        if len(items) <= 1:
+                            after_content = verbatim
+                        else:
+                            intro = (
+                                instruction
+                                if instruction and len(instruction) < 120
+                                else f"{subject or 'Overview'}:"
+                            )
+                            bullets = "\n".join(f"- {it}" for it in items)
+                            after_content = f"{intro}\n\n{bullets}"
+                    else:
+                        after_content = instruction or subject or ""
+
                     proposals.append({
                         "change_type": "create",
                         "page_id": None,
                         "page_title": new_title,
                         "section_heading": "Overview",
                         "before_content": None,
-                        "after_content": instruction or subject or "",
+                        "after_content": after_content,
                         "rationale": rationale,
+                        "change_summary": f"Create new page '{new_title}'",
                     })
+                    logger.info(
+                        "Create-fallback for intent '%s': verbatim_content=%d items → after_content len=%d",
+                        subject or instruction[:60], len(items) if verbatim else 0, len(after_content),
+                    )
                     logger.info(
                         "Intent '%s' produced a CREATE proposal (no matching page existed; action=%s)",
                         subject or instruction[:60], action or "auto",

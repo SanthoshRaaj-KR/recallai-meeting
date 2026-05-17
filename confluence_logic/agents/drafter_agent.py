@@ -371,6 +371,9 @@ INTENT_DRAFTER_PROMPT = (
     "CORRECT: verbatim_content='A is slow, B crashes' → after_content:\n"
     "  - A is slow\n"
     "  - B crashes\n"
+    "SELF-CHECK: After drafting after_content, count items: if verbatim_content has N comma-separated "
+    "items and your after_content has fewer than N items OR more than N+1 items, your draft is wrong — "
+    "regenerate after_content using only verbatim_content's items.\n"
     "If `intent.verbatim_content` is empty, fall through to RULE 1 below.\n\n"
 
     "RULE 1 — TRANSCRIPT GROUNDING (most critical):\n"
@@ -453,6 +456,41 @@ INTENT_DRAFTER_PROMPT = (
 )
 
 
+def _enforce_verbatim_content(draft: Optional[Dict[str, Any]], intent: Any) -> Optional[Dict[str, Any]]:
+    """Post-LLM guard: for create/add intents with non-empty verbatim_content, ensure
+    after_content contains every verbatim item. If counts mismatch, synthesize after_content
+    directly from verbatim_content. Returns the (possibly modified) draft."""
+    if not draft:
+        return draft
+    action = (getattr(intent, "action", "") or "").strip().lower()
+    if action not in {"create", "add"}:
+        return draft
+    verbatim = (getattr(intent, "verbatim_content", "") or "").strip()
+    if not verbatim:
+        return draft
+    # Split on commas (primary) or semicolons (secondary), drop empties
+    import re as _re
+    items = [s.strip() for s in _re.split(r"[,;]\s+", verbatim) if s.strip()]
+    if len(items) <= 1:
+        return draft
+    after = (draft.get("after_content") or "").lower()
+    # Count items present in after_content via case-insensitive substring match
+    missing = [it for it in items if it.lower() not in after]
+    if not missing and abs(after.count("\n") - len(items)) <= 2:
+        # All items present and bullet count is sane
+        return draft
+    # Mismatch — synthesize after_content from verbatim_content
+    subject = (getattr(intent, "subject", "") or "").strip()
+    intro = f"{subject.capitalize()}:" if subject else "Overview:"
+    bullets = "\n".join(f"- {it}" for it in items)
+    draft["after_content"] = f"{intro}\n\n{bullets}"
+    logger.warning(
+        "Verbatim guard rewrote after_content for intent '%s' (missing items: %s)",
+        subject or "?", missing[:3],
+    )
+    return draft
+
+
 async def _run_intent_drafter(
     intent: Any,  # ChangeIntent
     page: Dict[str, Any],
@@ -521,7 +559,9 @@ async def _run_intent_drafter(
         )
         return None
 
-    return _normalize_intent_draft(data, page_id, page_title, intent=intent)
+    draft = _normalize_intent_draft(data, page_id, page_title, intent=intent)
+    draft = _enforce_verbatim_content(draft, intent)
+    return draft
 
 
 def _normalize_intent_draft(
