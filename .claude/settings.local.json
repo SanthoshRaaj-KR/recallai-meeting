@@ -3,7 +3,10 @@
     "allow": [
       "Skill(gsd-plan-phase)",
       "Skill(gsd-code-review)",
-      "Skill(gsd-execute-phase)"
+      "Skill(gsd-execute-phase)",
+      "Bash(conda run *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }
