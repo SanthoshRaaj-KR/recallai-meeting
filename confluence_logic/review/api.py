@@ -770,6 +770,7 @@ async def _start_bot_for_session(
         create_meeting_session,
         get_meeting_session_state,
         _create_livekit_room,
+        _create_recall_relay_room,        # Phase 4 / D-01
         _teardown_livekit_room,
     )  # noqa: PLC0415
 
@@ -821,6 +822,32 @@ async def _start_bot_for_session(
             "meeting_url": meeting_url,
             "change_count": 0,
             "error": "LiveKit room creation failed — check LIVEKIT_URL/API_KEY/API_SECRET",
+        }
+
+    # Phase 4 / D-01: create the dedicated recall-relay-{session_id} participant
+    # BEFORE Recall starts streaming audio (avoids race where audio packets arrive
+    # before the relay AudioSource exists).
+    try:
+        await _create_recall_relay_room(resolved_session_id)
+    except Exception as exc:
+        logger.error(
+            "Recall relay room creation failed for session %s (bot %s): %s",
+            resolved_session_id, bot_id, exc,
+        )
+        try:
+            await _teardown_livekit_room(resolved_session_id)
+        except Exception:
+            pass
+        state["session_status"] = "error"
+        state["is_active"] = False
+        state["end_reason"] = "Recall relay room creation failed: %s" % exc
+        return {
+            "status": "error",
+            "session_id": resolved_session_id,
+            "bot_id": bot_id,
+            "meeting_url": meeting_url,
+            "change_count": 0,
+            "error": "Recall relay room creation failed — check LIVEKIT_URL/API_KEY/API_SECRET",
         }
 
     # REQ-14/REQ-18: start in-process AgentSession after room is ready (Plan 05).
