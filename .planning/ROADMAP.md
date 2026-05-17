@@ -11,7 +11,7 @@ This milestone builds the full end-to-end pipeline from "meeting ends" to "accep
 - [x] **Phase 3: Async Progress Streaming + Review UI** - SSE stream endpoint, sync-sage-bot pipeline progress component, full proposal card review experience (completed 2026-05-12)
 - [x] **Phase 4: Pipeline Proposal Quality Fixes** - Final-state dedup in FactExtractionAgent, verbatim grounding in DrafterAgent, no contradictions/duplicates/hallucinations (completed 2026-05-15)
 - [x] **Phase 5: Safe Apply Hardening + Re-indexing** - Section anchor pre-flight, stale-version chain prevention, Neo4j + Pinecone re-index after commit (completed 2026-05-16)
-- [ ] **Phase 7: Confluence Document Q&A Agent** - ConfluenceQAAgent (OpenAI Agents SDK) with Pinecone-first retrieval, live REST fallback, and gpt-5-mini/gpt-4o-mini model split for fast accurate spoken answers
+- [x] **Phase 7: Confluence Document Q&A Agent** - ConfluenceQAAgent (OpenAI Agents SDK) with Pinecone-first retrieval, live REST fallback, and gpt-5-mini/gpt-4o-mini model split for fast accurate spoken answers (completed 2026-05-17)
 
 ## Phase Details
 
@@ -104,7 +104,7 @@ Plans:
 | 3. Async Progress Streaming + Review UI | 3/3 | Complete | 2026-05-12 |
 | 4. Pipeline Proposal Quality Fixes | 2/2 | Complete | 2026-05-15 |
 | 5. Safe Apply Hardening + Re-indexing | 2/2 | Complete | 2026-05-16 |
-| 7. Confluence Document Q&A Agent | 1/TBD | In progress | - |
+| 7. Confluence Document Q&A Agent | 2/2 | Complete | 2026-05-17 |
 
 ### Phase 7: Confluence Document Q&A Agent
 **Goal**: A voice query like "hey Jarvis, when is SOC2 coming?" is correctly classified as a Confluence read question, routed to a new `ConfluenceQAAgent` (OpenAI Agents SDK), answered via Pinecone-first semantic retrieval with live Confluence REST fallback, and spoken back — without touching the edit/proposal pipeline
@@ -115,7 +115,7 @@ Plans:
   2. When the Pinecone index has no relevant chunks, the agent falls back to a live Confluence REST search and still returns an answer rather than "I don't know"
   3. The agent uses `gpt-5-mini` for tool orchestration and `gpt-4o-mini` for final answer synthesis; tool-use step never uses `gpt-4o-mini`
   4. Edit/mutation queries ("update the SOC2 page", "add a section") are NOT routed to the Q&A agent — `_is_confluence_read_query()` gate holds
-**Plans**: TBD plans
+**Plans**: 2 plans
 
 Plans:
 - [x] 07-01-PLAN.md — Failing test suite for ConfluenceQAAgent (QA-01 through QA-04, Wave 0 RED)
