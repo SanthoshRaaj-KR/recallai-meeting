@@ -96,6 +96,51 @@ _SENTINEL_IDX = sys.maxsize  # Largest int — guarantees the sentinel is sorted
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+async def _pinecone_startup_index() -> None:
+    """Background task: index all Confluence pages into Pinecone on server startup.
+
+    Uses version checks — unchanged pages are skipped in milliseconds.  Runs
+    once per process start so Pinecone is always populated before the first
+    voice query arrives.  Failures are logged but never surface to callers.
+    """
+    try:
+        from confluence_logic.ingestion.doc_pipeline import IngestionPipeline  # noqa: PLC0415
+        from confluence_logic.connectors.confluence import ConfluenceConnector  # noqa: PLC0415
+        from confluence_logic.confluence_page_graph import MAX_INDEX_PAGES  # noqa: PLC0415
+        connector = ConfluenceConnector()
+        pages = await asyncio.to_thread(connector.list_pages, MAX_INDEX_PAGES)
+        pipeline = IngestionPipeline()
+        logger.info("Pinecone startup index: found %d pages to check", len(pages))
+        for page in pages:
+            page_id = page.get("page_id")
+            if not page_id:
+                continue
+            try:
+                await asyncio.to_thread(pipeline.process_page, page_id)
+            except Exception as exc:
+                logger.debug("Pinecone startup index skipped page %s: %s", page_id, exc)
+        logger.info("Pinecone startup index complete")
+    except Exception as exc:
+        logger.warning("Pinecone startup index failed (non-fatal): %s", exc)
+
+
+async def _pinecone_periodic_sync(interval_seconds: int = 1800) -> None:
+    """Background loop: re-index recently changed Confluence pages every 30 minutes.
+
+    Re-uses _sync_recent_pinecone_pages from the review API which checks
+    the 30 most recently modified pages.  Catches any page edited directly
+    in Confluence between pipeline runs.
+    """
+    from confluence_logic.review.api import _sync_recent_pinecone_pages  # noqa: PLC0415
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await _sync_recent_pinecone_pages(limit=30)
+            logger.debug("Pinecone periodic sync complete")
+        except Exception as exc:
+            logger.warning("Pinecone periodic sync failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Bot is started on-demand via POST /bot/start from the review UI.
@@ -105,15 +150,20 @@ async def lifespan(app: FastAPI):
     graph_refresh_task = asyncio.create_task(
         confluence_page_graph.refresh_known_user_graphs_forever(stop_graph_refresh)
     )
+    # Populate Pinecone in the background — voice queries resolve in <1s once indexed.
+    pinecone_startup_task = asyncio.create_task(_pinecone_startup_index())
+    # Re-check recently modified pages every 30 minutes to catch direct Confluence edits.
+    pinecone_sync_task = asyncio.create_task(_pinecone_periodic_sync())
     try:
         yield
     finally:
         stop_graph_refresh.set()
-        graph_refresh_task.cancel()
-        try:
-            await graph_refresh_task
-        except asyncio.CancelledError:
-            pass
+        for task in (graph_refresh_task, pinecone_startup_task, pinecone_sync_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(lifespan=lifespan)

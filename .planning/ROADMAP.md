@@ -12,6 +12,7 @@ This milestone builds the full end-to-end pipeline from "meeting ends" to "accep
 - [x] **Phase 4: Pipeline Proposal Quality Fixes** - Final-state dedup in FactExtractionAgent, verbatim grounding in DrafterAgent, no contradictions/duplicates/hallucinations (completed 2026-05-15)
 - [x] **Phase 5: Safe Apply Hardening + Re-indexing** - Section anchor pre-flight, stale-version chain prevention, Neo4j + Pinecone re-index after commit (completed 2026-05-16)
 - [x] **Phase 7: Confluence Document Q&A Agent** - ConfluenceQAAgent (OpenAI Agents SDK) with Pinecone-first retrieval, live REST fallback, and gpt-5-mini/gpt-4o-mini model split for fast accurate spoken answers (completed 2026-05-17)
+- [ ] **Phase 8: Auto-Generated Confluence Proposals — Quality, Accept Reliability, UI Clarity, Tests** - Honor user-spoken verbatim_content in the post-meeting create-fallback; sharpen explicit-create detection; tighten page qualifier + verifier; make Accept resilient with real error messages and a regenerate-from-current-page recovery; redesign the proposal card to show page + one-line change_summary + default-visible diff; ship a 3-layer test plan (unit + e2e quality eval + manual UAT). In-meeting "Hey Jarvis" voice path and the editor agent are LOCKED out of scope.
 
 ## Phase Details
 
@@ -95,7 +96,7 @@ Plans:
 
 ## Progress
 
-**Execution Order:** 1 → 2 → 3 → 4 → 5 → 7
+**Execution Order:** 1 → 2 → 3 → 4 → 5 → 7 → 8
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -105,6 +106,7 @@ Plans:
 | 4. Pipeline Proposal Quality Fixes | 2/2 | Complete | 2026-05-15 |
 | 5. Safe Apply Hardening + Re-indexing | 2/2 | Complete | 2026-05-16 |
 | 7. Confluence Document Q&A Agent | 2/2 | Complete | 2026-05-17 |
+| 8. Auto-Generated Proposals — Quality, Accept, UI, Tests | 0/5 | Ready to execute | - |
 
 ### Phase 7: Confluence Document Q&A Agent
 **Goal**: A voice query like "hey Jarvis, when is SOC2 coming?" is correctly classified as a Confluence read question, routed to a new `ConfluenceQAAgent` (OpenAI Agents SDK), answered via Pinecone-first semantic retrieval with live Confluence REST fallback, and spoken back — without touching the edit/proposal pipeline
@@ -120,3 +122,26 @@ Plans:
 Plans:
 - [x] 07-01-PLAN.md — Failing test suite for ConfluenceQAAgent (QA-01 through QA-04, Wave 0 RED)
 - [x] 07-02-PLAN.md — ConfluenceQAAgent implementation: Pinecone-first retrieval, REST fallback, model split, jarvis_agentic.py wiring (Wave 1)
+
+### Phase 8: Auto-Generated Confluence Proposals — Quality, Accept Reliability, UI Clarity, Tests
+**Goal**: After a meeting ends, the auto-generated proposal pipeline produces clear, faithful, accept-able change cards: user-spoken bullet lists survive verbatim through `create` and `add` actions, useless / off-topic proposals are filtered out before reaching the UI, Accept either succeeds or shows the real backend reason with a one-click "Regenerate from current page" recovery path, and every card answers at-a-glance "which page, what kind of change, what's the one-line summary, before vs after" without expanding anything. The in-meeting "Hey Jarvis" voice trigger flow and the editor agent are out of scope and remain bit-for-bit unchanged.
+**Depends on**: Phase 5 (Safe Apply Hardening), Phase 4 (Pipeline Quality)
+**Requirements**: AUTOPROP-01, AUTOPROP-02, AUTOPROP-03, AUTOPROP-04, AUTOPROP-05
+**Scope Lock** (MUST NOT be modified by any plan in this phase):
+  - `confluence_logic/jarvis_agentic.py` — wake-word loop, `_queue_confluence_proposal`, voice routing
+  - `confluence_logic/agents/editor_agent.py` — works well, do not touch
+  - `confluence_logic/agents/proposed_changes_agent.py` — used as fallback by both in-meeting (out of scope) and post-meeting; leave the class as-is, fix the create-fallback in `review/api.py` instead
+**Success Criteria** (what must be TRUE):
+  1. A post-meeting transcript that says "create a pros and cons page for bots: A is fast, B is cheap, C is expensive, D is slow" produces exactly one `create` proposal whose `after_content` contains the literal strings "A is fast", "B is cheap", "C is expensive", "D is slow" — no paraphrase, no extra invented bullets, no stub
+  2. A post-meeting transcript that says "create a page about X" with X clearly named produces exactly one `create` proposal even when retrieval surfaces a tangentially related existing page — the explicit instruction overrides retrieval
+  3. Page qualifier rejects every (intent, page) pair where `intent.old_value` is non-empty AND missing verbatim from the page AND `intent.subject` shares zero non-stopword tokens with `page.title` AND no heading on the page contains a subject token — without calling the LLM
+  4. When Accept fails because the live page changed since the proposal was generated, the UI toast displays the real backend `message` field (not a generic "Failed to apply") AND a "Regenerate from current page" button appears on the card; clicking it re-drafts against the current page and lets the user re-accept
+  5. Every ProposalCard renders, before any user click: page title, change-type badge, a one-line `change_summary` (≤120 chars), and a default-visible compact before/after preview
+**Plans**: 5 plans
+
+Plans:
+- [ ] 08-01-PLAN.md — Verbatim_content end-to-end: create-fallback in `_run_pipeline` honors `intent.verbatim_content`; fact-extraction prompt sharpens explicit-create detection; drafter prompt + post-LLM code guard enforce verbatim adherence for create/add (AUTOPROP-01, AUTOPROP-02)
+- [ ] 08-02-PLAN.md — Quality filter: page qualifier hard pre-filter (no LLM call for clearly-irrelevant pairs); verifier drops <20-char after_content for non-deletes, synthesizes missing change_summary, downgrades hallucinated before_content to append (AUTOPROP-03)
+- [ ] 08-03-PLAN.md — Accept reliability: `sync-sage-bot/src/lib/api.ts` executeProposal surfaces `json.message`; ProposalCard toast shows real error; new `POST /sessions/{session_id}/review/regenerate/{proposal_id}` endpoint re-drafts against current page; pre-flight heading downgrade to `create_section` at proposal time (AUTOPROP-04)
+- [ ] 08-04-PLAN.md — Card UI clarity: per-card headline (page_title + change_summary always visible); default-visible compact before/after preview (3 lines each) with "Show full" expansion; per-card change-type pill; optional inline diff highlighting via tiny LCS util (AUTOPROP-05)
+- [ ] 08-05-PLAN.md — Test suite: 10 transcript fixtures in `tests/fixtures/transcripts/`; pytest unit tests (`test_proposal_quality.py`, `test_fact_extraction_explicit_create.py`, `test_apply_failure_paths.py`); vitest UI tests (`ProposalCard.test.tsx`); e2e quality scorecard (`tests/e2e_proposal_quality_eval.py`); documented `tests/MANUAL_TEST_PLAN.md`

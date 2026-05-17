@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from bs4 import BeautifulSoup
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from openai import OpenAI
 from pydantic import BaseModel
@@ -3908,6 +3908,52 @@ async def start_pipeline(
         _run_pipeline(body.session_id, job_id, user["id"], graph_user_id)
     )
     return {"job_id": job_id, "status": "accepted"}
+
+
+@router.post("/review/confluence-webhook")
+async def confluence_webhook(request: Request) -> Dict[str, Any]:
+    """Confluence webhook receiver — re-indexes a page in Pinecone + Neo4j whenever Confluence fires an event.
+
+    Register this endpoint in Confluence admin:
+      Settings → Webhooks → URL: https://<your-ngrok>.ngrok.io/review/confluence-webhook
+      Events: page_created, page_updated, page_removed
+
+    The event payload format varies by Confluence Cloud vs Server but both include
+    `page.id` at the top level or under `event`.  We extract the page ID and
+    re-index it immediately so voice queries return up-to-date content.
+    No auth header required (Confluence sends a shared secret via query param if configured).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    # Confluence Cloud sends: {"event": "page_updated", "page": {"id": "12345", ...}}
+    # Confluence Server sends: {"pageId": "12345"} or nested under event type key.
+    page_id = (
+        (body.get("page") or {}).get("id")
+        or body.get("pageId")
+        or (body.get("data") or {}).get("id")
+    )
+
+    if not page_id:
+        logger.debug("Confluence webhook: no page ID found in payload %s", str(body)[:200])
+        return {"status": "ignored", "reason": "no page_id in payload"}
+
+    page_id = str(page_id)
+    event_type = body.get("event", "unknown")
+    logger.info("Confluence webhook: %s for page %s — triggering re-index", event_type, page_id)
+
+    async def _webhook_reindex() -> None:
+        try:
+            from confluence_logic.ingestion.doc_pipeline import IngestionPipeline  # noqa: PLC0415
+            await asyncio.to_thread(IngestionPipeline().process_page, page_id)
+            logger.info("Confluence webhook re-index complete for page %s", page_id)
+        except Exception as exc:
+            logger.warning("Confluence webhook re-index failed for page %s: %s", page_id, exc)
+
+    asyncio.create_task(_webhook_reindex())
+    return {"status": "accepted", "page_id": page_id, "event": event_type}
 
 
 @router.get("/review/pipeline/{job_id}/stream")
