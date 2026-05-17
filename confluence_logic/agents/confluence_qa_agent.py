@@ -14,6 +14,7 @@ Design decisions:
   - D-10: Separate gpt-4o-mini synthesis call converts raw context to spoken answer
 """
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -113,15 +114,21 @@ def search_confluence_pages(query: str) -> str:
         if matches:
             return _format_pinecone_results(matches)
 
-        # Secondary: Neo4j confluence page graph (D-02)
+        # Secondary: Neo4j confluence page graph (D-02) — 1.2s budget to avoid blocking the agent.
+        # Without a timeout, a cold Neo4j connection adds 2-3s (seen in production traces).
         user_id = confluence_page_graph.get_current_graph_user_id()
         if user_id:
             try:
-                graph_results = _run_async_blocking(
-                    confluence_page_graph.query_user_confluence_graph(user_id, query, limit=8)
-                )
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                    _future = _ex.submit(
+                        _run_async_blocking,
+                        confluence_page_graph.query_user_confluence_graph(user_id, query, limit=8),
+                    )
+                    graph_results = _future.result(timeout=1.2)
                 if graph_results:
                     return _format_graph_results(graph_results)
+            except concurrent.futures.TimeoutError:
+                logger.warning("Neo4j graph search timed out (>1.2s) — skipping to REST fallback")
             except Exception as graph_exc:
                 logger.warning("Neo4j confluence graph search failed: %s", graph_exc)
 
@@ -188,10 +195,10 @@ class ConfluenceQAAgent:
             model=model,
             instructions=(
                 "You answer questions about Confluence workspace content. "
-                "Use search_confluence_pages ONCE to find the most relevant page sections. "
-                "Only call get_full_page_content if the search excerpt is too short to answer. "
-                "Return the relevant section text verbatim as your final output — concise, 3-6 sentences max. "
-                "Do NOT make more than 2 tool calls total — prioritise speed."
+                "Call search_confluence_pages exactly ONCE. "
+                "Return the relevant section text from the search result as your final output. "
+                "Do NOT call get_full_page_content — the search excerpt is sufficient. "
+                "Keep your final answer under 100 words."
             ),
             tools=[search_confluence_pages, get_full_page_content, list_confluence_pages],
         )
