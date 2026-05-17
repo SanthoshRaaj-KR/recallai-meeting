@@ -1550,3 +1550,83 @@ def test_start_bot_for_session_tears_down_on_livekit_failure():
     assert result["status"] == "error"
     assert "LiveKit room creation failed" in (result.get("error") or "")
     assert len(teardown_calls) == 1
+
+
+# ============================================================================
+# PHASE 4 — Recall Audio-to-LiveKit + Native STT — RED stubs (Wave 0)
+# These tests intentionally fail until Waves 1-3 land. Do NOT skip or xfail.
+# ============================================================================
+
+
+def test_recall_audio_relay_endpoint_accepts_connection():
+    paths = {getattr(r, "path", None) for r in ja.app.routes}
+    assert "/recall-audio-mixed/{session_id}" in paths, (
+        f"Expected /recall-audio-mixed/{{session_id}} WebSocket route to be registered; got {paths}"
+    )
+
+
+def test_audio_resampler_16k_to_48k():
+    import livekit.rtc as rtc
+    try:
+        resampler = rtc.AudioResampler(input_rate=16000, output_rate=48000, num_channels=1)
+    except Exception as exc:  # pragma: no cover — env quirk
+        import pytest
+        pytest.skip(f"AudioResampler unavailable in this env: {exc}")
+    # 20 ms of silence at 16 kHz mono S16LE = 320 samples * 2 bytes = 640 bytes
+    silence = bytearray(640)
+    # AudioResampler.push expects an AudioFrame OR bytes — try both signatures.
+    try:
+        frames = resampler.push(silence)
+    except TypeError:
+        frame_in = rtc.AudioFrame(
+            data=bytes(silence), sample_rate=16000,
+            num_channels=1, samples_per_channel=320,
+        )
+        frames = resampler.push(frame_in)
+    assert frames, "Expected resampler to emit at least one output frame for 20 ms input"
+    out = frames[0]
+    assert out.sample_rate == 48000
+    assert out.num_channels == 1
+
+
+def test_debounced_dispatch_removed():
+    assert not hasattr(ja, "_debounced_dispatch"), "_debounced_dispatch must be removed (D-05)"
+    assert not hasattr(ja, "_flush_agent_queue"), "_flush_agent_queue must be removed (D-05)"
+    assert not hasattr(ja, "_query_consumer"), "_query_consumer must be removed (D-05)"
+
+
+def test_in_process_agent_session_removed():
+    assert not hasattr(ja, "_InProcessJarvisAgent"), "_InProcessJarvisAgent must be removed (D-07)"
+    assert not hasattr(ja, "_start_in_process_agent_session"), "_start_in_process_agent_session must be removed (D-07)"
+    assert not hasattr(ja, "_on_inprocess_session_reply"), "_on_inprocess_session_reply must be removed (D-07)"
+
+
+def test_transcript_log_still_populated_after_voice_removal():
+    # REGRESSION GUARD — must keep passing through Wave 3 (D-03)
+    _reset_meeting_state()
+    entry = ja._append_transcript_log_entry(participant="Alice", text="hello", timestamp=1.0)
+    assert entry is not None
+    assert len(ja.meeting_state["transcript_log"]) == 1
+    assert ja.meeting_state["transcript_log"][0]["participant"] == "Alice"
+    assert ja.meeting_state["transcript_log"][0]["text"] == "hello"
+
+
+def test_build_create_bot_payload_includes_audio_mixed_raw():
+    with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
+         patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \
+         patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
+         patch.object(ja, "LANGUAGE_CODE", "en"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"):
+        payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij", session_id="sess-1")
+
+    rc = payload["recording_config"]
+    assert rc.get("audio_mixed_raw") == {}, "audio_mixed_raw must be enabled (D-01)"
+    endpoints = rc["realtime_endpoints"]
+    audio_eps = [e for e in endpoints if e.get("events") == ["audio_mixed_raw.data"]]
+    transcript_eps = [e for e in endpoints if e.get("events") == ["transcript.data"]]
+    assert len(audio_eps) == 1, f"Expected exactly one audio realtime endpoint; got {endpoints}"
+    assert audio_eps[0]["url"].endswith("/recall-audio-mixed/sess-1"), audio_eps[0]["url"]
+    assert len(transcript_eps) == 1, "Transcript endpoint must be preserved (D-03/D-04)"
