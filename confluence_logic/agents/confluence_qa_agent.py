@@ -188,11 +188,10 @@ class ConfluenceQAAgent:
             model=model,
             instructions=(
                 "You answer questions about Confluence workspace content. "
-                "Use search_confluence_pages to find relevant page sections. "
-                "Use get_full_page_content to fetch complete section text when a search result needs more detail. "
-                "Use list_confluence_pages to enumerate available pages when the user asks what pages exist. "
-                "Return the retrieved context text as your final output — do NOT synthesize a conversational spoken answer. "
-                "Be thorough: retrieve actual section content, not just page titles."
+                "Use search_confluence_pages ONCE to find the most relevant page sections. "
+                "Only call get_full_page_content if the search excerpt is too short to answer. "
+                "Return the relevant section text verbatim as your final output — concise, 3-6 sentences max. "
+                "Do NOT make more than 2 tool calls total — prioritise speed."
             ),
             tools=[search_confluence_pages, get_full_page_content, list_confluence_pages],
         )
@@ -213,9 +212,10 @@ class ConfluenceQAAgent:
         except Exception:
             logger.debug("Graph pre-warm skipped for %s — will query on demand", graph_user_id)
 
-        # Step 2: Run Agent (gpt-5-mini) — tool orchestration and retrieval (D-09)
+        # Step 2: Run Agent — tool orchestration and retrieval (D-09)
+        # max_turns=2: at most 1 tool call + 1 final answer, preventing slow multi-round iterations.
         try:
-            result = await Runner.run(self.agent, query)
+            result = await Runner.run(self.agent, query, max_turns=2)
             if hasattr(result, 'final_output'):
                 raw_context = result.final_output.strip()
             else:
@@ -227,8 +227,8 @@ class ConfluenceQAAgent:
         if not raw_context:
             return "I could not find a relevant Confluence page for that."
 
-        # Step 3: Synthesis call (gpt-4o-mini) — converts raw context to spoken answer (D-10)
-        # raw_context from gpt-5-mini agent is treated as retrieved context, NOT the final answer
+        # Step 3: Synthesis (gpt-4o-mini) — converts raw context to a spoken answer (D-10).
+        # max_tokens=120 keeps inference fast for spoken delivery (2-3 sentences is sufficient).
         try:
             response = await asyncio.to_thread(
                 lambda: _get_openai_client().chat.completions.create(
@@ -237,17 +237,16 @@ class ConfluenceQAAgent:
                         {
                             "role": "system",
                             "content": (
-                                "You answer questions about Confluence pages using only the retrieved "
-                                "page/section context provided. Keep the answer concise and useful for spoken "
-                                "delivery (2-4 sentences max). If the context is insufficient, say so briefly."
+                                "Answer the question from the retrieved Confluence context in 2-3 sentences. "
+                                "Be direct and spoken-quality. If context is insufficient, say so briefly."
                             ),
                         },
                         {
                             "role": "user",
-                            "content": f"Question: {query}\n\nRetrieved Confluence context:\n{raw_context}",
+                            "content": f"Q: {query}\n\nContext:\n{raw_context[:2000]}",
                         },
                     ],
-                    max_tokens=300,
+                    max_tokens=120,
                     temperature=0.2,
                 )
             )
