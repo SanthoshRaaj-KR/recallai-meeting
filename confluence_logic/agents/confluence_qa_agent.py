@@ -132,11 +132,16 @@ def search_confluence_pages(query: str) -> str:
             except Exception as graph_exc:
                 logger.warning("Neo4j confluence graph search failed: %s", graph_exc)
 
-        # Fallback: live Confluence REST API (D-03 — never say I don't know when REST has results)
+        # Fallback: live Confluence REST API (D-03 — never say I don't know when REST has results).
+        # 3s ceiling prevents a slow Confluence cloud from blocking the full pipeline.
         try:
-            rest_results = get_connector().search_pages(query, limit=5)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                _rest_future = _ex.submit(lambda: get_connector().search_pages(query, limit=5))
+                rest_results = _rest_future.result(timeout=3.0)
             if rest_results:
                 return _format_rest_results(rest_results)
+        except concurrent.futures.TimeoutError:
+            logger.warning("REST Confluence search timed out (>3s) — returning no results")
         except Exception as rest_exc:
             logger.warning("REST fallback search failed: %s", rest_exc)
 
