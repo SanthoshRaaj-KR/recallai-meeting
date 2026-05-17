@@ -105,6 +105,15 @@ _LIVEKIT_SAMPLE_RATE = 48000          # D-10: 48 kHz PCM
 _LIVEKIT_NUM_CHANNELS = 1             # D-10: mono
 _LIVEKIT_SAMPLES_PER_CHANNEL = 960    # D-10: 20 ms frames (48000 * 0.020)
 _LIVEKIT_SUBSCRIBER_TTL_HOURS = 8     # D-16 pitfall 2: long-meeting tolerance
+
+# --- Recall audio relay (Phase 4 / D-01) ---------------------------------
+_RECALL_AUDIO_INPUT_RATE = 16000             # Recall streams 16 kHz mono S16LE
+_RECALL_AUDIO_NUM_CHANNELS = 1
+_RECALL_AUDIO_BYTES_PER_INPUT_SAMPLE = 2     # S16LE
+_RECALL_AUDIO_BYTES_PER_OUTPUT_FRAME = _LIVEKIT_SAMPLES_PER_CHANNEL * 2  # 960 * 2 = 1920 bytes
+_RECALL_RELAY_TRACK_NAME = "recall-meeting-audio"
+_RECALL_RELAY_IDENTITY_PREFIX = "recall-relay-"
+
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "0.6"))
 JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "false").strip().lower() == "true"
 JARVIS_MICRO_ACK_ENABLED = os.getenv("JARVIS_MICRO_ACK_ENABLED", "true").strip().lower() == "true"
@@ -269,6 +278,8 @@ def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
         "_accumulated_query": "",          # D-07: space-joined query text from invoker segments
         "livekit_room": None,         # rtc.Room — set by _create_livekit_room
         "livekit_source": None,       # rtc.AudioSource — set by _create_livekit_room
+        "recall_relay_room": None,    # rtc.Room — set by _create_recall_relay_room (Phase 4 / D-01)
+        "recall_relay_source": None,  # rtc.AudioSource — receives resampled Recall PCM (Phase 4 / D-01)
     }
 
 
@@ -929,6 +940,72 @@ async def _create_livekit_room(session_id: str, bot_id: str) -> tuple:
     return room, source
 
 
+async def _create_recall_relay_room(session_id: str) -> tuple:
+    """Connect a second LiveKit Room as the 'recall-relay-{session_id}' publisher (Phase 4 / D-01).
+
+    This participant is DISTINCT from 'jarvis-publisher-{session_id}'. The agent worker
+    (agent_worker.py) configures RoomOptions(participant_identity=f"recall-relay-{session_id}")
+    so its STT pipeline transcribes ONLY the meeting audio relayed here — not Jarvis's own
+    TTS output (Pitfall 1).
+
+    Idempotent: returns the existing (room, source) pair if already created.
+    """
+    if not LIVEKIT_URL or not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise RuntimeError(
+            "LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET must be set before creating a relay room."
+        )
+
+    state = _meeting_sessions.get(session_id)
+    if state is None:
+        state = _fresh_meeting_state(session_id)
+        _meeting_sessions[session_id] = state
+
+    existing_room = state.get("recall_relay_room")
+    existing_source = state.get("recall_relay_source")
+    if existing_room is not None and existing_source is not None:
+        return existing_room, existing_source
+
+    relay_identity = f"{_RECALL_RELAY_IDENTITY_PREFIX}{session_id}"
+    relay_token = (
+        livekit_api.AccessToken(api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+        .with_identity(relay_identity)
+        .with_name("RecallRelay")
+        .with_grants(livekit_api.VideoGrants(
+            room_join=True,
+            room=session_id,             # same room as jarvis-publisher
+            can_publish=True,
+            can_subscribe=False,
+        ))
+        .with_ttl(_datetime_module.timedelta(hours=_LIVEKIT_SUBSCRIBER_TTL_HOURS))
+        .to_jwt()
+    )
+
+    room = rtc.Room()
+    source = rtc.AudioSource(_LIVEKIT_SAMPLE_RATE, _LIVEKIT_NUM_CHANNELS)
+    track = rtc.LocalAudioTrack.create_audio_track(_RECALL_RELAY_TRACK_NAME, source)
+    options = rtc.TrackPublishOptions()
+    options.source = rtc.TrackSource.SOURCE_MICROPHONE
+
+    @room.on("disconnected")
+    def _on_relay_disconnected(reason):
+        logger.warning(
+            "Recall relay room disconnected — session=%s identity=%s reason=%s",
+            session_id, relay_identity, reason,
+        )
+
+    await room.connect(LIVEKIT_URL, relay_token)
+    await room.local_participant.publish_track(track, options)
+
+    state["recall_relay_room"] = room
+    state["recall_relay_source"] = source
+
+    logger.info(
+        "Recall relay room ready — session=%s identity=%s track=%s",
+        session_id, relay_identity, _RECALL_RELAY_TRACK_NAME,
+    )
+    return room, source
+
+
 async def _teardown_livekit_room(session_id: str) -> None:
     """Disconnect the LiveKit Room and clean up in-process AgentSession (D-07 + REQ-19).
 
@@ -969,6 +1046,15 @@ async def _teardown_livekit_room(session_id: str) -> None:
             await http_ctx.__aexit__(None, None, None)
         except Exception as exc:
             logger.warning("http_ctx close error for session %s: %s", session_id, exc)
+
+    # Step 2.6: Disconnect the Recall relay room (Phase 4 / D-01)
+    relay_room = state.pop("recall_relay_room", None)
+    state.pop("recall_relay_source", None)
+    if relay_room is not None:
+        try:
+            await relay_room.disconnect()
+        except Exception as exc:
+            logger.warning("Recall relay disconnect error for session %s: %s", session_id, exc)
 
     # Step 3: Disconnect the LiveKit room
     room = state.pop("livekit_room", None)

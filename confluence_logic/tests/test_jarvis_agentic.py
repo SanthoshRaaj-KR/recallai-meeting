@@ -1572,18 +1572,23 @@ def test_audio_resampler_16k_to_48k():
     except Exception as exc:  # pragma: no cover — env quirk
         import pytest
         pytest.skip(f"AudioResampler unavailable in this env: {exc}")
-    # 20 ms of silence at 16 kHz mono S16LE = 320 samples * 2 bytes = 640 bytes
-    silence = bytearray(640)
+    # 100 ms of silence at 16 kHz mono S16LE = 1600 samples * 2 bytes = 3200 bytes.
+    # (20 ms is insufficient — the resampler buffers internally and returns 0 frames
+    # for small inputs; 100 ms produces at least one 48 kHz output frame.)
+    silence = bytearray(3200)
     # AudioResampler.push expects an AudioFrame OR bytes — try both signatures.
     try:
         frames = resampler.push(silence)
     except TypeError:
         frame_in = rtc.AudioFrame(
             data=bytes(silence), sample_rate=16000,
-            num_channels=1, samples_per_channel=320,
+            num_channels=1, samples_per_channel=1600,
         )
         frames = resampler.push(frame_in)
-    assert frames, "Expected resampler to emit at least one output frame for 20 ms input"
+    # If push returns empty, flush to drain any buffered samples.
+    if not frames:
+        frames = resampler.flush()
+    assert frames, "Expected resampler to emit at least one output frame for 100 ms input"
     out = frames[0]
     assert out.sample_rate == 48000
     assert out.num_channels == 1
@@ -1630,3 +1635,52 @@ def test_build_create_bot_payload_includes_audio_mixed_raw():
     assert len(audio_eps) == 1, f"Expected exactly one audio realtime endpoint; got {endpoints}"
     assert audio_eps[0]["url"].endswith("/recall-audio-mixed/sess-1"), audio_eps[0]["url"]
     assert len(transcript_eps) == 1, "Transcript endpoint must be preserved (D-03/D-04)"
+
+
+def test_create_recall_relay_room_uses_distinct_identity():
+    """D-01 / Pitfall 1: relay participant identity must be recall-relay-{session_id}
+    to avoid feedback loop with jarvis-publisher-{session_id}."""
+    captured = {}
+
+    class _FakeGrants:
+        def __init__(self, **kwargs): captured["grants"] = kwargs
+
+    class _FakeToken:
+        def __init__(self, **kwargs): self._k = kwargs; captured["token_init"] = kwargs
+        def with_identity(self, identity): captured["identity"] = identity; return self
+        def with_name(self, n): captured["name"] = n; return self
+        def with_grants(self, g): captured["grants_obj"] = g; return self
+        def with_ttl(self, t): captured["ttl"] = t; return self
+        def to_jwt(self): return "FAKE_JWT"
+
+    class _FakeRoom:
+        def __init__(self): self.local_participant = AsyncMock()
+        def on(self, *a, **k):
+            def _decorator(fn): return fn
+            return _decorator
+        async def connect(self, url, token): captured["connect"] = (url, token)
+        async def disconnect(self): pass
+
+    async def run_test():
+        with patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+             patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+             patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+             patch.object(ja.livekit_api, "AccessToken", _FakeToken), \
+             patch.object(ja.livekit_api, "VideoGrants", _FakeGrants), \
+             patch.object(ja.rtc, "Room", _FakeRoom), \
+             patch.object(ja.rtc, "AudioSource", Mock(return_value=Mock())), \
+             patch.object(ja.rtc, "LocalAudioTrack", Mock(create_audio_track=Mock(return_value=Mock()))), \
+             patch.object(ja.rtc, "TrackPublishOptions", Mock()), \
+             patch.object(ja.rtc, "TrackSource", Mock(SOURCE_MICROPHONE="MIC")):
+            # Ensure clean state
+            ja._meeting_sessions.pop("sess-xyz", None)
+            room, source = await ja._create_recall_relay_room("sess-xyz")
+            return room, source
+
+    room, source = asyncio.run(run_test())
+    assert captured.get("identity") == "recall-relay-sess-xyz"
+    assert captured["grants"]["room"] == "sess-xyz"
+    assert captured["grants"]["can_publish"] is True
+    assert captured["grants"]["can_subscribe"] is False
+    assert ja._meeting_sessions["sess-xyz"]["recall_relay_room"] is room
+    assert ja._meeting_sessions["sess-xyz"]["recall_relay_source"] is source
