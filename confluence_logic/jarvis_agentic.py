@@ -49,7 +49,7 @@ from openai import OpenAI
 
 from .agents.editor_agent import EditorAgent
 from .classifier import classify_intent
-from .audio_cache import get_random_ack_audio, get_random_filler_audio, get_wake_ack_audio, get_busy_ack_audio
+from .audio_cache import get_random_ack_audio, get_random_filler_audio, get_wake_ack_audio, get_busy_ack_audio, get_greeting_audio
 from .general_responder import answer_general_question
 from .meeting_responder import (
     summarize_meeting, generate_opinion, extract_action_items, summarize_speaker,
@@ -1001,6 +1001,21 @@ class _InProcessJarvisAgent(Agent):
 
     async def on_enter(self) -> None:
         logger.info("InProcessJarvisAgent started in-process.")
+        # Play pre-cached greeting audio through the LiveKit room so meeting
+        # participants know Jarvis is ready. Falls back silently if the asset
+        # has not been generated yet (run generate_wav_assets.py --acks-only).
+        try:
+            session_id = (self.session.userdata or {}).get("session_id", "")
+            if session_id:
+                greeting = get_greeting_audio()
+                if greeting is not None:
+                    _, greeting_bytes = greeting
+                    await push_audio_to_livekit(greeting_bytes, session_id)
+                    logger.info("InProcessJarvisAgent: greeting audio played for session %s", session_id)
+                else:
+                    logger.debug("InProcessJarvisAgent: greeting.mp3 not cached — skipping greeting")
+        except Exception as exc:
+            logger.warning("InProcessJarvisAgent.on_enter: greeting playback failed: %s", exc)
 
 
 async def _query_consumer(
@@ -1130,6 +1145,15 @@ async def push_audio_to_livekit(
         logger.warning("push_audio_to_livekit: no livekit_source for session %s", session_id)
         return False
 
+    # D-10: rechunk into exact 960-sample frames (20 ms at 48 kHz) to eliminate
+    # variable-frame-size jitter from MP3 frame boundaries.
+    # AudioFrame.data is a memoryview(format='h', itemsize=2) — i.e. int16 PCM.
+    # bytes(int16_memoryview) reinterprets it as raw little-endian bytes (correct),
+    # but bytes(list_of_int16) would raise ValueError for values outside 0-255.
+    # Use a bytearray for the accumulation buffer and convert via cast('B') to stay
+    # in the raw-byte domain throughout.
+    _BYTES_PER_FRAME = _LIVEKIT_SAMPLES_PER_CHANNEL * 2  # int16 = 2 bytes per sample
+
     decoder = AudioStreamDecoder(
         format="mp3",
         sample_rate=_LIVEKIT_SAMPLE_RATE,
@@ -1138,19 +1162,18 @@ async def push_audio_to_livekit(
     try:
         decoder.push(audio_bytes)
         decoder.end_input()
-        # Rechunk decoded PCM into exact 960-sample frames to eliminate variable-frame-
-        # size jitter caused by MP3 frame boundaries (D-10: _LIVEKIT_SAMPLES_PER_CHANNEL).
-        sample_buf: list[int] = []
+        pcm_buf = bytearray()
         async for frame in decoder:
             if generation is not None and generation != meeting_state["output_generation"]:
                 await decoder.aclose()
                 return False
-            sample_buf.extend(frame.data)
-            while len(sample_buf) >= _LIVEKIT_SAMPLES_PER_CHANNEL:
-                chunk = sample_buf[:_LIVEKIT_SAMPLES_PER_CHANNEL]
-                sample_buf = sample_buf[_LIVEKIT_SAMPLES_PER_CHANNEL:]
+            # frame.data is memoryview(format='h'); cast to 'B' gives the raw bytes view.
+            pcm_buf.extend(frame.data.cast("B"))
+            while len(pcm_buf) >= _BYTES_PER_FRAME:
+                chunk = bytes(pcm_buf[:_BYTES_PER_FRAME])
+                del pcm_buf[:_BYTES_PER_FRAME]
                 out_frame = rtc.AudioFrame(
-                    data=bytes(chunk),
+                    data=chunk,
                     sample_rate=_LIVEKIT_SAMPLE_RATE,
                     num_channels=_LIVEKIT_NUM_CHANNELS,
                     samples_per_channel=_LIVEKIT_SAMPLES_PER_CHANNEL,
@@ -1162,12 +1185,13 @@ async def push_audio_to_livekit(
                     await decoder.aclose()
                     return False
         # Flush tail (< 960 samples) — acceptable for end-of-clip.
-        if sample_buf:
+        if pcm_buf:
+            tail_samples = len(pcm_buf) // 2  # int16 = 2 bytes
             out_frame = rtc.AudioFrame(
-                data=bytes(sample_buf),
+                data=bytes(pcm_buf),
                 sample_rate=_LIVEKIT_SAMPLE_RATE,
                 num_channels=_LIVEKIT_NUM_CHANNELS,
-                samples_per_channel=len(sample_buf),
+                samples_per_channel=tail_samples,
             )
             try:
                 await source.capture_frame(out_frame)
@@ -2737,6 +2761,16 @@ async def serve_bot_page():
         logger.error("bot.html not found at %s", _BOT_HTML_PATH)
         return FileResponse(_BOT_HTML_PATH, status_code=404)
     return FileResponse(_BOT_HTML_PATH, media_type="text/html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def serve_favicon():
+    """Serve favicon.ico so Recall's headless Chrome (loading /bot-page) gets a 200 instead of 404."""
+    _favicon_path = _STATIC_DIR / "favicon.ico"
+    if not _favicon_path.exists():
+        from fastapi.responses import Response
+        return Response(status_code=204)  # No content — silences the 404 without a file
+    return FileResponse(_favicon_path, media_type="image/x-icon")
 
 
 async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str):

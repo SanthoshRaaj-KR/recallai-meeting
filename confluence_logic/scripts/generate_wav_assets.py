@@ -27,6 +27,8 @@ ACK_PHRASES = [
     # get_busy_ack_audio — must keep these exact keys).
     ("yes", "Yes?"),
     ("busy", "I'm already on it. Give me a moment."),
+    # Initial greeting (played by _InProcessJarvisAgent.on_enter on first join).
+    ("greeting", "Hello everyone. Jarvis here. I am ready to assist."),
     # General micro-acks
     ("on_it", "On it."),
     ("sure_thing", "Sure thing."),

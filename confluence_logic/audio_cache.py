@@ -117,6 +117,23 @@ def get_busy_ack_audio() -> Optional[Tuple[str, bytes]]:
     return ("busy", data)
 
 
+def get_greeting_audio() -> Optional[Tuple[str, bytes]]:
+    """
+    Return ("greeting", audio_bytes) if the greeting clip is cached, else None.
+    Used by _InProcessJarvisAgent.on_enter to play a welcome message when the bot
+    first joins the meeting room.
+    Lazily loads the cache on first call.
+    """
+    global _cache_loaded
+    if not _cache_loaded:
+        load_audio_cache()
+
+    data = _cache.get("greeting")
+    if data is None:
+        return None
+    return ("greeting", data)
+
+
 def get_cache_size() -> int:
     """Return the number of cached audio files."""
     if not _cache_loaded:
