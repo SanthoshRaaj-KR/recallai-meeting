@@ -119,4 +119,4 @@ Plans:
 
 Plans:
 - [x] 07-01-PLAN.md — Failing test suite for ConfluenceQAAgent (QA-01 through QA-04, Wave 0 RED)
-- [ ] 07-02-PLAN.md — ConfluenceQAAgent implementation: Pinecone-first retrieval, REST fallback, model split, jarvis_agentic.py wiring (Wave 1)
+- [x] 07-02-PLAN.md — ConfluenceQAAgent implementation: Pinecone-first retrieval, REST fallback, model split, jarvis_agentic.py wiring (Wave 1)
