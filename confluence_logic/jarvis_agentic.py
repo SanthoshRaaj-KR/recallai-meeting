@@ -33,10 +33,6 @@ import json
 import livekit.rtc as rtc
 from livekit import api as livekit_api
 from livekit.agents.utils.codecs import AudioStreamDecoder
-from livekit.agents.utils import http_context as _lk_http_context
-from livekit.agents import Agent, AgentSession
-from livekit.plugins.openai import LLM as _OpenAILLM, TTS as _OpenAITTS
-
 import requests
 import uvicorn
 from dotenv import load_dotenv
@@ -85,11 +81,6 @@ JARVIS_TTS_PROVIDER = os.getenv("JARVIS_TTS_PROVIDER", "edge_tts").strip().lower
 JARVIS_TTS_MODEL = os.getenv("JARVIS_TTS_MODEL", "tts-1").strip()
 JARVIS_TTS_VOICE = os.getenv("JARVIS_TTS_VOICE", "echo").strip()
 JARVIS_TTS_SPEED = float(os.getenv("JARVIS_TTS_SPEED", "1.0"))
-
-# LiveKit AgentSession in-process config — same env vars read by agent_worker.py (REQ-14)
-# TTS uses JARVIS_TTS_MODEL / JARVIS_TTS_VOICE (OpenAI plugin) for voice consistency with
-# push_audio_to_livekit. Cartesia constants have been removed.
-JARVIS_LK_LLM = os.getenv("JARVIS_LK_LLM", "gpt-4o-mini").strip()
 
 JARVIS_WAKE_ACK = os.getenv("JARVIS_WAKE_ACK", "Yes?").strip()
 JARVIS_BUSY_ACK = os.getenv("JARVIS_BUSY_ACK", "I'm already on it. Give me a moment.").strip()
@@ -275,8 +266,6 @@ def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
         "active_gap_filler_task": None,
         "wake_query_ack_pending": False,
         "invoker_participant": None,       # D-04: set when wake word is detected; D-03: cleared after dispatch
-        "_pending_debounce_task": None,    # D-09: cancellable asyncio.Task for debounce window
-        "_accumulated_query": "",          # D-07: space-joined query text from invoker segments
         "livekit_room": None,         # rtc.Room — set by _create_livekit_room
         "livekit_source": None,       # rtc.AudioSource — set by _create_livekit_room
         "recall_relay_room": None,    # rtc.Room — set by _create_recall_relay_room (Phase 4 / D-01)
@@ -1008,45 +997,15 @@ async def _create_recall_relay_room(session_id: str) -> tuple:
 
 
 async def _teardown_livekit_room(session_id: str) -> None:
-    """Disconnect the LiveKit Room and clean up in-process AgentSession (D-07 + REQ-19).
+    """Disconnect both publisher and relay LiveKit Rooms (Phase 4 / REQ-19).
 
-    Teardown order: cancel consumer task → close AgentSession → disconnect room.
-    AgentSession must close before room.disconnect() so TTS streaming stops cleanly.
+    Phase 4 (D-07): Steps 1, 2, 2.5 from Phase 3 (consumer cancel, agent_session aclose,
+    http_ctx close) are REMOVED — agent_worker.py owns the AgentSession lifecycle now.
+    Only the room disconnects remain.
     """
     state = _meeting_sessions.get(session_id)
     if not state:
         return
-
-    # Step 1: Stop the query consumer task (prevents processing queued queries after teardown)
-    consumer_task = state.pop("_agent_consumer_task", None)
-    query_queue = state.pop("_agent_query_queue", None)
-    if consumer_task is not None and not consumer_task.done():
-        consumer_task.cancel()
-        try:
-            await consumer_task
-        except asyncio.CancelledError:
-            pass
-    if query_queue is not None:
-        try:
-            query_queue.put_nowait(None)  # shutdown sentinel for consumer if not cancelled
-        except asyncio.QueueFull:
-            pass
-
-    # Step 2: Close the AgentSession (stops TTS pipeline)
-    agent_session = state.pop("agent_session", None)
-    if agent_session is not None:
-        try:
-            await agent_session.aclose()
-        except Exception as exc:
-            logger.warning("AgentSession.aclose error for session %s: %s", session_id, exc)
-
-    # Step 2.5: Close the http context opened for Cartesia TTS
-    http_ctx = state.pop("_http_ctx", None)
-    if http_ctx is not None:
-        try:
-            await http_ctx.__aexit__(None, None, None)
-        except Exception as exc:
-            logger.warning("http_ctx close error for session %s: %s", session_id, exc)
 
     # Step 2.6: Disconnect the Recall relay room (Phase 4 / D-01)
     relay_room = state.pop("recall_relay_room", None)
@@ -1057,7 +1016,7 @@ async def _teardown_livekit_room(session_id: str) -> None:
         except Exception as exc:
             logger.warning("Recall relay disconnect error for session %s: %s", session_id, exc)
 
-    # Step 3: Disconnect the LiveKit room
+    # Step 3: Disconnect the publisher LiveKit room
     room = state.pop("livekit_room", None)
     state.pop("livekit_source", None)
     if room is None:
@@ -1066,144 +1025,6 @@ async def _teardown_livekit_room(session_id: str) -> None:
         await room.disconnect()
     except Exception as exc:
         logger.warning("LiveKit disconnect error for session %s: %s", session_id, exc)
-
-
-class _InProcessJarvisAgent(Agent):
-    """Jarvis persona for in-process AgentSession (REQ-13/14/15).
-
-    Keep instructions in sync with agent_worker.JarvisAgent when updating.
-    """
-
-    def __init__(self) -> None:
-        from confluence_logic.agent_bridge import JARVIS_TOOLS  # noqa: PLC0415
-        super().__init__(
-            instructions=(
-                "You are Jarvis, an AI meeting assistant. You help teams update Confluence "
-                "documentation based on what is discussed in meetings. Keep responses concise "
-                "— you are speaking aloud in a meeting. Do not use markdown, asterisks, "
-                "bullet points, or emojis."
-            ),
-            tools=JARVIS_TOOLS,
-        )
-
-    async def on_enter(self) -> None:
-        logger.info("InProcessJarvisAgent started in-process.")
-        # Play pre-cached greeting audio through the LiveKit room so meeting
-        # participants know Jarvis is ready. Falls back silently if the asset
-        # has not been generated yet (run generate_wav_assets.py --acks-only).
-        try:
-            session_id = (self.session.userdata or {}).get("session_id", "")
-            if session_id:
-                greeting = get_greeting_audio()
-                if greeting is not None:
-                    _, greeting_bytes = greeting
-                    await push_audio_to_livekit(greeting_bytes, session_id)
-                    logger.info("InProcessJarvisAgent: greeting audio played for session %s", session_id)
-                else:
-                    logger.debug("InProcessJarvisAgent: greeting.mp3 not cached — skipping greeting")
-        except Exception as exc:
-            logger.warning("InProcessJarvisAgent.on_enter: greeting playback failed: %s", exc)
-
-
-async def _query_consumer(
-    session: "AgentSession",
-    queue: "asyncio.Queue[Optional[str]]",
-) -> None:
-    """Serialize all voice queries through a single generate_reply call at a time.
-
-    Drains the per-session queue one query at a time. Awaits each SpeechHandle so
-    the next query starts only AFTER the previous TTS finishes speaking (no overlapping
-    audio streams). AgentSession maintains conversation history — each queued query
-    is answered with full context of all previous Q&A in the same session.
-
-    Exits when it receives None sentinel (sent by _teardown_livekit_room).
-    """
-    while True:
-        query: Optional[str] = await queue.get()
-        if query is None:
-            queue.task_done()
-            break
-        try:
-            speech_handle = session.generate_reply(user_input=query)
-            await speech_handle
-        except RuntimeError as exc:
-            logger.warning("_query_consumer: generate_reply not ready (session still initializing?): %s", exc)
-        except Exception as exc:
-            logger.error("_query_consumer: generate_reply failed for query %r: %s", query[:40], exc)
-        finally:
-            queue.task_done()
-
-
-async def _start_in_process_agent_session(session_id: str) -> Optional["AgentSession"]:
-    """Create and start an in-process LiveKit AgentSession for the given session (REQ-14).
-
-    Uses openai.TTS (plugin-direct, same voice as push_audio_to_livekit) and openai.LLM
-    (plugin-direct). STT is disabled (stt=None) — Recall.ai provides meeting transcripts;
-    the AgentSession only handles LLM response generation + OpenAI TTS output.
-
-    Also creates a serializing _query_consumer task and a per-session asyncio.Queue so
-    _debounced_dispatch can call put_nowait(query) instead of calling generate_reply
-    directly. This prevents concurrent TTS streams when two wake-words arrive close together.
-
-    MUST be called AFTER _create_livekit_room (room must exist and be connected).
-
-    Returns the started session on success; None on failure (bot start is non-fatal;
-    _debounced_dispatch logs a warning and drops the query when no session is active).
-    """
-    state = _meeting_sessions.get(session_id)
-    if not state:
-        logger.warning("_start_in_process_agent_session: no session state for %s", session_id)
-        return None
-    room = state.get("livekit_room")
-    if room is None:
-        logger.warning(
-            "_start_in_process_agent_session: no livekit_room for session %s — must call after _create_livekit_room",
-            session_id,
-        )
-        return None
-    try:
-        # OpenAI TTS plugin calls http_context.http_session() internally; that requires
-        # a LiveKit job context. Running in-process (no agent worker) has none, so we
-        # open one manually and keep it alive for the session lifetime.
-        http_ctx = _lk_http_context.open()
-        await http_ctx.__aenter__()
-        state["_http_ctx"] = http_ctx
-
-        session = AgentSession(
-            stt=None,
-            llm=_OpenAILLM(model=JARVIS_LK_LLM),
-            tts=_OpenAITTS(model=JARVIS_TTS_MODEL, voice=JARVIS_TTS_VOICE, speed=JARVIS_TTS_SPEED),
-            turn_detection=None,
-            userdata={"session_id": session_id},
-        )
-        await session.start(agent=_InProcessJarvisAgent(), room=room)
-
-        query_queue: asyncio.Queue = asyncio.Queue(maxsize=8)
-        consumer_task = asyncio.create_task(
-            _query_consumer(session, query_queue),
-            name=f"jarvis-consumer-{session_id[:8]}",
-        )
-        state["agent_session"] = session
-        state["_agent_query_queue"] = query_queue
-        state["_agent_consumer_task"] = consumer_task
-
-        logger.info(
-            "_start_in_process_agent_session: started — session=%s llm=%s tts_model=%s tts_voice=%s",
-            session_id, JARVIS_LK_LLM, JARVIS_TTS_MODEL, JARVIS_TTS_VOICE,
-        )
-        return session
-    except Exception as exc:
-        http_ctx = state.pop("_http_ctx", None)
-        if http_ctx is not None:
-            try:
-                await http_ctx.__aexit__(None, None, None)
-            except Exception:
-                pass
-        logger.error(
-            "_start_in_process_agent_session: failed for session %s: %s",
-            session_id, exc,
-        )
-        return None
 
 
 async def push_audio_to_livekit(
@@ -1855,92 +1676,6 @@ async def _emit_micro_ack(bot_id: str) -> None:
 async def _handle_interruption(bot_id: str) -> None:
     """No-op since Phase 03 — AgentSession TurnHandlingOptions handles this natively (REQ-16)."""
     return
-
-
-def _flush_agent_queue(q: "asyncio.Queue") -> int:
-    """Drain all pending items from the agent query queue. Returns count flushed."""
-    flushed = 0
-    while not q.empty():
-        try:
-            q.get_nowait()
-            q.task_done()
-            flushed += 1
-        except asyncio.QueueEmpty:
-            break
-    return flushed
-
-
-async def _debounced_dispatch(query: str, bot_id: str) -> None:
-    """Wait JARVIS_DEBOUNCE_SECONDS then dispatch query to the in-process AgentSession.
-
-    Per Plan 06 (REQ-17): legacy voice paths removed — AgentSession owns all voice output now.
-    Per D-06: cancellable task. Per D-08: clears invoker_participant after firing.
-
-    Interruption: if the agent is already speaking or thinking when a new query arrives,
-    interrupt current speech (so the latest question gets answered immediately) and flush
-    any stale queued items. Consumer resurrection: if the consumer task has died unexpectedly,
-    restart it before queuing the new query.
-    """
-    await asyncio.sleep(JARVIS_DEBOUNCE_SECONDS)
-    meeting_state["invoker_participant"] = None
-    meeting_state["_pending_debounce_task"] = None
-    meeting_state["_accumulated_query"] = ""
-    if _is_garbled_query(query):
-        logger.info("Garbled query detected in debounce — dropping (agent handles clarification): %s", repr(query[:40]))
-        return
-    session_id = _resolve_session_id(bot_id)
-    _state = _meeting_sessions.get(session_id) or {}
-    _agent_session = _state.get("agent_session")
-    _agent_queue = _state.get("_agent_query_queue")
-    if _agent_session is not None and _agent_queue is not None:
-        if _agent_session.agent_state == "initializing":
-            logger.warning(
-                "_debounced_dispatch: AgentSession still initializing for session %s — dropping query",
-                session_id,
-            )
-            return
-
-        # Consumer resurrection: if the consumer task died unexpectedly, restart it.
-        consumer_task = _state.get("_agent_consumer_task")
-        if consumer_task is not None and consumer_task.done() and not consumer_task.cancelled():
-            exc = consumer_task.exception() if not consumer_task.cancelled() else None
-            logger.warning(
-                "_debounced_dispatch: consumer task died for session %s (%s) — restarting",
-                session_id, exc,
-            )
-            new_consumer = asyncio.create_task(
-                _query_consumer(_agent_session, _agent_queue),
-                name=f"jarvis-consumer-{session_id[:8]}",
-            )
-            _state["_agent_consumer_task"] = new_consumer
-
-        # Interruption: if already speaking/thinking, interrupt and flush stale queue items
-        # so the newest query is answered immediately instead of waiting behind old responses.
-        if _agent_session.agent_state in ("speaking", "thinking"):
-            try:
-                _agent_session.interrupt()
-            except RuntimeError:
-                pass
-            flushed = _flush_agent_queue(_agent_queue)
-            if flushed:
-                logger.info(
-                    "_debounced_dispatch: interrupted session %s, flushed %d stale queue items",
-                    session_id, flushed,
-                )
-
-        try:
-            _agent_queue.put_nowait(query)
-            return
-        except asyncio.QueueFull:
-            logger.warning(
-                "_debounced_dispatch: query queue full for session %s — dropping: %r",
-                session_id, query[:40],
-            )
-            return
-    logger.warning(
-        "_debounced_dispatch: no agent_session active for session %s — dropping query (legacy path removed in Plan 06)",
-        session_id,
-    )
 
 
 def _get_clean_invoker_name() -> str:
@@ -2936,38 +2671,9 @@ async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str)
             except Exception:
                 pass  # Non-fatal — graph is optional
 
-            # Speaker isolation: skip non-invoker transcripts during active debounce window (D-02)
-            invoker = meeting_state.get("invoker_participant")
-            if invoker and participant != invoker:
-                logger.debug(
-                    "Ignoring transcript from %s — active invoker is %s", participant, invoker
-                )
-            else:
-                query = process_transcript_event(sentence, time.time())
-                if query:
-                    # Lock invoker on wake word detection (D-01) and accumulate query text (D-07)
-                    meeting_state["invoker_participant"] = participant
-                    accumulated = meeting_state.get("_accumulated_query", "")
-                    accumulated = (accumulated + " " + query).strip() if accumulated else query
-                    meeting_state["_accumulated_query"] = accumulated
-                    _from_listening = meeting_state.pop("_query_from_listening", False)
-                    _from_wake_invocation = meeting_state.pop("_query_from_wake_invocation", False)
-                    if _from_wake_invocation and not _from_listening:
-                        meeting_state["wake_query_ack_pending"] = True
-                    # INTERRUPT-01: if TTS is currently playing (output_lock held), emit yield phrase
-                    output_lock = _get_output_lock()
-                    if output_lock.locked():
-                        asyncio.create_task(_handle_interruption(bot_id))
-                    # Cancel existing debounce task and schedule new one (D-05, D-06)
-                    pending = meeting_state.get("_pending_debounce_task")
-                    if pending and not pending.done():
-                        pending.cancel()
-                    task = asyncio.create_task(_debounced_dispatch(accumulated, bot_id))
-                    meeting_state["_pending_debounce_task"] = task
-                elif meeting_state["jarvis_listening"] and is_bare_wake_invocation(sentence):
-                    # Lock invoker for bare wake so only their follow-up is accepted (D-01)
-                    meeting_state["invoker_participant"] = participant
-                    asyncio.create_task(_handle_bare_wake(bot_id))
+            # Phase 4 / D-05: voice dispatch removed — STT in agent_worker.py drives generate_reply.
+            # We KEEP transcript_log population (above) for the Confluence post-meeting review (D-03).
+            # No further action needed here.
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for session %s", session_id)
     except Exception as e:

@@ -1621,6 +1621,19 @@ def test_transcript_log_still_populated_after_voice_removal():
     assert ja.meeting_state["transcript_log"][0]["text"] == "hello"
 
 
+def test_transcript_websocket_no_longer_dispatches_voice():
+    """D-05: transcript WS handler must not call _debounced_dispatch (which is also gone).
+    Source-grep regression guard — ensures the dispatch block stays out."""
+    import inspect
+    src = inspect.getsource(ja._websocket_endpoint_for_session)
+    assert "_debounced_dispatch" not in src, "Transcript WS must not call _debounced_dispatch (D-05)"
+    assert "_handle_interruption" not in src, "Transcript WS must not call _handle_interruption (D-05)"
+    assert "_handle_bare_wake" not in src, "Transcript WS must not call _handle_bare_wake (D-05)"
+    # Regression guard: transcript_log population must remain (D-03)
+    assert "_append_transcript_log_entry" in src, "transcript_log population must remain (D-03)"
+    assert "graph_rag.ingest_transcript_entry" in src, "graph_rag ingestion must remain (D-03)"
+
+
 def test_build_create_bot_payload_includes_audio_mixed_raw():
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
          patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \

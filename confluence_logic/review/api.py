@@ -850,10 +850,8 @@ async def _start_bot_for_session(
             "error": "Recall relay room creation failed — check LIVEKIT_URL/API_KEY/API_SECRET",
         }
 
-    # REQ-14/REQ-18: start in-process AgentSession after room is ready (Plan 05).
-    from confluence_logic.jarvis_agentic import _start_in_process_agent_session  # noqa: PLC0415
-    await _start_in_process_agent_session(resolved_session_id)
-    # Non-fatal: if session fails, _debounced_dispatch falls back to handle_spoken_request
+    # Phase 4 / D-07: _start_in_process_agent_session removed — agent_worker.py owns voice lifecycle.
+    # Full review/api.py cleanup in Plan 006.
 
     _persist_history_snapshot(state, user)
 
