@@ -850,8 +850,9 @@ async def _start_bot_for_session(
             "error": "Recall relay room creation failed — check LIVEKIT_URL/API_KEY/API_SECRET",
         }
 
-    # Phase 4 / D-07: _start_in_process_agent_session removed — agent_worker.py owns voice lifecycle.
-    # Full review/api.py cleanup in Plan 006.
+    # Phase 4 (D-05/D-07): in-process AgentSession removed — agent_worker.py owns
+    # the LiveKit AgentSession lifecycle via AgentServer dispatch. session_id is
+    # passed in build_create_bot_payload metadata so agent_worker resolves it.
 
     _persist_history_snapshot(state, user)
 

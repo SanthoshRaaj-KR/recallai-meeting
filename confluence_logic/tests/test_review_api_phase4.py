@@ -19,10 +19,6 @@ async def test_start_bot_for_session_creates_relay_room():
     async def _fake_create_relay_room(session_id):
         order.append(("relay", session_id))
 
-    async def _noop_inprocess(session_id):
-        order.append(("inprocess", session_id))
-        return None
-
     async def _noop_teardown(session_id):
         order.append(("teardown", session_id))
 
@@ -32,7 +28,6 @@ async def test_start_bot_for_session_creates_relay_room():
          patch("confluence_logic.jarvis_agentic._create_livekit_room", side_effect=_fake_create_livekit_room), \
          patch("confluence_logic.jarvis_agentic._create_recall_relay_room", side_effect=_fake_create_relay_room), \
          patch("confluence_logic.jarvis_agentic._teardown_livekit_room", side_effect=_noop_teardown), \
-         patch("confluence_logic.jarvis_agentic._start_in_process_agent_session", side_effect=_noop_inprocess, create=True), \
          patch.object(review_api, "_persist_history_snapshot", lambda *a, **k: None):
         body = StartBotRequest(meeting_url="https://meet.google.com/abc-defg-hij", session_id="sess-r")
         result = await review_api._start_bot_for_session(body, session_id="sess-r")
@@ -68,7 +63,6 @@ async def test_start_bot_for_session_fails_clean_when_relay_room_errors():
          patch("confluence_logic.jarvis_agentic._create_livekit_room", AsyncMock()), \
          patch("confluence_logic.jarvis_agentic._create_recall_relay_room", side_effect=_fake_relay_fail), \
          patch("confluence_logic.jarvis_agentic._teardown_livekit_room", side_effect=_fake_teardown), \
-         patch("confluence_logic.jarvis_agentic._start_in_process_agent_session", AsyncMock(), create=True), \
          patch.object(review_api, "_persist_history_snapshot", lambda *a, **k: None):
         body = StartBotRequest(meeting_url="https://meet.google.com/abc-defg-hij", session_id="sess-fail")
         result = await review_api._start_bot_for_session(body, session_id="sess-fail")
@@ -76,3 +70,29 @@ async def test_start_bot_for_session_fails_clean_when_relay_room_errors():
     assert result["status"] == "error"
     assert "relay" in result["error"].lower()
     assert teardown_called == ["sess-fail"], teardown_called
+
+
+def test_start_bot_for_session_does_not_reference_in_process_agent():
+    """D-07 / Pitfall 6: _start_in_process_agent_session must be fully gone from review/api.py."""
+    import inspect
+    from confluence_logic.review import api as review_api
+    src = inspect.getsource(review_api._start_bot_for_session)
+    assert "_start_in_process_agent_session" not in src, (
+        "review/api.py must not reference _start_in_process_agent_session (D-07 / Pitfall 6)"
+    )
+    # Sanity: _create_recall_relay_room must still be called (Plan 004 contract)
+    assert "_create_recall_relay_room" in src
+
+
+def test_review_api_module_imports_clean():
+    """Pitfall 6: review/api.py must import without ImportError after D-07 deletions."""
+    import importlib
+    # Force re-import to catch any stale cached state
+    from confluence_logic.review import api as review_api
+    importlib.reload(review_api)
+    assert hasattr(review_api, "_start_bot_for_session")
+    # Confirm the function exists and is callable (signature unchanged)
+    import inspect
+    sig = inspect.signature(review_api._start_bot_for_session)
+    assert "body" in sig.parameters
+    assert "session_id" in sig.parameters
