@@ -1180,6 +1180,75 @@ def _format_approved_change_request(change: Dict[str, Any]) -> str:
             )
 
 
+def _normalize_proposal_text(text: str, max_chars: int) -> str:
+    """Strip light markdown, collapse whitespace, lowercase, and truncate.
+
+    Used by the proposal-dedup signature so cosmetic differences (extra spaces,
+    bullet markers, casing) don't fool the equality check.
+    """
+    t = re.sub(r"[*_`#>\-]+", " ", (text or "").lower())
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:max_chars]
+
+
+def _dedupe_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Three-layer dedup that filters out near-identical cards.
+
+    Layer 1 — STRICT: (page_id, change_type, edit_mode, section_heading)
+    Layer 2 — SEMANTIC: + normalized subject + before/after snippets
+    Layer 3 — OUTCOME: (page_id, change_type, normalized after_content) only.
+        Independent of edit_mode/section_heading. Catches "same change two
+        times" duplicates where the drafter picked a different heading guess
+        or one said "replace" while another said "append" for the same final
+        content. This is the layer the user-reported regression added.
+
+    Returns a new list preserving insertion order of the first occurrence.
+    """
+    seen_strict: set = set()
+    seen_semantic: set = set()
+    seen_outcome: set = set()
+    deduped: List[Dict[str, Any]] = []
+    for p in proposals:
+        pid_key = str(p.get("page_id") or (p.get("page_title") or "").lower())
+        heading_key = str(p.get("section_heading") or "").lower()[:50]
+        ctype = p.get("change_type") or "edit"
+        emode = p.get("edit_mode") or ""
+        strict_key = f"{pid_key}|{ctype}|{emode}|{heading_key}"
+        intent_subject = ((p.get("_audit") or {}).get("intent_subject") or "").lower()
+        semantic_key = (
+            f"{pid_key}|{ctype}|{emode}|"
+            f"{_normalize_proposal_text(intent_subject, 60)}|"
+            f"{_normalize_proposal_text(p.get('before_content') or '', 80)}|"
+            f"{_normalize_proposal_text(p.get('after_content') or '', 120)}"
+        )
+        outcome_key = (
+            f"{pid_key}|{ctype}|"
+            f"{_normalize_proposal_text(p.get('after_content') or '', 200)}"
+        )
+        if strict_key in seen_strict:
+            logger.debug("Skipping strict-duplicate proposal: %s", strict_key)
+            continue
+        if semantic_key in seen_semantic:
+            logger.info(
+                "Skipping SEMANTIC duplicate proposal for page '%s' (%s/%s) — "
+                "same content/subject already targeted",
+                p.get("page_title"), ctype, emode,
+            )
+            continue
+        if outcome_key in seen_outcome:
+            logger.info(
+                "Skipping OUTCOME duplicate proposal for page '%s' (%s) — "
+                "same final content already targeted with a different heading/edit_mode",
+                p.get("page_title"), ctype,
+            )
+            continue
+        seen_strict.add(strict_key)
+        seen_semantic.add(semantic_key)
+        seen_outcome.add(outcome_key)
+        deduped.append(p)
+    return deduped
+
+
 def _format_bundled_page_instruction(proposals: List[Dict[str, Any]]) -> str:
     """Build ONE instruction string for ALL changes targeting the same page.
 
@@ -3001,27 +3070,56 @@ async def _verify_and_persist(
             )
             return  # do not persist
 
-        # ── Plan 08-02 / Step 3b: synthesize change_summary when drafter left it empty ─
-        # Per D-06 / D-16: the card UI in Plan 08-04 will render change_summary as the
-        # one-line headline. Never drop a proposal solely because change_summary is empty —
-        # synthesize a plain-English description from change_type + page_title + section.
+        # ── Plan 08-02 / Step 3b (+ follow-up): synthesize change_summary ────
+        # Per D-06 / D-16 the card UI renders change_summary as the one-line headline.
+        # The original synthesis was too generic ("Edit section 'X' in 'Y'") and the
+        # user reported they couldn't tell WHAT was being changed at a glance. So when
+        # before/after content is available we now include a short verbatim snippet of
+        # each side so the headline literally tells you the change.
+        def _snippet(text: str, n: int = 50) -> str:
+            # Strip markdown emphasis/header chars but PRESERVE hyphens — hyphenated
+            # tokens like "pre-commit" or "end-to-end" are meaningful in summaries.
+            t = re.sub(r"[*_`#>]+", " ", (text or "").strip())
+            t = re.sub(r"\s+", " ", t).strip()
+            if not t:
+                return ""
+            return (t[: n - 1] + "…") if len(t) > n else t
+
         _change_summary = (verified.get("change_summary") or "").strip()
+        _page_title = verified.get("page_title") or "page"
+        _section = verified.get("section_heading")
+        _edit_mode_for_summary = (verified.get("edit_mode") or "").strip().lower()
+        _before_snip = _snippet(verified.get("before_content") or "", 50)
+        _after_snip = _snippet(_after_content, 60)
+        # Append-only intent: respect edit_mode even if the verifier just
+        # auto-populated before_content from the live page above — that auto-fill
+        # is for execution context, not for describing the change.
+        _is_append_intent = _edit_mode_for_summary == "append"
         if not _change_summary:
-            _page_title = verified.get("page_title") or "page"
-            _section = verified.get("section_heading")
             if _change_type == "create":
-                _change_summary = f"Create new page '{_page_title}'"
+                if _after_snip:
+                    _change_summary = f"Create '{_page_title}' with: {_after_snip}"
+                else:
+                    _change_summary = f"Create new page '{_page_title}'"
             elif _change_type == "delete" and _section:
                 _change_summary = f"Delete section '{_section}' from '{_page_title}'"
             elif _change_type == "delete":
                 _change_summary = f"Delete page '{_page_title}'"
             elif _change_type == "title":
                 _change_summary = f"Rename '{_page_title}' to '{_after_content[:60]}'"
+            elif _is_append_intent and _after_snip:
+                location = f"section '{_section}'" if _section else f"'{_page_title}'"
+                _change_summary = f"Add to {location}: {_after_snip}"
+            elif _before_snip and _after_snip:
+                _change_summary = f"Replace '{_before_snip}' with '{_after_snip}'"
+            elif _after_snip:
+                location = f"section '{_section}'" if _section else f"'{_page_title}'"
+                _change_summary = f"Add to {location}: {_after_snip}"
             elif _section:
                 _change_summary = f"Edit section '{_section}' in '{_page_title}'"
             else:
                 _change_summary = f"Edit page '{_page_title}'"
-            verified["change_summary"] = _change_summary[:120]
+            verified["change_summary"] = _change_summary[:160]
             logger.info(
                 "Verifier synthesized change_summary for '%s': %s",
                 _page_title, verified["change_summary"],
@@ -4096,48 +4194,8 @@ async def _run_pipeline(
                                     if d.get("risk") == "safe":
                                         d["risk"] = "review"
 
-            # ───────────────────────────────────────────────────────────
-            # STAGE 3e — SEMANTIC DEDUPLICATION (two layers)
-            # Layer 1: strict key (page_id, change_type, section_heading) — fast.
-            # Layer 2: meaning signature combining page + change_type + normalized
-            # before/after content + normalized subject. Catches cards that target
-            # the same page with slightly different heading guesses or rationales.
-            # ───────────────────────────────────────────────────────────
-            def _sig(text: str, n: int = 120) -> str:
-                t = re.sub(r"[*_`#>\-]+", " ", (text or "").lower())
-                t = re.sub(r"\s+", " ", t).strip()
-                return t[:n]
-
-            seen_strict: set = set()
-            seen_semantic: set = set()
-            deduped: List[Dict[str, Any]] = []
-            for p in proposals:
-                pid_key = str(p.get("page_id") or (p.get("page_title") or "").lower())
-                heading_key = str(p.get("section_heading") or "").lower()[:50]
-                ctype = p.get("change_type") or "edit"
-                emode = p.get("edit_mode") or ""
-                strict_key = f"{pid_key}|{ctype}|{emode}|{heading_key}"
-                intent_subject = ((p.get("_audit") or {}).get("intent_subject") or "").lower()
-                semantic_key = (
-                    f"{pid_key}|{ctype}|{emode}|"
-                    f"{_sig(intent_subject, 60)}|"
-                    f"{_sig(p.get('before_content') or '', 80)}|"
-                    f"{_sig(p.get('after_content') or '', 120)}"
-                )
-                if strict_key in seen_strict:
-                    logger.debug("Skipping strict-duplicate proposal: %s", strict_key)
-                    continue
-                if semantic_key in seen_semantic:
-                    logger.info(
-                        "Skipping SEMANTIC duplicate proposal for page '%s' (%s/%s) — "
-                        "same content/subject already targeted",
-                        p.get("page_title"), ctype, emode,
-                    )
-                    continue
-                seen_strict.add(strict_key)
-                seen_semantic.add(semantic_key)
-                deduped.append(p)
-            proposals = deduped
+            # STAGE 3e — semantic deduplication (3 layers).
+            proposals = _dedupe_proposals(proposals)
 
             logger.info(
                 "Per-pair drafting produced %d unique proposals (from %d (intent,page) tasks)",
