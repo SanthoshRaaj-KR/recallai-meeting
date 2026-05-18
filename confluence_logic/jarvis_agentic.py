@@ -97,6 +97,9 @@ _LIVEKIT_NUM_CHANNELS = 1             # D-10: mono
 _LIVEKIT_SAMPLES_PER_CHANNEL = 960    # D-10: 20 ms frames (48000 * 0.020)
 _LIVEKIT_SUBSCRIBER_TTL_HOURS = 8     # D-16 pitfall 2: long-meeting tolerance
 
+# --- Recall browser publisher (Phase 6) ----------------------------------
+_RECALL_BROWSER_IDENTITY_PREFIX = "recall-browser-"
+
 # --- Recall audio relay (Phase 4 / D-01) ---------------------------------
 _RECALL_AUDIO_INPUT_RATE = 16000             # Recall streams 16 kHz mono S16LE
 _RECALL_AUDIO_NUM_CHANNELS = 1
@@ -869,6 +872,33 @@ def _make_subscriber_token(room_name: str, ttl_hours: int = _LIVEKIT_SUBSCRIBER_
             can_subscribe=True,
         ))
         .with_ttl(_datetime_module.timedelta(hours=ttl_hours))
+        .to_jwt()
+    )
+
+
+def _make_browser_publisher_token(session_id: str) -> str:
+    """Phase 6: JWT for the bot.html browser participant that publishes meeting audio.
+
+    The browser joins as 'recall-browser-{session_id}' (can_publish=True,
+    can_subscribe=False). AgentSession in agent_worker.py subscribes to this identity
+    for STT (Pitfall 1: avoids transcribing Jarvis's own TTS on jarvis-publisher-*).
+    """
+    if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise RuntimeError(
+            "LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set to generate browser publisher tokens."
+        )
+    identity = f"{_RECALL_BROWSER_IDENTITY_PREFIX}{session_id}"
+    return (
+        livekit_api.AccessToken(api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+        .with_identity(identity)
+        .with_name("RecallBrowserPublisher")
+        .with_grants(livekit_api.VideoGrants(
+            room_join=True,
+            room=session_id,
+            can_publish=True,
+            can_subscribe=False,
+        ))
+        .with_ttl(_datetime_module.timedelta(hours=_LIVEKIT_SUBSCRIBER_TTL_HOURS))
         .to_jwt()
     )
 
