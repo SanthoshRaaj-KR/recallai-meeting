@@ -201,7 +201,7 @@ class JarvisAgent(Agent):
             query,
         )
         # Rewrite to query-only — LLM never sees "hey jarvis"
-        new_message.content = [llm.ChatContent(type="text", text=query)]
+        new_message.content = [query]
         # Signal ack here (after wake word confirmed) — not in llm_node, which
         # fires speculatively before this gate with preemptive_generation=True.
         self._ack_q.put_nowait(True)
