@@ -2784,6 +2784,87 @@ async def _verify_and_persist(
                 if not existing_note.startswith("["):
                     verified["verifier_note"] = prefix + existing_note
 
+        # ── Plan 08-02 / Step 3a: drop stub after_content for non-deletes ─────
+        # Per D-06: proposals whose after_content is shorter than 20 chars are useless
+        # to the user — they render as a near-empty card with no content to review.
+        # Deletions legitimately have no after_content, so they're exempt.
+        _after_content = (verified.get("after_content") or "").strip()
+        _change_type = (verified.get("change_type") or "edit").lower()
+        if _change_type != "delete" and len(_after_content) < 20:
+            logger.warning(
+                "Verifier dropped stub proposal for '%s' (%s): after_content len=%d",
+                verified.get("page_title"), _change_type, len(_after_content),
+            )
+            return  # do not persist
+
+        # ── Plan 08-02 / Step 3b: synthesize change_summary when drafter left it empty ─
+        # Per D-06 / D-16: the card UI in Plan 08-04 will render change_summary as the
+        # one-line headline. Never drop a proposal solely because change_summary is empty —
+        # synthesize a plain-English description from change_type + page_title + section.
+        _change_summary = (verified.get("change_summary") or "").strip()
+        if not _change_summary:
+            _page_title = verified.get("page_title") or "page"
+            _section = verified.get("section_heading")
+            if _change_type == "create":
+                _change_summary = f"Create new page '{_page_title}'"
+            elif _change_type == "delete" and _section:
+                _change_summary = f"Delete section '{_section}' from '{_page_title}'"
+            elif _change_type == "delete":
+                _change_summary = f"Delete page '{_page_title}'"
+            elif _change_type == "title":
+                _change_summary = f"Rename '{_page_title}' to '{_after_content[:60]}'"
+            elif _section:
+                _change_summary = f"Edit section '{_section}' in '{_page_title}'"
+            else:
+                _change_summary = f"Edit page '{_page_title}'"
+            verified["change_summary"] = _change_summary[:120]
+            logger.info(
+                "Verifier synthesized change_summary for '%s': %s",
+                _page_title, verified["change_summary"],
+            )
+
+        # ── Plan 08-02 / Step 3c: pre-validate before_content vs live HTML ─────
+        # Per D-06: when the drafter wants to REPLACE existing text but the cited
+        # before_content isn't actually on the live page, flip edit_mode to APPEND
+        # so the Accept click won't fail with "Text to replace not found". Bump
+        # risk from safe→review and prepend an [AUTO-DOWNGRADE] note so the user
+        # sees why this got rerouted.
+        _before_content = (verified.get("before_content") or "").strip() if verified.get("before_content") else ""
+        _edit_mode = (verified.get("edit_mode") or "").strip().lower()
+        _page_id = verified.get("page_id")
+        if (
+            _change_type == "edit"
+            and _edit_mode in {"", "replace"}
+            and _before_content
+            and _page_id
+        ):
+            try:
+                connector = _get_connector()
+                _pv_live_html = await asyncio.to_thread(connector.fetch_page_html, _page_id)
+                _live_text_norm = _normalize_for_fuzzy(_html_to_text(_pv_live_html))
+                _before_norm = _normalize_for_fuzzy(_before_content)
+                if _before_norm not in _live_text_norm:
+                    logger.warning(
+                        "Verifier downgrade: before_content not on '%s' — "
+                        "flipping edit_mode replace→append",
+                        verified.get("page_title"),
+                    )
+                    verified["edit_mode"] = "append"
+                    verified["before_content"] = None
+                    _existing_note = (verified.get("verifier_note") or "").strip()
+                    _warn = (
+                        "[AUTO-DOWNGRADE] The exact text the drafter cited was not found on the live page; "
+                        "this change will be APPENDED to the section instead of replacing existing content."
+                    )
+                    verified["verifier_note"] = (_warn + " " + _existing_note).strip()
+                    if verified.get("risk") == "safe":
+                        verified["risk"] = "review"
+            except Exception as exc:
+                logger.debug(
+                    "Verifier before_content pre-validate failed for '%s': %s",
+                    verified.get("page_title"), exc,
+                )
+
         # Build the persisted row. Strip internal-only keys that should NOT be sent to Supabase
         # (the table schema doesn't have columns for them) but keep them on the SSE event payload
         # so the UI can show audit info to the user.
