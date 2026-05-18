@@ -10,7 +10,6 @@ Usage:
 """
 
 import asyncio
-import base64
 import logging
 import os
 import random
@@ -100,14 +99,6 @@ _LIVEKIT_SUBSCRIBER_TTL_HOURS = 8     # D-16 pitfall 2: long-meeting tolerance
 # --- Recall browser publisher (Phase 6) ----------------------------------
 _RECALL_BROWSER_IDENTITY_PREFIX = "recall-browser-"
 
-# --- Recall audio relay (Phase 4 / D-01) ---------------------------------
-_RECALL_AUDIO_INPUT_RATE = 16000             # Recall streams 16 kHz mono S16LE
-_RECALL_AUDIO_NUM_CHANNELS = 1
-_RECALL_AUDIO_BYTES_PER_INPUT_SAMPLE = 2     # S16LE
-_RECALL_AUDIO_BYTES_PER_OUTPUT_FRAME = _LIVEKIT_SAMPLES_PER_CHANNEL * 2  # 960 * 2 = 1920 bytes
-_RECALL_RELAY_TRACK_NAME = "recall-meeting-audio"
-_RECALL_RELAY_IDENTITY_PREFIX = "recall-relay-"
-RECALL_AUDIO_STREAM_PATH = "/recall-audio-mixed"   # Phase 4 / D-01 — distinct from /recall-audio-stream (transcripts)
 
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "0.6"))
 JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "false").strip().lower() == "true"
@@ -271,8 +262,6 @@ def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
         "invoker_participant": None,       # D-04: set when wake word is detected; D-03: cleared after dispatch
         "livekit_room": None,         # rtc.Room — set by _create_livekit_room
         "livekit_source": None,       # rtc.AudioSource — set by _create_livekit_room
-        "recall_relay_room": None,    # rtc.Room — set by _create_recall_relay_room (Phase 4 / D-01)
-        "recall_relay_source": None,  # rtc.AudioSource — receives resampled Recall PCM (Phase 4 / D-01)
     }
 
 
@@ -960,91 +949,16 @@ async def _create_livekit_room(session_id: str, bot_id: str) -> tuple:
     return room, source
 
 
-async def _create_recall_relay_room(session_id: str) -> tuple:
-    """Connect a second LiveKit Room as the 'recall-relay-{session_id}' publisher (Phase 4 / D-01).
-
-    This participant is DISTINCT from 'jarvis-publisher-{session_id}'. The agent worker
-    (agent_worker.py) configures RoomOptions(participant_identity=f"recall-relay-{session_id}")
-    so its STT pipeline transcribes ONLY the meeting audio relayed here — not Jarvis's own
-    TTS output (Pitfall 1).
-
-    Idempotent: returns the existing (room, source) pair if already created.
-    """
-    if not LIVEKIT_URL or not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
-        raise RuntimeError(
-            "LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET must be set before creating a relay room."
-        )
-
-    state = _meeting_sessions.get(session_id)
-    if state is None:
-        state = _fresh_meeting_state(session_id)
-        _meeting_sessions[session_id] = state
-
-    existing_room = state.get("recall_relay_room")
-    existing_source = state.get("recall_relay_source")
-    if existing_room is not None and existing_source is not None:
-        return existing_room, existing_source
-
-    relay_identity = f"{_RECALL_RELAY_IDENTITY_PREFIX}{session_id}"
-    relay_token = (
-        livekit_api.AccessToken(api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
-        .with_identity(relay_identity)
-        .with_name("RecallRelay")
-        .with_grants(livekit_api.VideoGrants(
-            room_join=True,
-            room=session_id,             # same room as jarvis-publisher
-            can_publish=True,
-            can_subscribe=False,
-        ))
-        .with_ttl(_datetime_module.timedelta(hours=_LIVEKIT_SUBSCRIBER_TTL_HOURS))
-        .to_jwt()
-    )
-
-    room = rtc.Room()
-    source = rtc.AudioSource(_LIVEKIT_SAMPLE_RATE, _LIVEKIT_NUM_CHANNELS)
-    track = rtc.LocalAudioTrack.create_audio_track(_RECALL_RELAY_TRACK_NAME, source)
-    options = rtc.TrackPublishOptions()
-    options.source = rtc.TrackSource.SOURCE_MICROPHONE
-
-    @room.on("disconnected")
-    def _on_relay_disconnected(reason):
-        logger.warning(
-            "Recall relay room disconnected — session=%s identity=%s reason=%s",
-            session_id, relay_identity, reason,
-        )
-
-    await room.connect(LIVEKIT_URL, relay_token)
-    await room.local_participant.publish_track(track, options)
-
-    state["recall_relay_room"] = room
-    state["recall_relay_source"] = source
-
-    logger.info(
-        "Recall relay room ready — session=%s identity=%s track=%s",
-        session_id, relay_identity, _RECALL_RELAY_TRACK_NAME,
-    )
-    return room, source
-
-
 async def _teardown_livekit_room(session_id: str) -> None:
-    """Disconnect both publisher and relay LiveKit Rooms (Phase 4 / REQ-19).
+    """Disconnect the publisher LiveKit Room (REQ-19).
 
     Phase 4 (D-07): Steps 1, 2, 2.5 from Phase 3 (consumer cancel, agent_session aclose,
     http_ctx close) are REMOVED — agent_worker.py owns the AgentSession lifecycle now.
-    Only the room disconnects remain.
+    Only the publisher room disconnect remains.
     """
     state = _meeting_sessions.get(session_id)
     if not state:
         return
-
-    # Step 2.6: Disconnect the Recall relay room (Phase 4 / D-01)
-    relay_room = state.pop("recall_relay_room", None)
-    state.pop("recall_relay_source", None)
-    if relay_room is not None:
-        try:
-            await relay_room.disconnect()
-        except Exception as exc:
-            logger.warning("Recall relay disconnect error for session %s: %s", session_id, exc)
 
     # Step 3: Disconnect the publisher LiveKit room
     room = state.pop("livekit_room", None)
@@ -2700,116 +2614,6 @@ async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str)
         logger.error("WebSocket error: %s", e)
     finally:
         reset_current_meeting_session(token)
-
-
-@app.websocket("/recall-audio-mixed/{session_id}")
-async def recall_audio_mixed_stream(websocket: WebSocket, session_id: str):
-    """Phase 4 / D-01: Receive Recall mixed audio, resample 16k->48k, publish to LiveKit room
-    as the recall-relay-{session_id} participant.
-
-    Recall v1.11 delivers events as JSON envelopes:
-        {"event": "audio_mixed_raw.data",
-         "data": {"buffer": "<base64 S16LE 16 kHz mono>", "timestamp": {...}}}
-
-    Pitfall 1: published as a DISTINCT participant identity so the agent worker's
-    STT pipeline (RoomOptions.participant_identity="recall-relay-{session_id}")
-    does not transcribe Jarvis's own TTS output (which is on jarvis-publisher-{session_id}).
-
-    Pitfall 2: AudioResampler output is variable-sized; rechunked into 20 ms (960-sample)
-    frames before capture_frame to match the room's expected frame cadence.
-    """
-    await websocket.accept()
-    logger.info("Recall audio relay connected — session=%s", session_id)
-
-    # Lazy-init relay room (idempotent if already created by /bot/start path).
-    try:
-        _, relay_source = await _create_recall_relay_room(session_id)
-    except Exception as exc:
-        logger.error(
-            "Recall audio relay: failed to create relay room for session %s: %s",
-            session_id, exc,
-        )
-        await websocket.close(code=1011)
-        return
-
-    resampler = rtc.AudioResampler(
-        input_rate=_RECALL_AUDIO_INPUT_RATE,
-        output_rate=_LIVEKIT_SAMPLE_RATE,
-        num_channels=_RECALL_AUDIO_NUM_CHANNELS,
-    )
-
-    pcm_buf = bytearray()
-    frame_count = 0
-    try:
-        async for message in websocket.iter_text():
-            try:
-                payload = json.loads(message)
-            except json.JSONDecodeError as exc:
-                logger.debug("Recall audio relay: non-JSON message dropped (%s): %r", exc, message[:80])
-                continue
-            event = payload.get("event")
-            if event != "audio_mixed_raw.data":
-                logger.debug("Recall audio relay: skipping event=%r", event)
-                continue
-            raw_b64 = (payload.get("data") or {}).get("buffer", "")
-            if not raw_b64:
-                continue
-            try:
-                pcm_bytes = base64.b64decode(raw_b64)
-            except (ValueError, TypeError) as exc:
-                logger.debug("Recall audio relay: base64 decode failed: %s", exc)
-                continue
-
-            # AudioResampler.push accepts either an AudioFrame OR raw bytes depending on
-            # the installed rtc version. Try AudioFrame first (newer API), fall back to bytes.
-            try:
-                samples_in = len(pcm_bytes) // _RECALL_AUDIO_BYTES_PER_INPUT_SAMPLE
-                input_frame = rtc.AudioFrame(
-                    data=pcm_bytes,
-                    sample_rate=_RECALL_AUDIO_INPUT_RATE,
-                    num_channels=_RECALL_AUDIO_NUM_CHANNELS,
-                    samples_per_channel=samples_in,
-                )
-                out_frames = resampler.push(input_frame)
-            except TypeError:
-                out_frames = resampler.push(bytearray(pcm_bytes))
-
-            # Accumulate output bytes and rechunk to 960-sample (20 ms) frames (Pitfall 2).
-            for out in out_frames:
-                pcm_buf.extend(out.data.cast("B"))
-            while len(pcm_buf) >= _RECALL_AUDIO_BYTES_PER_OUTPUT_FRAME:
-                chunk = bytes(pcm_buf[:_RECALL_AUDIO_BYTES_PER_OUTPUT_FRAME])
-                del pcm_buf[:_RECALL_AUDIO_BYTES_PER_OUTPUT_FRAME]
-                out_frame = rtc.AudioFrame(
-                    data=chunk,
-                    sample_rate=_LIVEKIT_SAMPLE_RATE,
-                    num_channels=_LIVEKIT_NUM_CHANNELS,
-                    samples_per_channel=_LIVEKIT_SAMPLES_PER_CHANNEL,
-                )
-                try:
-                    await relay_source.capture_frame(out_frame)
-                except Exception as exc:
-                    logger.error(
-                        "Recall audio relay: capture_frame failed session=%s: %s",
-                        session_id, exc,
-                    )
-                    return
-                frame_count += 1
-                if frame_count % 250 == 0:
-                    logger.debug(
-                        "recall-audio-relay: pushed %d frames session=%s",
-                        frame_count, session_id,
-                    )
-    except WebSocketDisconnect:
-        logger.info(
-            "Recall audio relay disconnected — session=%s total_frames=%d",
-            session_id, frame_count,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Recall audio relay error — session=%s frames=%d: %s",
-            session_id, frame_count, exc,
-        )
 
 
 @app.get("/health")
