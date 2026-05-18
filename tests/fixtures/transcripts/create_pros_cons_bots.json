@@ -1,0 +1,17 @@
+{
+  "name": "create_pros_cons_bots",
+  "description": "User asks Jarvis to create a pros/cons page for bots with 4 specific bullets — verbatim items must be preserved.",
+  "transcript": [
+    {"participant": "Alice", "text": "We need to document our bot platform tradeoffs somewhere central.", "timestamp": 1.0},
+    {"participant": "Bob", "text": "Yeah. Create a pros and cons page for bots: A is fast, B is cheap, C is expensive, D is slow.", "timestamp": 5.0},
+    {"participant": "Alice", "text": "Good. Make sure all four points are in there.", "timestamp": 12.0}
+  ],
+  "live_pages": [],
+  "expected": {
+    "n_proposals": 1,
+    "change_types": {"create": 1},
+    "contains_verbatim": ["A is fast", "B is cheap", "C is expensive", "D is slow"],
+    "must_have_change_summary": true,
+    "must_have_page_title": "bots"
+  }
+}

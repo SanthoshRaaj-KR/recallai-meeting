@@ -1,0 +1,20 @@
+{
+  "name": "topic_mention_no_change",
+  "description": "Python mentioned in passing — no change request was made.",
+  "transcript": [
+    {"participant": "Mia", "text": "I'm doing some Python scripting work this afternoon, mostly for personal stuff.", "timestamp": 1.0},
+    {"participant": "Nate", "text": "Cool. Anyway, did everyone see the quarterly numbers?", "timestamp": 5.0}
+  ],
+  "live_pages": [
+    {
+      "page_id": "pg-dev-runbook",
+      "title": "Dev Runbook",
+      "html": "<h2>Setup</h2><p>We use Python 2 for the dev environment.</p>",
+      "available_headings": ["Setup"]
+    }
+  ],
+  "expected": {
+    "n_proposals": 0,
+    "change_types": {}
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "pros_cons_with_explicit_count",
+  "description": "User asks for a new page with exactly 3 risks: lock-in, latency, training data. Bullets must be exactly those three.",
+  "transcript": [
+    {"participant": "Quinn", "text": "We should track the model risks somewhere.", "timestamp": 1.0},
+    {"participant": "Rita", "text": "Create a page with exactly these 3 risks: lock-in, latency, training data.", "timestamp": 6.0}
+  ],
+  "live_pages": [],
+  "expected": {
+    "n_proposals": 1,
+    "change_types": {"create": 1},
+    "contains_verbatim": ["lock-in", "latency", "training data"],
+    "must_have_change_summary": true
+  }
+}

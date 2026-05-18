@@ -1,0 +1,23 @@
+{
+  "name": "edit_python_version",
+  "description": "Dev Runbook says 'We use Python 2'; user asks to change to Python 3 in the Setup section.",
+  "transcript": [
+    {"participant": "Carol", "text": "The Dev Runbook still says we use Python 2 for the dev environment.", "timestamp": 1.0},
+    {"participant": "Dan", "text": "Change Python 2 to Python 3 in the Setup section of the Dev Runbook.", "timestamp": 6.0}
+  ],
+  "live_pages": [
+    {
+      "page_id": "pg-dev-runbook",
+      "title": "Dev Runbook",
+      "html": "<h2>Setup</h2><p>We use Python 2 for the dev environment.</p><h2>Deployment</h2><p>Deploy via CI.</p>",
+      "available_headings": ["Setup", "Deployment"]
+    }
+  ],
+  "expected": {
+    "n_proposals": 1,
+    "change_types": {"edit": 1},
+    "contains_verbatim": ["Python 3"],
+    "must_have_change_summary": true,
+    "must_have_page_title": "dev runbook"
+  }
+}

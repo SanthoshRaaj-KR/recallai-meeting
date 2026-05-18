@@ -1,0 +1,23 @@
+{
+  "name": "delete_deprecated_endpoint",
+  "description": "API Runbook has a 'Deprecated Endpoints' section with /v1/checkout — user wants it removed.",
+  "transcript": [
+    {"participant": "Eve", "text": "We finally cut over off the v1 checkout endpoint last sprint.", "timestamp": 1.0},
+    {"participant": "Frank", "text": "Delete the deprecated /v1 endpoint section from the API Runbook.", "timestamp": 6.0}
+  ],
+  "live_pages": [
+    {
+      "page_id": "pg-api-runbook",
+      "title": "API Runbook",
+      "html": "<h2>Active Endpoints</h2><p>/v2/checkout</p><h2>Deprecated Endpoints</h2><p>/v1/checkout</p>",
+      "available_headings": ["Active Endpoints", "Deprecated Endpoints"]
+    }
+  ],
+  "expected": {
+    "n_proposals": 1,
+    "change_types": {"delete": 1},
+    "must_have_change_summary": true,
+    "must_have_page_title": "api runbook",
+    "must_have_section_heading_contains": "deprecated"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "revised_decision",
+  "description": "Discussion bounces between Q1/Q3 launch and ends back where it started — final state means no change.",
+  "transcript": [
+    {"participant": "Ivy", "text": "Let's move the launch to Q3.", "timestamp": 1.0},
+    {"participant": "Jack", "text": "Actually, Q1 is better.", "timestamp": 4.0},
+    {"participant": "Ivy", "text": "No wait, Q3 is fine, keep it.", "timestamp": 8.0}
+  ],
+  "live_pages": [
+    {
+      "page_id": "pg-launch",
+      "title": "Launch Plan",
+      "html": "<h2>Timeline</h2><p>Launch in Q3.</p>",
+      "available_headings": ["Timeline"]
+    }
+  ],
+  "expected": {
+    "n_proposals": 0,
+    "change_types": {}
+  }
+}
