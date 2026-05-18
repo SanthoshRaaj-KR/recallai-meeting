@@ -2331,6 +2331,156 @@ async def execute_review_changes_for_session(session_id: str, body: ExecuteChang
 
 
 # ---------------------------------------------------------------------------
+# POST /sessions/{session_id}/review/regenerate/{proposal_id}
+# Plan 08-03 / D-09: re-draft a single proposal against the CURRENT live page.
+# Used as a recovery path when Accept fails because the page changed between
+# proposal generation and click. Re-runs retrieval-equivalents + qualifier +
+# drafter against the present-day page HTML and overwrites the proposal in
+# place. Status resets to "pending" so the user can re-accept.
+# ---------------------------------------------------------------------------
+
+@router.post("/sessions/{session_id}/review/regenerate/{proposal_id}")
+async def regenerate_proposal(
+    session_id: str,
+    proposal_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Re-draft a single proposal against the CURRENT live Confluence page.
+
+    Use after Accept fails due to a stale-page (page edited since proposal was
+    generated). Re-runs the per-intent drafter against the current page HTML
+    and replaces the proposal in place. Status is reset to ``"pending"`` so the
+    user can re-accept.
+    """
+    user = _auth_user_from_header(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    proposal = await asyncio.to_thread(supabase_store.get_proposal_with_intent, proposal_id)
+    if not proposal or proposal.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Proposal not found.")
+
+    # Reconstruct a minimal ChangeIntent from the stored proposal so the drafter
+    # can re-run without a separate intents store.
+    from confluence_logic.agents.fact_extraction_agent import ChangeIntent  # noqa: PLC0415
+    intent = ChangeIntent(
+        instruction=proposal.get("rationale") or proposal.get("change_summary") or "",
+        subject=proposal.get("section_heading") or proposal.get("page_title") or "",
+        target_hint=proposal.get("page_title") or "",
+        old_value=proposal.get("before_content") or "",
+        new_value=proposal.get("after_content") or "",
+        action=(
+            "replace"
+            if proposal.get("change_type") == "edit"
+            else (proposal.get("change_type") or "replace")
+        ),
+        rationale=proposal.get("rationale") or "",
+        verbatim_content="",
+    )
+
+    page_id = proposal.get("page_id")
+    if not page_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot regenerate a proposal with no page_id (create-type proposals have no live target).",
+        )
+
+    # Fetch the live page so the drafter sees the present-day HTML
+    from confluence_logic.utils.html_parser import extract_headings  # noqa: PLC0415
+    try:
+        connector = _get_connector()
+        live_html = await asyncio.to_thread(connector.fetch_page_html, page_id)
+        try:
+            meta = await asyncio.to_thread(connector.get_page_metadata, page_id)
+        except Exception:
+            meta = {}
+        available_headings = extract_headings(live_html) or []
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not fetch live page: {exc}")
+
+    page_obj: Dict[str, Any] = {
+        "page_id": page_id,
+        "title": proposal.get("page_title") or meta.get("title") or "",
+        "page_title": proposal.get("page_title") or meta.get("title") or "",
+        "full_content": _html_to_text(live_html),
+        "available_headings": available_headings,
+        "section_content_map": {},  # drafter copes with empty map; could enrich later
+        "source": "regenerate",
+        "_live_html": live_html,
+    }
+
+    # Enrich + qualify + draft (same primitives as the main pipeline)
+    enriched = await _enrich_page_for_drafter(page_obj)
+    from confluence_logic.agents.page_qualifier import _run_page_qualifier  # noqa: PLC0415
+    qualification = await _run_page_qualifier(intent, enriched)
+    if not qualification.get("qualified"):
+        # The page no longer qualifies at all — fall back to append-mode so the
+        # user's documentation intent isn't lost.
+        updated_fields = {
+            "edit_mode": "append",
+            "before_content": None,
+            "status": "pending",
+            "verifier_note": (
+                "[REGENERATED-FALLBACK] Page no longer qualifies for the original intent; "
+                "this change will append to the section instead of replacing."
+            ),
+            "risk": "review",
+        }
+        updated_row = await asyncio.to_thread(
+            supabase_store.update_proposal_full, proposal_id, updated_fields
+        )
+        merged = {**proposal, **updated_fields, "regenerate_available": False}
+        if isinstance(updated_row, dict):
+            merged.update(updated_row)
+        return merged
+
+    from confluence_logic.agents.drafter_agent import _run_intent_drafter  # noqa: PLC0415
+    new_draft = await _run_intent_drafter(
+        intent, enriched, "", facts=None, summary_json={},
+    )
+
+    if not new_draft:
+        # Drafter said applies=false on the current page → final downgrade to append
+        updated_fields = {
+            "edit_mode": "append",
+            "before_content": None,
+            "status": "pending",
+            "verifier_note": (
+                "[REGENERATED-FALLBACK] Re-drafter could not produce a precise edit against the "
+                "current page; falling back to append."
+            ),
+            "risk": "review",
+        }
+        updated_row = await asyncio.to_thread(
+            supabase_store.update_proposal_full, proposal_id, updated_fields
+        )
+        merged = {**proposal, **updated_fields, "regenerate_available": False}
+        if isinstance(updated_row, dict):
+            merged.update(updated_row)
+        return merged
+
+    updated_fields = {
+        "change_type": new_draft.get("change_type") or proposal.get("change_type"),
+        "section_heading": new_draft.get("section_heading") or proposal.get("section_heading"),
+        "before_content": new_draft.get("before_content"),
+        "after_content": new_draft.get("after_content"),
+        "edit_mode": new_draft.get("edit_mode") or "replace",
+        "rationale": new_draft.get("rationale") or proposal.get("rationale"),
+        "change_summary": new_draft.get("change_summary") or proposal.get("change_summary"),
+        "status": "pending",
+        "verifier_note": "[REGENERATED] Drafter re-ran against the current page.",
+        "risk": new_draft.get("risk") or "safe",
+    }
+    updated_row = await asyncio.to_thread(
+        supabase_store.update_proposal_full, proposal_id, updated_fields
+    )
+    merged = {**proposal, **updated_fields, "regenerate_available": True}
+    if isinstance(updated_row, dict):
+        merged.update(updated_row)
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # GET /history
 # ---------------------------------------------------------------------------
 
@@ -2862,6 +3012,60 @@ async def _verify_and_persist(
             except Exception as exc:
                 logger.debug(
                     "Verifier before_content pre-validate failed for '%s': %s",
+                    verified.get("page_title"), exc,
+                )
+
+        # ── Plan 08-03 / Step 3 / D-11: heading pre-flight ─────────────────
+        # Mirror the heading-existence check that ``_direct_apply_change``
+        # already does at execution time (lines 1664+). If the section heading
+        # the drafter cited isn't on the live page anymore, downgrade
+        # ``edit_mode`` to ``create_section`` (with ``before_content=null``)
+        # NOW, before the user clicks Accept. This stops the Accept button
+        # from failing with "Section 'X' not found on page".
+        _heading = (verified.get("section_heading") or "").strip()
+        _change_type_for_heading = (verified.get("change_type") or "").lower()
+        _page_id_for_heading = verified.get("page_id")
+        if _heading and _change_type_for_heading == "edit" and _page_id_for_heading:
+            try:
+                from confluence_logic.utils.html_parser import extract_headings  # noqa: PLC0415
+                # Reuse the live_html fetched earlier in this function if
+                # available (set in the change_type-edit branch OR in the
+                # before_content pre-validate block). Otherwise refetch.
+                _heading_live_html: Optional[str] = None
+                if live_html:
+                    _heading_live_html = live_html
+                elif "_pv_live_html" in locals() and _pv_live_html:
+                    _heading_live_html = _pv_live_html
+                else:
+                    connector = _get_connector()
+                    _heading_live_html = await asyncio.to_thread(
+                        connector.fetch_page_html, _page_id_for_heading
+                    )
+                _available = extract_headings(_heading_live_html or "") or []
+                _h_lower = _heading.lower()
+                _has_heading = any(
+                    _h_lower in (h or "").lower() or (h or "").lower() in _h_lower
+                    for h in _available
+                )
+                if not _has_heading:
+                    logger.warning(
+                        "Verifier pre-flight: heading '%s' missing on '%s' — "
+                        "downgrading edit_mode to create_section",
+                        _heading, verified.get("page_title"),
+                    )
+                    verified["edit_mode"] = "create_section"
+                    verified["before_content"] = None
+                    _existing_note = (verified.get("verifier_note") or "").strip()
+                    _note = (
+                        f"[AUTO-DOWNGRADE] Section '{_heading}' is not on the live page; "
+                        f"a new section will be created instead of editing an existing one."
+                    )
+                    verified["verifier_note"] = (_note + " " + _existing_note).strip()
+                    if verified.get("risk") == "safe":
+                        verified["risk"] = "review"
+            except Exception as exc:
+                logger.debug(
+                    "Verifier heading pre-flight failed for '%s': %s",
                     verified.get("page_title"), exc,
                 )
 
