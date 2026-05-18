@@ -1150,8 +1150,6 @@ async def push_audio_to_livekit(
 def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None) -> dict:
     # Transcript stream path (UNCHANGED — D-03/D-04: Confluence pipeline depends on this).
     transcript_path = f"/recall-audio-stream/{session_id}" if session_id else "/recall-audio-stream"
-    # Audio stream path (Phase 4 / D-01 — new dedicated endpoint for audio_mixed_raw).
-    audio_path = f"{RECALL_AUDIO_STREAM_PATH}/{session_id}" if session_id else RECALL_AUDIO_STREAM_PATH
 
     if not WEBHOOK_URL:
         raise RuntimeError(
@@ -1166,7 +1164,6 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
         ws_base = WEBHOOK_URL
 
     transcript_ws_url = ws_base + transcript_path
-    audio_ws_url = ws_base + audio_path
 
     # D-02 / D-03 / D-14: Recall bot loads bot.html via output_media kind=webpage.
     # D-16: pass LiveKit url, subscriber token, and room name as URL query params.
@@ -1177,6 +1174,7 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
     # problem where bot_id isn't available when this function runs.
     room_name = session_id or _DEFAULT_SESSION_ID
     subscriber_token = _make_subscriber_token(room_name)
+    browser_pub_token = _make_browser_publisher_token(room_name)  # Phase 6: browser publisher token
     # WEBHOOK_URL must be HTTPS (Recall requirement — Pitfall 5).
     if not WEBHOOK_URL.startswith("https://"):
         raise RuntimeError(
@@ -1186,6 +1184,7 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
         f"{WEBHOOK_URL.rstrip('/')}/bot-page"
         f"?url={LIVEKIT_URL}"
         f"&token={subscriber_token}"
+        f"&pub_token={browser_pub_token}"   # Phase 6: browser publisher token
         f"&room={room_name}"
     )
 
@@ -1196,10 +1195,8 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
             "session_id": session_id or _DEFAULT_SESSION_ID,
         },
         "recording_config": {
-            # Phase 4 / D-01: enable mixed audio streaming — Recall publishes
-            # base64 S16LE 16 kHz mono PCM as audio_mixed_raw.data events.
-            "audio_mixed_raw": {},
             # D-03 / D-04: transcript provider stays for Confluence pipeline.
+            # Phase 6: audio_mixed_raw removed — browser publishes directly via getUserMedia.
             "transcript": {
                 "provider": build_transcript_provider_config()
             },
@@ -1210,13 +1207,7 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
                     "url": transcript_ws_url,
                     "events": ["transcript.data"],
                 },
-                # Audio endpoint (NEW — Phase 4 / D-01 — feeds STT relay).
-                # Separate endpoint per Pitfall 3 to avoid mixing JSON-transcript and audio handlers.
-                {
-                    "type": "websocket",
-                    "url": audio_ws_url,
-                    "events": ["audio_mixed_raw.data"],
-                },
+                # audio_mixed_raw endpoint REMOVED (Phase 6) — browser publishes directly via getUserMedia.
             ],
         },
         "output_media": {
@@ -1226,7 +1217,6 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
             },
         },
     }
-
 
 def create_bot(meeting_url: str, session_id: Optional[str] = None) -> Optional[str]:
     payload = build_create_bot_payload(meeting_url, session_id=session_id)
