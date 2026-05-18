@@ -90,6 +90,7 @@ JARVIS_LISTENING_TIMEOUT = float(os.getenv("JARVIS_LISTENING_TIMEOUT", "10.0"))
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "").strip()
 LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "").strip()
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "").strip()
+JARVIS_AGENT_WORKER_NAME = os.getenv("JARVIS_AGENT_WORKER_NAME", "jarvis-agent").strip()
 
 _LIVEKIT_SAMPLE_RATE = 48000          # D-10: 48 kHz PCM
 _LIVEKIT_NUM_CHANNELS = 1             # D-10: mono
@@ -946,6 +947,33 @@ async def _create_livekit_room(session_id: str, bot_id: str) -> tuple:
     state["livekit_source"] = source
 
     logger.info("LiveKit room created — session=%s bot=%s room_name=%s", session_id, bot_id, session_id)
+
+    # Dispatch the registered agent worker to this room.
+    # Without this call, the worker registers with LiveKit but never receives a job
+    # → never joins the room → never subscribes to audio → Jarvis is completely deaf.
+    _t0_dispatch = time.perf_counter()
+    try:
+        async with livekit_api.LiveKitAPI(
+            url=LIVEKIT_URL,
+            api_key=LIVEKIT_API_KEY,
+            api_secret=LIVEKIT_API_SECRET,
+        ) as lk:
+            dispatch = await lk.agent_dispatch.create_dispatch(
+                livekit_api.CreateAgentDispatchRequest(
+                    agent_name=JARVIS_AGENT_WORKER_NAME,
+                    room=session_id,
+                    metadata=json.dumps({"session_id": session_id}),
+                )
+            )
+        logger.info(
+            "✅ Agent dispatched — session=%s  agent=%s  dispatch_sid=%s  Δ=%.0fms",
+            session_id, JARVIS_AGENT_WORKER_NAME, dispatch.sid,
+            (time.perf_counter() - _t0_dispatch) * 1000,
+        )
+    except Exception as exc:
+        logger.error("Agent dispatch failed for session %s: %s", session_id, exc)
+        raise
+
     return room, source
 
 

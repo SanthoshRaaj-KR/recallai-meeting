@@ -74,3 +74,46 @@ def test_agent_worker_subscribes_to_recall_browser(agent_worker_source: str) -> 
         "agent_worker.py must reference recall-browser- identity (Phase 6 / R6-05)"
     assert "recall-relay-" not in agent_worker_source, \
         "recall-relay- prefix must be fully removed from agent_worker.py"
+
+
+def test_wake_word_gate_present(agent_worker_source: str) -> None:
+    """Wake-word gate: llm_node must check _extract_query before dispatching to LLM."""
+    assert "def llm_node(" in agent_worker_source, \
+        "JarvisAgent must override llm_node() to gate on wake word"
+    assert "_extract_query(" in agent_worker_source, \
+        "llm_node must call _extract_query() to detect wake word"
+    assert "_WAKE_PATTERN" in agent_worker_source, \
+        "_WAKE_PATTERN regex must be defined locally in agent_worker.py"
+
+
+def test_ack_audio_playback_present(agent_worker_source: str) -> None:
+    """Ack audio: tts_node prepends random ack before LLM TTS; bare wake uses say().
+
+    Design: _ack_q (asyncio.Queue) carries a single True from on_user_turn_completed
+    Case 3 (wake word confirmed) to tts_node. This avoids the preemptive_generation
+    race where llm_node fires speculatively before the wake gate runs.
+    """
+    assert "on_user_turn_completed" in agent_worker_source, \
+        "JarvisAgent must override on_user_turn_completed (bare wake handler)"
+    assert "get_random_query_ack_audio" in agent_worker_source, \
+        "agent_worker must use get_random_query_ack_audio() for ack selection in tts_node"
+    assert "tts_node" in agent_worker_source, \
+        "JarvisAgent must override tts_node to prepend ack before LLM TTS"
+    assert "_ack_q" in agent_worker_source, \
+        "JarvisAgent must use asyncio.Queue _ack_q to signal ack between on_user_turn_completed and tts_node"
+    assert "put_nowait(True)" in agent_worker_source, \
+        "on_user_turn_completed Case 3 must put True into _ack_q (after wake word confirmed)"
+    assert "get_nowait()" in agent_worker_source, \
+        "tts_node must call _ack_q.get_nowait() to decide whether to play ack"
+
+
+def test_extract_query_logic() -> None:
+    """Unit test for _extract_query wake-word detection logic."""
+    from confluence_logic.agent_worker import _extract_query
+
+    assert _extract_query("hey jarvis what time is it") == "what time is it"
+    assert _extract_query("Hey Jarvis, summarize the meeting") == "summarize the meeting"
+    assert _extract_query("ok jarvis") == ""          # bare wake, empty query
+    assert _extract_query("hi jarv, stop") == "stop"
+    assert _extract_query("the meeting is running long") is None   # no wake word
+    assert _extract_query("") is None

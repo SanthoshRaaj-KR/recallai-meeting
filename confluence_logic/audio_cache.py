@@ -134,6 +134,52 @@ def get_greeting_audio() -> Optional[Tuple[str, bytes]]:
     return ("greeting", data)
 
 
+def get_random_quick_ack_audio() -> Optional[Tuple[str, bytes]]:
+    """Return a random quick acknowledgement clip, excluding gap fillers and the greeting.
+
+    Selects randomly from: yes, busy, give_me_a_sec, right_away, working_on_it,
+    let_me_check, give_me_a_moment, let_me_handle_that (and any other non-filler clips).
+    Falls back to get_wake_ack_audio() if the cache has no qualifying files.
+    Lazily loads the cache on first call.
+    """
+    global _cache_loaded
+    if not _cache_loaded:
+        load_audio_cache()
+
+    ack_keys = [k for k in _cache if not k.startswith("gap_filler_") and k != "greeting"]
+    if not ack_keys:
+        return get_wake_ack_audio()
+
+    key = random.choice(ack_keys)
+    return (key, _cache[key])
+
+
+_QUERY_ACK_EXCLUDE = {"busy", "yes", "greeting"}
+
+
+def get_random_query_ack_audio() -> Optional[Tuple[str, bytes]]:
+    """Return a random query-acknowledgement clip, suitable for 'I heard you, working on it.'
+
+    Excludes: busy ('already on it' — confusing when about to give a full answer),
+              yes ('Yes?' — that's the wake ack), greeting.
+    Falls back to get_random_quick_ack_audio() if no qualifying clips exist.
+    Lazily loads the cache on first call.
+    """
+    global _cache_loaded
+    if not _cache_loaded:
+        load_audio_cache()
+
+    ack_keys = [
+        k for k in _cache
+        if not k.startswith("gap_filler_") and k not in _QUERY_ACK_EXCLUDE
+    ]
+    if not ack_keys:
+        return get_random_quick_ack_audio()
+
+    key = random.choice(ack_keys)
+    return (key, _cache[key])
+
+
 def get_cache_size() -> int:
     """Return the number of cached audio files."""
     if not _cache_loaded:

@@ -7,131 +7,193 @@
 <body>
   <div id="status">Connecting...</div>
   <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.18.9/dist/livekit-client.umd.min.js"></script>
-  <script>
-    (function () {
-      const params = new URLSearchParams(window.location.search);
-      const lkUrl = params.get('url');
-      const token = params.get('token');
-      const roomName = params.get('room');
-      const statusEl = document.getElementById('status');
 
-      function setStatus(msg) {
-        statusEl.textContent = msg;
-        console.log('[bot.html]', msg);
-      }
-
-      if (!lkUrl || !token) {
-        setStatus('Missing url or token query param');
-        return;
-      }
-
-      const room = new LivekitClient.Room({
-        adaptiveStream: false,
-        dynacast: false,
-      });
-
-      // Track sid -> <audio> element map so we can clean up on unsubscribe.
-      const audioElements = new Map();
-
-      room.on(LivekitClient.RoomEvent.Connected, () => {
-        setStatus('Connected to room ' + (roomName || '<unknown>'));
-        // Defensive: ensure audio playback is allowed (Recall headless Chrome usually permits).
-        if (typeof room.startAudio === 'function') {
-          room.startAudio().catch((e) => console.warn('[bot.html] startAudio() rejected:', e));
-        }
-      });
-
-      room.on(LivekitClient.RoomEvent.Disconnected, (reason) => {
-        setStatus('Disconnected: ' + reason);
-      });
-
-      room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        console.log('[bot.html] TrackSubscribed kind=', track.kind, 'sid=', track.sid);
-        if (track.kind === LivekitClient.Track.Kind.Audio) {
-          // Remove any stale element for this sid before attaching a fresh one.
-          if (audioElements.has(track.sid)) {
-            const stale = audioElements.get(track.sid);
-            stale.pause();
-            stale.remove();
-            audioElements.delete(track.sid);
-          }
-          const audioEl = track.attach();
-          audioEl.volume = 1.0;
-          audioEl.autoplay = true;
-          document.body.appendChild(audioEl);
-          audioElements.set(track.sid, audioEl);
-          const playPromise = audioEl.play();
-          if (playPromise && typeof playPromise.catch === 'function') {
-            playPromise.catch((e) => console.warn('[bot.html] audioEl.play() blocked:', e));
-          }
-        }
-      });
-
-      room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
-        console.log('[bot.html] TrackUnsubscribed kind=', track.kind, 'sid=', track.sid);
-        if (track.kind === LivekitClient.Track.Kind.Audio) {
-          const audioEl = audioElements.get(track.sid);
-          if (audioEl) {
-            audioEl.pause();
-            audioEl.remove();
-            audioElements.delete(track.sid);
-          }
-        }
-      });
-
-      room.connect(lkUrl, token)
-        .then(() => setStatus('room.connect resolved'))
-        .catch((e) => {
-          console.error('[bot.html] room.connect failed:', e);
-          setStatus('Connect failed: ' + e.message);
-        });
-    })();
-  </script>
-
-  <!-- Phase 6: Publisher IIFE — meeting audio capture -> LiveKit publish -->
-  <!-- Recall headless Chrome auto-grants getUserMedia microphone permission. -->
-  <!-- The "microphone" source is the mixed audio from all meeting participants. -->
+  <!--
+    ROOM 1 (subscriber) — "token" identity: "recall-listener-{session_id}" (or anything)
+    Purpose: plays back Jarvis TTS audio into the meeting via the Recall bot's speakers.
+    Filters: plays audio from any participant that is NOT "recall-browser-{session_id}"
+             (i.e. plays the agent's TTS audio, not the meeting audio echo).
+  -->
   <script>
   (function () {
     'use strict';
 
-    var params = new URLSearchParams(window.location.search);
-    var lkUrl = params.get('url');
-    var pubToken = params.get('pub_token');
+    var params    = new URLSearchParams(window.location.search);
+    var lkUrl     = params.get('url');
+    var token     = params.get('token');
+    var roomName  = params.get('room');
+    var statusEl  = document.getElementById('status');
 
-    if (!lkUrl || !pubToken) {
-      console.warn('[bot.html][publisher] Missing pub_token — meeting audio will NOT be published to LiveKit');
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+      console.log('[bot.html][subscriber]', msg);
+    }
+
+    if (!lkUrl || !token) {
+      setStatus('ERROR: Missing url or token param');
       return;
     }
 
-    // Second Room instance: publisher only.
-    // adaptiveStream/dynacast disabled to minimise background processing (Pitfall 3).
+    var room = new LivekitClient.Room({
+      adaptiveStream: false,
+      dynacast: false,
+    });
+
+    // Track sid → <audio> element map for clean unsubscribe handling.
+    var audioElements = new Map();
+
+    room.on(LivekitClient.RoomEvent.Connected, function () {
+      setStatus('Subscriber connected to room: ' + (roomName || '<unknown>'));
+      // Recall headless Chrome usually auto-permits audio playback,
+      // but calling startAudio() is a defensive safety net.
+      if (typeof room.startAudio === 'function') {
+        room.startAudio().catch(function (e) {
+          console.warn('[bot.html][subscriber] startAudio() rejected:', e);
+        });
+      }
+    });
+
+    room.on(LivekitClient.RoomEvent.Disconnected, function (reason) {
+      setStatus('Subscriber disconnected: ' + reason);
+    });
+
+    room.on(LivekitClient.RoomEvent.TrackSubscribed, function (track, pub, participant) {
+      console.log(
+        '[bot.html][subscriber] TrackSubscribed kind=' + track.kind +
+        ' sid=' + track.sid + ' from=' + participant.identity
+      );
+
+      if (track.kind !== LivekitClient.Track.Kind.Audio) return;
+
+      // PLAYBACK FILTER:
+      // Play audio from any participant that is NOT the Recall publisher
+      // (recall-browser-*). That participant is the Jarvis agent's TTS output.
+      //
+      // OLD CODE was: startsWith('jarvis-publisher-')
+      // That was WRONG — the agent publishes under its own LiveKit-assigned identity
+      // (set by the job dispatch / JARVIS_AGENT_WORKER_NAME), NOT "jarvis-publisher-*".
+      // The fix: exclude recall-browser-* (the publisher) and play everything else.
+      if (participant.identity.startsWith('recall-browser-')) {
+        console.log('[bot.html][subscriber] Skipping recall-browser (meeting audio echo): ' + participant.identity);
+        return;
+      }
+
+      // Clean up any stale element for this sid
+      if (audioElements.has(track.sid)) {
+        var stale = audioElements.get(track.sid);
+        stale.pause();
+        stale.remove();
+        audioElements.delete(track.sid);
+      }
+
+      var audioEl = track.attach();
+      audioEl.volume = 1.0;
+      audioEl.autoplay = true;
+      document.body.appendChild(audioEl);
+      audioElements.set(track.sid, audioEl);
+
+      audioEl.play().catch(function (e) {
+        console.warn('[bot.html][subscriber] audioEl.play() blocked:', e);
+      });
+
+      console.log('[bot.html][subscriber] Playing audio from: ' + participant.identity);
+    });
+
+    room.on(LivekitClient.RoomEvent.TrackUnsubscribed, function (track, pub, participant) {
+      if (track.kind !== LivekitClient.Track.Kind.Audio) return;
+      if (participant.identity.startsWith('recall-browser-')) return;
+
+      var audioEl = audioElements.get(track.sid);
+      if (audioEl) {
+        audioEl.pause();
+        audioEl.remove();
+        audioElements.delete(track.sid);
+      }
+    });
+
+    room.connect(lkUrl, token)
+      .then(function () { setStatus('Subscriber room.connect resolved'); })
+      .catch(function (e) {
+        console.error('[bot.html][subscriber] room.connect failed:', e);
+        setStatus('Connect failed: ' + e.message);
+      });
+
+  })();
+  </script>
+
+  <!--
+    ROOM 2 (publisher) — "pub_token" identity: MUST BE "recall-browser-{session_id}"
+    Purpose: captures meeting audio via getUserMedia() and publishes it to LiveKit.
+    The AgentSession in agent_worker.py subscribes to THIS participant's audio for STT.
+
+    CRITICAL IDENTITY CONTRACT:
+      The pub_token your backend mints MUST grant identity = "recall-browser-{session_id}".
+      This MUST match the participant_identity in agent_worker.py's RoomOptions.
+      If it doesn't match, the AgentSession STT never subscribes to this audio track
+      and Jarvis is completely deaf — no transcripts, no wake word, no response.
+
+    Recall headless Chrome auto-grants getUserMedia microphone permission.
+    The "microphone" source inside the Recall bot IS the mixed meeting audio
+    (all participants combined) — NOT just your laptop's microphone.
+  -->
+  <script>
+  (function () {
+    'use strict';
+
+    var params   = new URLSearchParams(window.location.search);
+    var lkUrl    = params.get('url');
+    var pubToken = params.get('pub_token');
+
+    if (!lkUrl || !pubToken) {
+      console.warn('[bot.html][publisher] Missing pub_token — meeting audio will NOT reach Jarvis');
+      return;
+    }
+
     var pubRoom = new LivekitClient.Room({
       adaptiveStream: false,
       dynacast: false,
     });
 
     pubRoom.on(LivekitClient.RoomEvent.Connected, function () {
-      console.log('[bot.html][publisher] Connected, identity:', pubRoom.localParticipant.identity);
-      // getUserMedia called INSIDE Connected handler — room must be up before publishTrack (Pitfall 2).
-      navigator.mediaDevices.getUserMedia({ audio: true })
-        .then(function (mediaStream) {
-          var meetingAudioTrack = mediaStream.getAudioTracks()[0];
-          if (!meetingAudioTrack) {
-            console.error('[bot.html][publisher] getUserMedia returned no audio tracks');
-            return;
-          }
-          return pubRoom.localParticipant.publishTrack(meetingAudioTrack, {
-            name: 'recall-meeting-audio',
-            source: LivekitClient.Track.Source.Microphone,
-          });
-        })
-        .then(function () {
-          console.log('[bot.html][publisher] Meeting audio published to LiveKit room (recall-meeting-audio)');
-        })
-        .catch(function (e) {
-          console.error('[bot.html][publisher] getUserMedia or publishTrack failed:', e);
+      var identity = pubRoom.localParticipant.identity;
+      console.log('[bot.html][publisher] Connected as identity: ' + identity);
+
+      // SANITY CHECK: warn loudly if identity doesn't match what agent_worker.py expects
+      if (!identity.startsWith('recall-browser-')) {
+        console.error(
+          '[bot.html][publisher] ⚠️  IDENTITY MISMATCH! ' +
+          'pub_token grants identity="' + identity + '" ' +
+          'but agent_worker.py expects identity starting with "recall-browser-". ' +
+          'Jarvis will be deaf. Fix your token minting backend.'
+        );
+      }
+
+      // getUserMedia is called INSIDE the Connected handler.
+      // The room must be connected before publishTrack() is called.
+      navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: false,  // AGC OFF: preserves natural volume for STT accuracy
+        }
+      })
+      .then(function (mediaStream) {
+        var meetingAudioTrack = mediaStream.getAudioTracks()[0];
+        if (!meetingAudioTrack) {
+          console.error('[bot.html][publisher] getUserMedia returned no audio tracks');
+          return;
+        }
+        return pubRoom.localParticipant.publishTrack(meetingAudioTrack, {
+          name: 'recall-meeting-audio',
+          source: LivekitClient.Track.Source.Microphone,
         });
+      })
+      .then(function () {
+        console.log('[bot.html][publisher] ✅ Meeting audio published to LiveKit as: ' + pubRoom.localParticipant.identity);
+      })
+      .catch(function (e) {
+        console.error('[bot.html][publisher] getUserMedia or publishTrack failed:', e);
+      });
     });
 
     pubRoom.on(LivekitClient.RoomEvent.Disconnected, function (reason) {
@@ -142,7 +204,9 @@
       .catch(function (e) {
         console.error('[bot.html][publisher] connect failed:', e);
       });
+
   })();
   </script>
+
 </body>
 </html>

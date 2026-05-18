@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Dict, List
 
 from livekit.agents import RunContext
@@ -94,7 +95,10 @@ async def summarize_meeting_tool(context: RunContext, detail_level: str = "brief
     """
     sid = _session_id_from_context(context)
     transcript = get_transcript_log_for_session(sid)
-    return await summarize_meeting(transcript, detail_level=detail_level)
+    t0 = time.perf_counter()
+    result = await summarize_meeting(transcript, detail_level=detail_level)
+    logger.info("⏱️  summarize_meeting_tool: %.0fms (%d transcript entries)", (time.perf_counter() - t0) * 1000, len(transcript))
+    return result
 
 
 @function_tool
@@ -106,7 +110,10 @@ async def generate_opinion_tool(context: RunContext, query: str = "") -> str:
     """
     sid = _session_id_from_context(context)
     transcript = get_transcript_log_for_session(sid)
-    return await generate_opinion(transcript, query=query)
+    t0 = time.perf_counter()
+    result = await generate_opinion(transcript, query=query)
+    logger.info("⏱️  generate_opinion_tool: %.0fms (query=%.40r)", (time.perf_counter() - t0) * 1000, query)
+    return result
 
 
 @function_tool
@@ -114,7 +121,10 @@ async def extract_action_items_tool(context: RunContext) -> str:
     """Extract action items, commitments, and next steps from the meeting transcript."""
     sid = _session_id_from_context(context)
     transcript = get_transcript_log_for_session(sid)
-    return await extract_action_items(transcript)
+    t0 = time.perf_counter()
+    result = await extract_action_items(transcript)
+    logger.info("⏱️  extract_action_items_tool: %.0fms (%d transcript entries)", (time.perf_counter() - t0) * 1000, len(transcript))
+    return result
 
 
 @function_tool
@@ -126,7 +136,10 @@ async def summarize_speaker_tool(context: RunContext, speaker_name: str) -> str:
     """
     sid = _session_id_from_context(context)
     transcript = get_transcript_log_for_session(sid)
-    return await summarize_speaker(transcript, speaker_name=speaker_name)
+    t0 = time.perf_counter()
+    result = await summarize_speaker(transcript, speaker_name=speaker_name)
+    logger.info("⏱️  summarize_speaker_tool: %.0fms (speaker=%.30r)", (time.perf_counter() - t0) * 1000, speaker_name)
+    return result
 
 
 @function_tool
@@ -141,7 +154,8 @@ async def answer_general_question_tool(
         question: The user's question text.
         force_web_search: True to force Tavily web search (use for current events / live data).
     """
-    return await answer_general_question(
+    t0 = time.perf_counter()
+    result = await answer_general_question(
         question,
         conversation_history="",
         graph_context="",
@@ -149,6 +163,8 @@ async def answer_general_question_tool(
         multiturn_reference=False,
         force_web_search=force_web_search,
     )
+    logger.info("⏱️  answer_general_question_tool: %.0fms (web=%s, q=%.50r)", (time.perf_counter() - t0) * 1000, force_web_search, question)
+    return result
 
 
 # Export — JarvisAgent in agent_worker.py will pass this list to Agent(tools=JARVIS_TOOLS, ...)
