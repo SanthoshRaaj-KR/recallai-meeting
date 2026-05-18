@@ -1226,20 +1226,20 @@ def test_build_create_bot_payload_retains_websocket_endpoint():
          patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
          patch.object(ja, "LIVEKIT_API_KEY", "key"), \
          patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
-         patch.object(ja, "_make_subscriber_token", return_value="JWT"):
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"), \
+         patch.object(ja, "_make_browser_publisher_token", return_value="PUB_JWT", create=True):
         payload = ja.build_create_bot_payload(
             "https://meet.google.com/abc-defg-hij", session_id="sess-1"
         )
 
     endpoints = payload["recording_config"]["realtime_endpoints"]
-    # Phase 4: now 2 endpoints — transcript (index 0) and audio_mixed_raw (index 1)
-    assert len(endpoints) == 2
+    # Phase 6: only transcript endpoint — audio_mixed_raw WebSocket removed
+    assert len(endpoints) == 1
     assert endpoints[0]["type"] == "websocket"
     assert endpoints[0]["url"].startswith("wss://")
     assert endpoints[0]["events"] == ["transcript.data"]
-    assert endpoints[1]["type"] == "websocket"
-    assert endpoints[1]["url"].endswith("/recall-audio-mixed/sess-1")
-    assert endpoints[1]["events"] == ["audio_mixed_raw.data"]
+    assert not any(e.get("events") == ["audio_mixed_raw.data"] for e in endpoints), \
+        "audio_mixed_raw endpoint must be absent (Phase 6)"
 
 
 def test_build_create_bot_payload_rejects_non_https_webhook():
@@ -1563,13 +1563,6 @@ def test_start_bot_for_session_tears_down_on_livekit_failure():
 # ============================================================================
 
 
-def test_recall_audio_relay_endpoint_accepts_connection():
-    paths = {getattr(r, "path", None) for r in ja.app.routes}
-    assert "/recall-audio-mixed/{session_id}" in paths, (
-        f"Expected /recall-audio-mixed/{{session_id}} WebSocket route to be registered; got {paths}"
-    )
-
-
 def test_audio_resampler_16k_to_48k():
     import livekit.rtc as rtc
     try:
@@ -1634,7 +1627,18 @@ def test_transcript_websocket_no_longer_dispatches_voice():
     assert "graph_rag.ingest_transcript_entry" in src, "graph_rag ingestion must remain (D-03)"
 
 
-def test_build_create_bot_payload_includes_audio_mixed_raw():
+
+# ============================================================================
+# PHASE 6 — Recall Browser Publisher / getUserMedia → LiveKit — RED stubs (Wave 0)
+# These tests intentionally fail until Waves 1-3 land. Do NOT skip or xfail.
+# ============================================================================
+
+
+def test_build_create_bot_payload_no_audio_mixed_raw():
+    """R6-01: build_create_bot_payload must NOT include audio_mixed_raw in recording_config.
+
+    RED until Wave 1 removes audio_mixed_raw from the payload.
+    """
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
          patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \
          patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
@@ -1642,104 +1646,120 @@ def test_build_create_bot_payload_includes_audio_mixed_raw():
          patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
          patch.object(ja, "LIVEKIT_API_KEY", "key"), \
          patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
-         patch.object(ja, "_make_subscriber_token", return_value="JWT"):
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"), \
+         patch.object(ja, "_make_browser_publisher_token", return_value="PUB_JWT", create=True):
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij", session_id="sess-1")
 
     rc = payload["recording_config"]
-    assert rc.get("audio_mixed_raw") == {}, "audio_mixed_raw must be enabled (D-01)"
-    endpoints = rc["realtime_endpoints"]
-    audio_eps = [e for e in endpoints if e.get("events") == ["audio_mixed_raw.data"]]
-    transcript_eps = [e for e in endpoints if e.get("events") == ["transcript.data"]]
-    assert len(audio_eps) == 1, f"Expected exactly one audio realtime endpoint; got {endpoints}"
-    assert audio_eps[0]["url"].endswith("/recall-audio-mixed/sess-1"), audio_eps[0]["url"]
-    assert len(transcript_eps) == 1, "Transcript endpoint must be preserved (D-03/D-04)"
+    assert "audio_mixed_raw" not in rc, "audio_mixed_raw must be absent (Phase 6 / R6-01)"
 
 
-def test_create_recall_relay_room_uses_distinct_identity():
-    """D-01 / Pitfall 1: relay participant identity must be recall-relay-{session_id}
-    to avoid feedback loop with jarvis-publisher-{session_id}."""
+def test_build_create_bot_payload_single_endpoint():
+    """R6-02: build_create_bot_payload must have exactly 1 realtime_endpoint (transcript only).
+
+    RED until Wave 1 removes the audio_mixed_raw WebSocket endpoint.
+    """
+    with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
+         patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \
+         patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
+         patch.object(ja, "LANGUAGE_CODE", "en"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"), \
+         patch.object(ja, "_make_browser_publisher_token", return_value="PUB_JWT", create=True):
+        payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij", session_id="sess-1")
+
+    endpoints = payload["recording_config"]["realtime_endpoints"]
+    assert len(endpoints) == 1, f"Expected exactly 1 endpoint after Phase 6; got {endpoints}"
+    assert endpoints[0]["events"] == ["transcript.data"], "Only transcript endpoint must remain (D-03)"
+
+
+def test_build_create_bot_payload_includes_pub_token():
+    """R6-03: build_create_bot_payload bot page URL must contain pub_token query param.
+
+    RED until Wave 1 adds _make_browser_publisher_token() call + pub_token to bot page URL.
+    """
+    with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja, "_make_subscriber_token", return_value="SUB_JWT"), \
+         patch.object(ja, "_make_browser_publisher_token", return_value="PUB_JWT", create=True):
+        payload = ja.build_create_bot_payload("https://meet.google.com/abc", session_id="sess-p")
+
+    url = payload["output_media"]["camera"]["config"]["url"]
+    assert "pub_token=PUB_JWT" in url, (
+        f"Bot page URL must include pub_token=PUB_JWT (Phase 6 / R6-03); got: {url}"
+    )
+
+
+def test_make_browser_publisher_token_identity():
+    """R6-04: _make_browser_publisher_token must produce identity recall-browser-{session_id}.
+
+    RED because _make_browser_publisher_token does not exist yet (Wave 1).
+    Uses same FakeToken/FakeGrants pattern as the deleted relay room test.
+    """
     captured = {}
 
     class _FakeGrants:
-        def __init__(self, **kwargs): captured["grants"] = kwargs
+        def __init__(self, **kwargs):
+            captured["grants"] = kwargs
 
     class _FakeToken:
-        def __init__(self, **kwargs): self._k = kwargs; captured["token_init"] = kwargs
-        def with_identity(self, identity): captured["identity"] = identity; return self
-        def with_name(self, n): captured["name"] = n; return self
-        def with_grants(self, g): captured["grants_obj"] = g; return self
-        def with_ttl(self, t): captured["ttl"] = t; return self
-        def to_jwt(self): return "FAKE_JWT"
+        def __init__(self, **kwargs):
+            self._k = kwargs
+            captured["token_init"] = kwargs
 
-    class _FakeRoom:
-        def __init__(self): self.local_participant = AsyncMock()
-        def on(self, *a, **k):
-            def _decorator(fn): return fn
-            return _decorator
-        async def connect(self, url, token): captured["connect"] = (url, token)
-        async def disconnect(self): pass
+        def with_identity(self, identity):
+            captured["identity"] = identity
+            return self
 
-    async def run_test():
-        with patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
-             patch.object(ja, "LIVEKIT_API_KEY", "key"), \
-             patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
-             patch.object(ja.livekit_api, "AccessToken", _FakeToken), \
-             patch.object(ja.livekit_api, "VideoGrants", _FakeGrants), \
-             patch.object(ja.rtc, "Room", _FakeRoom), \
-             patch.object(ja.rtc, "AudioSource", Mock(return_value=Mock())), \
-             patch.object(ja.rtc, "LocalAudioTrack", Mock(create_audio_track=Mock(return_value=Mock()))), \
-             patch.object(ja.rtc, "TrackPublishOptions", Mock()), \
-             patch.object(ja.rtc, "TrackSource", Mock(SOURCE_MICROPHONE="MIC")):
-            # Ensure clean state
-            ja._meeting_sessions.pop("sess-xyz", None)
-            room, source = await ja._create_recall_relay_room("sess-xyz")
-            return room, source
+        def with_name(self, n):
+            captured["name"] = n
+            return self
 
-    room, source = asyncio.run(run_test())
-    assert captured.get("identity") == "recall-relay-sess-xyz"
-    assert captured["grants"]["room"] == "sess-xyz"
+        def with_grants(self, g):
+            captured["grants_obj"] = g
+            return self
+
+        def with_ttl(self, t):
+            captured["ttl"] = t
+            return self
+
+        def to_jwt(self):
+            return "FAKE_JWT"
+
+    with patch.object(ja, "LIVEKIT_API_KEY", "key"), \
+         patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
+         patch.object(ja.livekit_api, "AccessToken", _FakeToken), \
+         patch.object(ja.livekit_api, "VideoGrants", _FakeGrants):
+        ja._make_browser_publisher_token("sess-abc")
+
+    assert captured.get("identity") == "recall-browser-sess-abc"
     assert captured["grants"]["can_publish"] is True
     assert captured["grants"]["can_subscribe"] is False
-    assert ja._meeting_sessions["sess-xyz"]["recall_relay_room"] is room
-    assert ja._meeting_sessions["sess-xyz"]["recall_relay_source"] is source
+    assert captured["grants"]["room"] == "sess-abc"
 
 
-def test_recall_audio_mixed_stream_resamples_and_pushes_frames():
-    """D-01: audio_mixed_raw.data -> resample -> capture_frame on the relay source."""
-    import base64 as _b64
-    from fastapi.testclient import TestClient
+def test_relay_room_function_removed():
+    """R6-06: _create_recall_relay_room must be removed from jarvis_agentic (Phase 6).
 
-    captured_frames = []
+    RED because the function still exists until Wave 3.
+    """
+    assert not hasattr(ja, "_create_recall_relay_room"), \
+        "_create_recall_relay_room must be removed (Phase 6)"
 
-    async def _fake_capture(frame):
-        captured_frames.append(frame)
 
-    fake_source = Mock()
-    fake_source.capture_frame = AsyncMock(side_effect=_fake_capture)
-    fake_room = Mock()
+def test_bot_html_includes_publisher_code():
+    """R6-07: bot.html must contain pub_token, getUserMedia, and recall-meeting-audio.
 
-    async def _fake_create_relay(session_id):
-        ja._meeting_sessions.setdefault(session_id, ja._fresh_meeting_state(session_id))
-        ja._meeting_sessions[session_id]["recall_relay_room"] = fake_room
-        ja._meeting_sessions[session_id]["recall_relay_source"] = fake_source
-        return fake_room, fake_source
-
-    # 100 ms of silence at 16 kHz mono = 1600 samples x 2 bytes = 3200 bytes
-    silence_b64 = _b64.b64encode(bytes(3200)).decode("ascii")
-
-    with patch.object(ja, "_create_recall_relay_room", side_effect=_fake_create_relay):
-        client = TestClient(ja.app)
-        with client.websocket_connect("/recall-audio-mixed/test-sess") as ws:
-            ws.send_text(json.dumps({
-                "event": "audio_mixed_raw.data",
-                "data": {"buffer": silence_b64, "timestamp": {"absolute": 0.0, "relative": 0.0}},
-            }))
-            # Send a non-audio event to ensure it's skipped, then close
-            ws.send_text(json.dumps({"event": "transcript.data", "data": {}}))
-            ws.close()
-
-    assert captured_frames, "expected at least one 20 ms output frame from 100 ms of input"
-    first = captured_frames[0]
-    assert first.sample_rate == 48000
-    assert first.num_channels == 1
-    assert first.samples_per_channel == 960
+    RED until Wave 2 adds the publisher IIFE to bot.html.
+    """
+    from pathlib import Path
+    BOT_HTML = Path(__file__).resolve().parent.parent / "static" / "bot.html"
+    html_text = BOT_HTML.read_text(encoding="utf-8")
+    assert "pub_token" in html_text, "bot.html must read pub_token from URL params (Phase 6 / R6-07)"
+    assert "getUserMedia" in html_text, "bot.html must call getUserMedia (Phase 6 / R6-07)"
+    assert "recall-meeting-audio" in html_text, \
+        "bot.html must publish track named recall-meeting-audio"

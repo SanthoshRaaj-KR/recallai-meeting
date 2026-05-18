@@ -50,16 +50,27 @@ def test_no_data_received_handler(agent_worker_source: str) -> None:
     )
 
 
-def test_session_start_uses_recall_relay_participant_identity(agent_worker_source: str) -> None:
-    """Pitfall 1: AgentSession must link to recall-relay-{session_id}, not the first participant
-    (which would be jarvis-publisher and cause a feedback loop)."""
+def test_session_start_uses_recall_browser_participant_identity(agent_worker_source: str) -> None:
+    """Phase 6: identity must be recall-browser-{session_id} (was recall-relay-)."""
     assert "room_io.RoomOptions(" in agent_worker_source, (
         "session.start() must pass room_io.RoomOptions(...) per Pitfall 1 (avoid feedback loop)"
     )
-    assert 'participant_identity=f"recall-relay-' in agent_worker_source, (
-        "RoomOptions must set participant_identity=f\"recall-relay-{session_id}\" per Pitfall 1"
-    )
+    assert 'participant_identity=f"recall-relay-' not in agent_worker_source, \
+        "recall-relay- identity must be removed (Phase 6)"
+    assert 'participant_identity=f"recall-browser-' in agent_worker_source, \
+        "identity must be recall-browser-{session_id} per Phase 6 / D-05"
     # Sanity: session_id should come from ctx.job.metadata (verified at runtime; source must reference it).
     assert "ctx.job.metadata" in agent_worker_source or "job.metadata" in agent_worker_source, (
         "session_id must be resolved from ctx.job.metadata per RESEARCH §participant_identity coordination"
     )
+
+
+def test_agent_worker_subscribes_to_recall_browser(agent_worker_source: str) -> None:
+    """R6-05: agent_worker.py must use recall-browser- prefix, not recall-relay-.
+
+    RED until Wave 3 updates agent_worker.py.
+    """
+    assert "recall-browser-" in agent_worker_source, \
+        "agent_worker.py must reference recall-browser- identity (Phase 6 / R6-05)"
+    assert "recall-relay-" not in agent_worker_source, \
+        "recall-relay- prefix must be fully removed from agent_worker.py"
