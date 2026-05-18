@@ -121,6 +121,39 @@ def test_dedup_keeps_different_pages_same_content():
     assert len(out) == 2, "dedup must not collapse across pages"
 
 
+def test_dedup_tolerates_malformed_audit_field():
+    """WR-05: upstream stages occasionally set _audit to non-dict types
+    (debug strings, lists) during refactors. The dedup helper must NOT crash
+    on these — it should treat malformed audit as missing audit data and
+    continue."""
+    from confluence_logic.review.api import _dedupe_proposals
+
+    ps = [
+        _make_proposal(_audit="oops a string instead of a dict"),
+        _make_proposal(_audit=["list", "instead", "of", "dict"]),
+        _make_proposal(_audit=None),
+        _make_proposal(_audit=12345),
+    ]
+    # All four have identical strict/outcome keys → collapse to one.
+    out = _dedupe_proposals(ps)
+    assert len(out) == 1, (
+        f"dedup must be robust to malformed _audit; got {len(out)} proposals"
+    )
+
+
+def test_dedup_tolerates_missing_page_id_and_title():
+    """Sanity: proposals with NULL page_id AND NULL page_title still get
+    deduped on the rest of their signature without crashing."""
+    from confluence_logic.review.api import _dedupe_proposals
+
+    ps = [
+        _make_proposal(page_id=None, page_title=None),
+        _make_proposal(page_id=None, page_title=None),
+    ]
+    out = _dedupe_proposals(ps)
+    assert len(out) == 1
+
+
 def test_dedup_preserves_order_of_first_occurrence():
     """If duplicates appear, only the FIRST occurrence is kept — downstream
     rationales/audit metadata on the first card stays meaningful."""
@@ -309,4 +342,200 @@ async def test_change_summary_preserved_when_drafter_already_supplied_it(monkeyp
     # Drafter's summary preserved verbatim
     assert row.get("change_summary") == (
         "Bump default Python from 2 to 3.12 per Q1 platform standardization."
+    )
+
+
+# ---------------------------------------------------------------------------
+# IN-01 — additional coverage requested by code review.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_change_summary_for_title_rename_uses_rename_phrasing(monkeypatch):
+    """change_type="title" must produce a "Rename 'X' to 'Y'" summary even
+    when after_content is short (which the stub-length guard previously
+    silently dropped — WR-03)."""
+    from confluence_logic.review.api import _verify_and_persist
+
+    capture = _patch_verify_and_persist(monkeypatch, live_html="")
+    draft = {
+        "change_type": "title",
+        "page_id": "pg-1",
+        "page_title": "Old Team Roster",
+        "section_heading": None,
+        "before_content": "",
+        # WR-03: short new title — was being dropped by the stub-length guard
+        "after_content": "Q3 Plan",
+        "edit_mode": "",
+        "rationale": "Renaming for clarity",
+    }
+    await _verify_and_persist(draft, "transcript-x", "job-1", "sess-1", "user-1")
+
+    row = capture["row"]
+    assert row is not None, "title rename was DROPPED by the stub guard (WR-03 regression)"
+    summary = row.get("change_summary") or ""
+    assert "Rename" in summary, f"title summary should use 'Rename' verb: {summary!r}"
+    assert "Old Team Roster" in summary, f"missing old title: {summary!r}"
+    assert "Q3 Plan" in summary, f"missing new title: {summary!r}"
+
+
+@pytest.mark.asyncio
+async def test_change_summary_for_delete_section_names_section(monkeypatch):
+    """change_type="delete" with a section_heading must name the section."""
+    from confluence_logic.review.api import _verify_and_persist
+
+    capture = _patch_verify_and_persist(monkeypatch, live_html="")
+    draft = {
+        "change_type": "delete",
+        "page_id": "pg-1",
+        "page_title": "API Runbook",
+        "section_heading": "Deprecated Endpoints",
+        "before_content": "",
+        "after_content": "",
+        "edit_mode": "",
+        "rationale": "Cleanup",
+    }
+    await _verify_and_persist(draft, "transcript-x", "job-1", "sess-1", "user-1")
+
+    row = capture["row"]
+    assert row is not None
+    summary = row.get("change_summary") or ""
+    assert "Delete section" in summary, f"delete summary missing 'Delete section': {summary!r}"
+    assert "Deprecated Endpoints" in summary, f"missing section name: {summary!r}"
+    assert "API Runbook" in summary, f"missing page name: {summary!r}"
+
+
+@pytest.mark.asyncio
+async def test_change_summary_for_delete_whole_page_names_page(monkeypatch):
+    """change_type="delete" without a section means delete the whole page."""
+    from confluence_logic.review.api import _verify_and_persist
+
+    capture = _patch_verify_and_persist(monkeypatch, live_html="")
+    draft = {
+        "change_type": "delete",
+        "page_id": "pg-1",
+        "page_title": "Obsolete Service",
+        "section_heading": None,
+        "before_content": "",
+        "after_content": "",
+        "edit_mode": "",
+        "rationale": "Service decommissioned",
+    }
+    await _verify_and_persist(draft, "transcript-x", "job-1", "sess-1", "user-1")
+
+    row = capture["row"]
+    assert row is not None
+    summary = row.get("change_summary") or ""
+    assert "Delete page" in summary, f"whole-page delete summary missing 'Delete page': {summary!r}"
+    assert "Obsolete Service" in summary, f"missing page name: {summary!r}"
+
+
+@pytest.mark.asyncio
+async def test_change_summary_strips_html_tags_from_snippets(monkeypatch):
+    """WR-04: when the drafter occasionally produces Confluence storage-format
+    HTML instead of markdown, the snippet helper must strip the tags so they
+    don't leak into the headline as visible text."""
+    from confluence_logic.review.api import _verify_and_persist
+
+    # Live page contains the BEFORE text so pre-validate keeps it.
+    capture = _patch_verify_and_persist(
+        monkeypatch,
+        live_html="<p>The default is mandatory training.</p>",
+    )
+    draft = {
+        "change_type": "edit",
+        "page_id": "pg-1",
+        "page_title": "Onboarding",
+        "section_heading": "Training",
+        "before_content": "The default is mandatory training.",
+        # Drafter produced storage-format HTML — tags must NOT leak into summary
+        "after_content": "<p>Training is <strong>optional</strong> for senior hires.</p>",
+        "edit_mode": "replace",
+        "rationale": "Policy update",
+    }
+    await _verify_and_persist(draft, "transcript-x", "job-1", "sess-1", "user-1")
+
+    row = capture["row"]
+    assert row is not None
+    summary = row.get("change_summary") or ""
+    assert "<p>" not in summary, f"HTML tag leaked into summary: {summary!r}"
+    assert "<strong>" not in summary, f"HTML tag leaked into summary: {summary!r}"
+    assert "optional" in summary, f"summary lost the actual content: {summary!r}"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_proposal_text direct unit tests.
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_proposal_text_lowercases_and_collapses():
+    from confluence_logic.review.api import _normalize_proposal_text
+
+    out = _normalize_proposal_text("Hello   WORLD\n\nfoo", 100)
+    assert out == "hello world foo"
+
+
+def test_normalize_proposal_text_strips_light_markdown():
+    from confluence_logic.review.api import _normalize_proposal_text
+
+    out = _normalize_proposal_text("**Bold** _italic_ `code` #header", 100)
+    # Light markdown chars become spaces; hyphens preserved
+    assert "*" not in out
+    assert "_" not in out
+    assert "`" not in out
+    assert "#" not in out
+    assert "bold" in out and "italic" in out and "code" in out and "header" in out
+
+
+def test_normalize_proposal_text_truncates_to_max_chars():
+    from confluence_logic.review.api import _normalize_proposal_text
+
+    out = _normalize_proposal_text("a" * 1000, 50)
+    assert len(out) == 50
+
+
+def test_normalize_proposal_text_handles_none_and_empty():
+    from confluence_logic.review.api import _normalize_proposal_text
+
+    assert _normalize_proposal_text(None, 50) == ""  # type: ignore[arg-type]
+    assert _normalize_proposal_text("", 50) == ""
+    assert _normalize_proposal_text("   \t\n  ", 50) == ""
+
+
+# ---------------------------------------------------------------------------
+# Editor-answer failure detection direct unit tests (WR-06).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("answer,expected", [
+    ("ERROR: The update failed.", True),
+    ("Error: anything", True),
+    ("The requested change did not complete because …", True),
+    ("I encountered an issue while running the agent workflow.", True),
+    ("I could not find the section.", True),
+    ("I couldn't locate the page.", True),
+    ("I was unable to commit.", True),
+    ("I'm unable to apply.", True),
+    ("I am unable to apply.", True),
+    ("I can't find that.", True),
+    ("I cannot proceed.", True),
+    ("Unable to apply the change.", True),
+    ("Could not find target page.", True),
+    ("Couldn't find anything.", True),
+    ("No matching page.", True),
+    ("The update failed. Reason X.", True),
+    ("Page creation failed: reason.", True),
+    ("The deletion failed.", True),
+    ("Sorry, that's not possible.", True),
+    ("", True),  # empty answer also signals failure
+    (None, True),  # None too
+    ("Done.", False),
+    ("Applied the change to Confluence.", False),
+    ("Edit committed successfully.", False),
+])
+def test_editor_answer_indicates_failure(answer, expected):
+    from confluence_logic.review.api import _editor_answer_indicates_failure
+
+    assert _editor_answer_indicates_failure(answer) is expected, (
+        f"answer={answer!r} → expected {expected}"
     )

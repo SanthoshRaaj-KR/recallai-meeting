@@ -377,3 +377,245 @@ async def test_flag_off_uses_legacy_direct_apply(
     assert result["success"] is True
     assert captured["calls"] == 0, "EditorAgent was called despite flag being off"
     assert direct_spy.await_count == 1, "Legacy path was not used"
+
+
+# ---------------------------------------------------------------------------
+# IN-01: additional coverage after the post-review tightening.
+# ---------------------------------------------------------------------------
+
+
+def _wire_proposal(monkeypatch, mock_supabase_store, proposal: Dict[str, Any]) -> MagicMock:
+    """Stub supabase_store.get_proposal_by_id + update_proposal_status; return
+    a MagicMock whose .call_args_list records every status transition."""
+    mock_supabase_store.get_proposal_by_id = MagicMock(return_value=proposal)
+    monkeypatch.setattr(
+        "confluence_logic.review.supabase_store.get_proposal_by_id",
+        mock_supabase_store.get_proposal_by_id,
+    )
+    status_spy = MagicMock(return_value=True)
+    mock_supabase_store.update_proposal_status = status_spy
+    monkeypatch.setattr(
+        "confluence_logic.review.supabase_store.update_proposal_status",
+        status_spy,
+    )
+    return status_spy
+
+
+@pytest.mark.asyncio
+async def test_executing_status_rejects_double_click(monkeypatch, mock_supabase_store):
+    """CR-01: a proposal already in status='executing' must short-circuit so
+    a second click never re-enters the path while a prior run is in flight."""
+    from confluence_logic.review import api as review_api
+    monkeypatch.setattr(review_api, "JARVIS_PIPELINE_USE_EDITOR_AGENT", True)
+
+    _wire_proposal(monkeypatch, mock_supabase_store, {
+        "id": "prop-r",
+        "session_id": "sess-r",
+        "page_id": "p-r",
+        "page_title": "Whatever",
+        "change_type": "edit",
+        "status": "executing",
+    })
+
+    result = await review_api._execute_pipeline_proposal("prop-r", "sess-r")
+    assert result["success"] is False
+    assert "already being applied" in result["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_exception_mid_flight_transitions_to_failed(monkeypatch, mock_supabase_store):
+    """CR-01: if anything between set-executing and the result-check raises,
+    the proposal must NOT be stranded in 'executing'. The handler must catch
+    and transition to 'failed'."""
+    from confluence_logic.review import api as review_api
+    monkeypatch.setattr(review_api, "JARVIS_PIPELINE_USE_EDITOR_AGENT", True)
+
+    status_spy = _wire_proposal(monkeypatch, mock_supabase_store, {
+        "id": "prop-x",
+        "session_id": "sess-x",
+        "page_id": "p-x",
+        "page_title": "Whatever",
+        "change_type": "edit",
+        "status": "pending",
+    })
+
+    # Force _get_editor_agent to raise — simulates a transient infra failure.
+    def _boom():
+        raise RuntimeError("simulated infra crash mid-flight")
+    monkeypatch.setattr(review_api, "_get_editor_agent", _boom)
+    # Also stub direct apply so the fallback doesn't paper over the failure.
+    direct_spy = AsyncMock(return_value={"success": False, "message": "direct also failed"})
+    monkeypatch.setattr(review_api, "_direct_apply_change", direct_spy)
+    # Stub the connector for the starting_version read so it doesn't crash first.
+    monkeypatch.setattr(review_api, "_get_connector", lambda: MagicMock(
+        get_page_metadata=MagicMock(return_value={"version": {"number": 1}}),
+    ))
+
+    result = await review_api._execute_pipeline_proposal("prop-x", "sess-x")
+
+    assert result["success"] is False
+    # Status must end in "failed", never stranded in "executing"
+    statuses = [c.args[1] for c in status_spy.call_args_list]
+    assert statuses[-1] == "failed", (
+        f"Status was stranded — full trace: {statuses}"
+    )
+    assert "executing" in statuses, "Should have transitioned through executing first"
+
+
+@pytest.mark.asyncio
+async def test_version_advance_blocks_direct_apply_fallback(monkeypatch, mock_supabase_store):
+    """WR-01: if the page version advanced during the editor agent's run, do
+    NOT fall back to _direct_apply_change — that would double-write. Instead
+    return a partial_commit_detected error so the user can investigate."""
+    from confluence_logic.review import api as review_api
+    monkeypatch.setattr(review_api, "JARVIS_PIPELINE_USE_EDITOR_AGENT", True)
+
+    _wire_proposal(monkeypatch, mock_supabase_store, {
+        "id": "prop-v",
+        "session_id": "sess-v",
+        "page_id": "p-v",
+        "page_title": "Page",
+        "change_type": "edit",
+        "before_content": "x",
+        "after_content": "y",
+        "status": "pending",
+    })
+
+    # Connector: starting version=3 BEFORE editor agent; version=4 AFTER (advanced).
+    metadata_calls = {"n": 0}
+    def _get_meta(_page_id):
+        metadata_calls["n"] += 1
+        return {"version": {"number": 3 if metadata_calls["n"] == 1 else 4}}
+    fake_connector = MagicMock(get_page_metadata=_get_meta)
+    monkeypatch.setattr(review_api, "_get_connector", lambda: fake_connector)
+
+    # Editor agent fails — should normally fall back to direct apply
+    _stub_editor_agent(monkeypatch, "ERROR: heading not found mid-run")
+    direct_spy = AsyncMock(return_value={"success": True, "message": "should NOT be reached"})
+    monkeypatch.setattr(review_api, "_direct_apply_change", direct_spy)
+
+    result = await review_api._execute_pipeline_proposal("prop-v", "sess-v")
+
+    # Version advanced → fallback refused → direct apply MUST NOT run
+    assert direct_spy.await_count == 0, (
+        "Fallback to _direct_apply_change ran despite the version advancing — "
+        "this is the double-write hazard the WR-01 fix is supposed to prevent."
+    )
+    assert result["success"] is False
+    assert result["message"].lower().count("page was modified") >= 1 or "partial" in result["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_compound_failure_both_paths_fail(monkeypatch, mock_supabase_store):
+    """IN-01: if both editor agent AND direct apply fail, the response message
+    must surface the direct-apply error (most actionable) and status must
+    settle on 'failed'."""
+    from confluence_logic.review import api as review_api
+    monkeypatch.setattr(review_api, "JARVIS_PIPELINE_USE_EDITOR_AGENT", True)
+
+    status_spy = _wire_proposal(monkeypatch, mock_supabase_store, {
+        "id": "prop-c",
+        "session_id": "sess-c",
+        "page_id": "p-c",
+        "page_title": "Page",
+        "change_type": "edit",
+        "before_content": "x",
+        "after_content": "y",
+        "status": "pending",
+    })
+
+    # Connector returns same version on both calls — no version-advance,
+    # so fallback IS allowed to run.
+    monkeypatch.setattr(review_api, "_get_connector", lambda: MagicMock(
+        get_page_metadata=MagicMock(return_value={"version": {"number": 5}}),
+    ))
+
+    _stub_editor_agent(monkeypatch, "I couldn't find the section.")
+    direct_spy = AsyncMock(return_value={
+        "success": False,
+        "error": "heading_not_found",
+        "message": "Section 'X' no longer exists.",
+    })
+    monkeypatch.setattr(review_api, "_direct_apply_change", direct_spy)
+
+    result = await review_api._execute_pipeline_proposal("prop-c", "sess-c")
+
+    assert result["success"] is False
+    assert direct_spy.await_count == 1, "Fallback should have run when version unchanged"
+    # User sees the actionable direct-apply message (not the editor agent's vague answer)
+    assert "no longer exists" in result["message"].lower() or "section" in result["message"].lower()
+    statuses = [c.args[1] for c in status_spy.call_args_list]
+    assert statuses[-1] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_meeting_context_threaded_to_editor_agent(monkeypatch, mock_supabase_store):
+    """WR-10: the single-card Accept path must pass meeting_context to the
+    editor agent (the same way _execute_single_change does) so the agent can
+    disambiguate references like 'the page we were just discussing'."""
+    from confluence_logic.review import api as review_api
+    monkeypatch.setattr(review_api, "JARVIS_PIPELINE_USE_EDITOR_AGENT", True)
+
+    _wire_proposal(monkeypatch, mock_supabase_store, {
+        "id": "prop-m",
+        "session_id": "sess-m",
+        "page_id": "p-m",
+        "page_title": "Page",
+        "change_type": "edit",
+        "before_content": "x",
+        "after_content": "y",
+        "status": "pending",
+    })
+    monkeypatch.setattr(review_api, "_get_connector", lambda: MagicMock(
+        get_page_metadata=MagicMock(return_value={"version": {"number": 1}}),
+    ))
+
+    captured = {"kwargs": None}
+
+    class _Stub:
+        async def handle_prepared_query(self, instruction, **kwargs):
+            captured["kwargs"] = kwargs
+            return "Done."
+
+    monkeypatch.setattr(review_api, "_get_editor_agent", lambda: _Stub())
+
+    result = await review_api._execute_pipeline_proposal("prop-m", "sess-m")
+    assert result["success"] is True
+    assert "meeting_context" in (captured["kwargs"] or {}), (
+        "meeting_context kwarg not threaded through to handle_prepared_query"
+    )
+
+
+@pytest.mark.asyncio
+async def test_editor_agent_partial_success_recognized(monkeypatch, mock_supabase_store):
+    """WR-06: the failure detection must catch the various 'I can't / I couldn't'
+    phrasings the LLM produces under load — not just the literal 'ERROR:' prefix."""
+    from confluence_logic.review import api as review_api
+    monkeypatch.setattr(review_api, "JARVIS_PIPELINE_USE_EDITOR_AGENT", True)
+
+    _wire_proposal(monkeypatch, mock_supabase_store, {
+        "id": "prop-p",
+        "session_id": "sess-p",
+        "page_id": "p-p",
+        "page_title": "Page",
+        "change_type": "edit",
+        "before_content": "x",
+        "after_content": "y",
+        "status": "pending",
+    })
+    monkeypatch.setattr(review_api, "_get_connector", lambda: MagicMock(
+        get_page_metadata=MagicMock(return_value={"version": {"number": 1}}),
+    ))
+
+    _stub_editor_agent(monkeypatch, "Unable to apply the change because the heading is gone.")
+    direct_spy = AsyncMock(return_value={"success": True, "message": "Direct path applied."})
+    monkeypatch.setattr(review_api, "_direct_apply_change", direct_spy)
+
+    result = await review_api._execute_pipeline_proposal("prop-p", "sess-p")
+
+    assert direct_spy.await_count == 1, (
+        "Fallback did NOT trigger for an 'Unable to …' answer — the failure "
+        "detection still misses common error phrasings (WR-06)."
+    )
+    assert result["success"] is True
+    assert result["message"] == "Direct path applied."
