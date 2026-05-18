@@ -111,6 +111,11 @@ JARVIS_REVIEW_MOM_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_MOM_MAX_TOKENS", "90
 JARVIS_REVIEW_TOPICS_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_TOPICS_MAX_TOKENS", "700"))
 JARVIS_REVIEW_ACTION_ITEMS_MAX_TOKENS = int(os.getenv("JARVIS_REVIEW_ACTION_ITEMS_MAX_TOKENS", "700"))
 JARVIS_PROPOSE_CHANGES_MAX_TOKENS = int(os.getenv("JARVIS_PROPOSE_CHANGES_MAX_TOKENS", "1400"))
+# When 1 (default), the single-proposal Accept path routes through EditorAgent
+# (master → edit/delete/create specialist) instead of brittle REST find-and-replace.
+# Set to 0 to force the legacy _direct_apply_change path. The batched Accept-all
+# endpoint already uses EditorAgent regardless of this flag.
+JARVIS_PIPELINE_USE_EDITOR_AGENT = os.getenv("JARVIS_PIPELINE_USE_EDITOR_AGENT", "1").strip() not in {"0", "false", "False", ""}
 
 
 def _utc_now() -> datetime:
@@ -2038,10 +2043,17 @@ async def _execute_pipeline_proposals_batched(
 
 
 async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[str, Any]:
-    """Execute a pipeline proposal via _direct_apply_change (APPLY-01/02/03 hardened path).
+    """Execute a single pipeline proposal.
 
-    Bypasses EditorAgent in favour of the direct REST path so that the pre-flight
-    heading check, version-chain cache, and post-commit re-index all fire correctly.
+    Primary path (JARVIS_PIPELINE_USE_EDITOR_AGENT=1, default): delegate to
+    EditorAgent.handle_prepared_query — the same path the Accept-all batched
+    endpoint already uses successfully. The agent fetches the live page, resolves
+    headings and visible text on its own, and is far more tolerant of drafter
+    drift than brittle REST find-and-replace.
+
+    Fallback path: _direct_apply_change (APPLY-01/02/03 REST path with version-
+    chain cache + post-commit re-index). Used when the env flag is off, OR when
+    the editor agent reports a hard failure — gives us best-of-both-worlds.
     """
     proposal = supabase_store.get_proposal_by_id(proposal_id)
     if not proposal:
@@ -2059,15 +2071,57 @@ async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[
     page_title_for_lock = proposal.get("page_title") or ""
     lock = _page_lock(page_id, page_title_for_lock)
 
+    editor_answer: Optional[str] = None
+    editor_failed = False
+
     async with lock:
-        result = await _direct_apply_change(proposal, session_id=session_id)
+        if JARVIS_PIPELINE_USE_EDITOR_AGENT:
+            user_id = proposal.get("user_id")
+            graph_user_id = _confluence_graph_user_id(
+                {"id": user_id} if user_id else None,
+                session_id,
+            )
+            instruction = _format_approved_change_request(proposal)
+            editor_agent = _get_editor_agent()
+            graph_token = confluence_page_graph.set_current_graph_user_id(graph_user_id)
+            try:
+                editor_answer = await editor_agent.handle_prepared_query(
+                    instruction,
+                    original_query=(
+                        f"Execute proposal {proposal_id} on page "
+                        f"'{page_title_for_lock or page_id}'"
+                    ),
+                )
+            except Exception as exc:
+                logger.error(
+                    "EditorAgent raised for proposal '%s' on '%s': %s",
+                    proposal_id, page_title_for_lock or page_id, exc,
+                )
+                editor_answer = f"ERROR: {exc}"
+            finally:
+                confluence_page_graph.reset_current_graph_user_id(graph_token)
+
+            normalized = (editor_answer or "").strip()
+            editor_failed = normalized.lower().startswith((
+                "error:", "the requested change did not complete", "i encountered an issue",
+            ))
+
+        if (not JARVIS_PIPELINE_USE_EDITOR_AGENT) or editor_failed:
+            if editor_failed:
+                logger.warning(
+                    "EditorAgent failed for proposal '%s' (%s) — falling back to _direct_apply_change",
+                    proposal_id, (editor_answer or "")[:160],
+                )
+            result = await _direct_apply_change(proposal, session_id=session_id)
+        else:
+            result = {"success": True, "message": (editor_answer or "Change applied to Confluence.").strip()}
 
     if result.get("success"):
         supabase_store.update_proposal_status(proposal_id, "executed")
-        return {"success": True, "message": "Change applied to Confluence."}
+        return {"success": True, "message": result.get("message") or "Change applied to Confluence."}
     else:
         supabase_store.update_proposal_status(proposal_id, "failed")
-        error = result.get("error") or result.get("message") or "Unknown error"
+        error = result.get("error") or result.get("message") or editor_answer or "Unknown error"
         return {"success": False, "message": error}
 
 

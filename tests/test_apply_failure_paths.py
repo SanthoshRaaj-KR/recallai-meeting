@@ -204,3 +204,176 @@ def test_regenerate_endpoint_replaces_proposal_in_place(
     assert body.get("status") == "pending", (
         f"Expected status='pending' in response body, got: {body}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. _execute_pipeline_proposal routes single-card Accept through EditorAgent
+#    (the same path the batched Accept-all endpoint already uses).
+# ---------------------------------------------------------------------------
+
+
+def _stub_editor_agent(monkeypatch, answer: str):
+    """Replace _get_editor_agent() with a stub whose handle_prepared_query
+    returns ``answer`` and records the prompt it was given."""
+    captured: Dict[str, Any] = {"instruction": None, "calls": 0}
+
+    class _Stub:
+        async def handle_prepared_query(self, instruction, **kwargs):
+            captured["instruction"] = instruction
+            captured["calls"] += 1
+            return answer
+
+    monkeypatch.setattr(
+        "confluence_logic.review.api._get_editor_agent",
+        lambda: _Stub(),
+    )
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_single_accept_routes_through_editor_agent_by_default(
+    monkeypatch, mock_supabase_store
+):
+    """When JARVIS_PIPELINE_USE_EDITOR_AGENT is on (default), the single-proposal
+    Accept handler must delegate to EditorAgent and skip _direct_apply_change."""
+    from confluence_logic.review import api as review_api
+
+    monkeypatch.setattr(review_api, "JARVIS_PIPELINE_USE_EDITOR_AGENT", True)
+
+    proposal = {
+        "id": "prop-77",
+        "session_id": "sess-77",
+        "user_id": "user-77",
+        "page_id": "page-77",
+        "page_title": "Enterprise Customer Feedback",
+        "section_heading": "Customer Feedback",
+        "before_content": "Microsoft Teams integration is mandatory.",
+        "after_content": "Teams integration will be supported.",
+        "change_type": "edit",
+        "rationale": "Confirm prioritization.",
+        "status": "pending",
+    }
+    mock_supabase_store.get_proposal_by_id = MagicMock(return_value=proposal)
+    monkeypatch.setattr(
+        "confluence_logic.review.supabase_store.get_proposal_by_id",
+        mock_supabase_store.get_proposal_by_id,
+    )
+    mock_supabase_store.update_proposal_status = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "confluence_logic.review.supabase_store.update_proposal_status",
+        mock_supabase_store.update_proposal_status,
+    )
+
+    captured = _stub_editor_agent(monkeypatch, "Edit applied to Confluence.")
+
+    # _direct_apply_change must NOT be called on the happy path.
+    direct_spy = AsyncMock()
+    monkeypatch.setattr(review_api, "_direct_apply_change", direct_spy)
+
+    result = await review_api._execute_pipeline_proposal("prop-77", "sess-77")
+
+    assert result["success"] is True, f"Expected success, got: {result}"
+    assert captured["calls"] == 1, "EditorAgent.handle_prepared_query was not invoked"
+    assert direct_spy.await_count == 0, (
+        "_direct_apply_change was called on the happy editor-agent path"
+    )
+    # The prompt passed to the agent must carry the page title and after_content
+    instr = captured["instruction"] or ""
+    assert "Enterprise Customer Feedback" in instr, (
+        "EditorAgent prompt missing the page title"
+    )
+    assert "Teams integration will be supported." in instr, (
+        "EditorAgent prompt missing the after_content"
+    )
+
+    # Status transitions: executing → executed
+    statuses = [c.args[1] for c in mock_supabase_store.update_proposal_status.call_args_list]
+    assert statuses == ["executing", "executed"], (
+        f"Unexpected status transitions: {statuses}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_editor_agent_error_falls_back_to_direct_apply(
+    monkeypatch, mock_supabase_store
+):
+    """When the EditorAgent returns an 'ERROR:' answer, the single-proposal
+    Accept handler must fall back to _direct_apply_change so we get the best
+    of both worlds: agent flexibility AND the REST hardening guarantees."""
+    from confluence_logic.review import api as review_api
+
+    monkeypatch.setattr(review_api, "JARVIS_PIPELINE_USE_EDITOR_AGENT", True)
+
+    proposal = {
+        "id": "prop-88",
+        "session_id": "sess-88",
+        "page_id": "page-88",
+        "page_title": "API Runbook",
+        "section_heading": "Setup",
+        "before_content": "Python 2",
+        "after_content": "Python 3",
+        "change_type": "edit",
+        "status": "pending",
+    }
+    mock_supabase_store.get_proposal_by_id = MagicMock(return_value=proposal)
+    monkeypatch.setattr(
+        "confluence_logic.review.supabase_store.get_proposal_by_id",
+        mock_supabase_store.get_proposal_by_id,
+    )
+    mock_supabase_store.update_proposal_status = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "confluence_logic.review.supabase_store.update_proposal_status",
+        mock_supabase_store.update_proposal_status,
+    )
+
+    _stub_editor_agent(monkeypatch, "ERROR: The update failed. Some reason.")
+    direct_spy = AsyncMock(return_value={"success": True, "message": "Direct path applied."})
+    monkeypatch.setattr(review_api, "_direct_apply_change", direct_spy)
+
+    result = await review_api._execute_pipeline_proposal("prop-88", "sess-88")
+
+    assert result["success"] is True, f"Expected fallback success, got: {result}"
+    assert direct_spy.await_count == 1, (
+        "_direct_apply_change was not invoked as fallback after editor agent ERROR"
+    )
+    assert result["message"] == "Direct path applied."
+
+
+@pytest.mark.asyncio
+async def test_flag_off_uses_legacy_direct_apply(
+    monkeypatch, mock_supabase_store
+):
+    """When JARVIS_PIPELINE_USE_EDITOR_AGENT is disabled, the legacy direct-REST
+    path is used exclusively — no editor agent call."""
+    from confluence_logic.review import api as review_api
+
+    monkeypatch.setattr(review_api, "JARVIS_PIPELINE_USE_EDITOR_AGENT", False)
+
+    proposal = {
+        "id": "prop-99",
+        "session_id": "sess-99",
+        "page_id": "page-99",
+        "page_title": "Whatever",
+        "change_type": "edit",
+        "status": "pending",
+    }
+    mock_supabase_store.get_proposal_by_id = MagicMock(return_value=proposal)
+    monkeypatch.setattr(
+        "confluence_logic.review.supabase_store.get_proposal_by_id",
+        mock_supabase_store.get_proposal_by_id,
+    )
+    mock_supabase_store.update_proposal_status = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "confluence_logic.review.supabase_store.update_proposal_status",
+        mock_supabase_store.update_proposal_status,
+    )
+
+    captured = _stub_editor_agent(monkeypatch, "should not be reached")
+    direct_spy = AsyncMock(return_value={"success": True, "message": "ok"})
+    monkeypatch.setattr(review_api, "_direct_apply_change", direct_spy)
+
+    result = await review_api._execute_pipeline_proposal("prop-99", "sess-99")
+
+    assert result["success"] is True
+    assert captured["calls"] == 0, "EditorAgent was called despite flag being off"
+    assert direct_spy.await_count == 1, "Legacy path was not used"
