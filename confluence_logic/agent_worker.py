@@ -48,7 +48,6 @@ IDENTITY CONTRACT (tokens your backend must mint):
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -70,16 +69,10 @@ from livekit.agents import (
     inference,
     llm,
 )
-from livekit.agents.utils.codecs import AudioStreamDecoder
 from livekit.agents.voice import room_io
 from livekit.plugins import silero
 
 from confluence_logic.agent_bridge import JARVIS_TOOLS
-from confluence_logic.audio_cache import (
-    get_random_quick_ack_audio,
-    get_random_query_ack_audio,
-    load_audio_cache,
-)
 
 _MODULE_DIR = Path(__file__).resolve().parent
 load_dotenv(_MODULE_DIR.parent / ".env")
@@ -121,17 +114,6 @@ def _extract_query(text: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-# ── Audio helper ──────────────────────────────────────────────────────────────
-async def _ack_audio_frames(ack_bytes: bytes) -> AsyncIterable:
-    """Decode pre-recorded MP3 bytes into AudioFrames for session.say()."""
-    decoder = AudioStreamDecoder(format="mp3", sample_rate=48000, num_channels=1)
-    decoder.push(ack_bytes)
-    decoder.end_input()
-    async for frame in decoder:
-        yield frame
-    await decoder.aclose()
-
-
 # ── Agent ─────────────────────────────────────────────────────────────────────
 class JarvisAgent(Agent):
     """
@@ -153,10 +135,12 @@ class JarvisAgent(Agent):
             ),
             tools=JARVIS_TOOLS,
         )
-        # FIFO queue: llm_node puts True, tts_node gets it.
-        # One signal per LLM turn — no shared-bool race condition.
-        self._ack_q: asyncio.Queue[bool] = asyncio.Queue()
         self._turn_t0: float = 0.0   # perf_counter at start of turn for latency logs
+        # Listening mode: True after a bare wake — next utterance becomes the query.
+        self._listening_mode: bool = False
+        self._listening_since: float = 0.0  # perf_counter when listening mode started
+
+    _LISTENING_TIMEOUT_S: float = 8.0  # reset listening mode if silent this long
 
     async def on_enter(self) -> None:
         logger.info("✅ JarvisAgent entered room — listening for 'Hey Jarvis'")
@@ -181,30 +165,50 @@ class JarvisAgent(Agent):
 
         query = _extract_query(raw)
 
-        # ── Case 1: no wake word — regular meeting speech ─────────────────
+        # ── Case 1: listening mode — user said bare wake, now asking query ───
+        if query is None and self._listening_mode:
+            elapsed = time.perf_counter() - self._listening_since
+            self._listening_mode = False
+            if elapsed > self._LISTENING_TIMEOUT_S:
+                logger.info(
+                    "🔇 SILENT (listening mode timed out after %.1fs): %.80r",
+                    elapsed, raw,
+                )
+                new_message.content = []
+                return
+            q = raw.strip()
+            if not q:
+                logger.info("🔇 SILENT (listening mode — empty transcript)")
+                new_message.content = []
+                return
+            logger.info("👂 LISTENING QUERY (Δ=%.0fms): %.100r", elapsed * 1000, q)
+            new_message.content = [q]
+            return
+
+        # ── Case 2: no wake word — regular meeting speech ─────────────────
         if query is None:
             logger.info("🔇 SILENT   (no wake word): %.80r", raw)
             new_message.content = []
             return
 
-        # ── Case 2: bare wake word — ready prompt, no LLM ───────────────
+        # ── Case 3: bare wake word — ack + enter listening mode ──────────
         if not query:
-            logger.info("👂 BARE WAKE — saying ready prompt")
+            logger.info("👂 BARE WAKE — entering listening mode")
+            self._listening_mode = True
+            self._listening_since = time.perf_counter()
             new_message.content = []
-            await self.session.say("Yes, how can I help you?", add_to_chat_ctx=False)
+            await self.session.say("Yes?", add_to_chat_ctx=False)
             return
 
-        # ── Case 3: full query — strip wake word, send to LLM ────────────
+        # ── Case 4: full inline query — strip wake word, send to LLM ─────
         logger.info(
             "🎯 WAKE QUERY (Δ=%.0fms since turn start): %.100r",
             (time.perf_counter() - self._turn_t0) * 1000,
             query,
         )
+        self._listening_mode = False
         # Rewrite to query-only — LLM never sees "hey jarvis"
         new_message.content = [query]
-        # Signal ack here (after wake word confirmed) — not in llm_node, which
-        # fires speculatively before this gate with preemptive_generation=True.
-        self._ack_q.put_nowait(True)
 
     # ── LLM node ──────────────────────────────────────────────────────────────
     def llm_node(
@@ -247,40 +251,21 @@ class JarvisAgent(Agent):
         text: AsyncIterable[str],
         model_settings: ModelSettings,
     ):
-        """
-        Fastest possible response path:
-          1. Immediately yield pre-recorded ack MP3 frames (local disk, ~0ms latency)
-             → user hears something while Cartesia warms up
-          2. Stream Cartesia Sonic-3 TTS frames as they arrive (40–90ms TTFA)
+        """Stream Cartesia TTS directly. No pre-recorded acks — simplest path for debugging."""
 
-        Only called by the framework when llm_node returned a non-None stream.
-        The _ack_q has one entry when on_user_turn_completed confirmed a wake query.
-        """
-        try:
-            should_ack = self._ack_q.get_nowait()
-        except asyncio.QueueEmpty:
-            should_ack = False
-            logger.warning("⚠️  TTS ack queue empty — skipping ack")
+        async def _logged_text(stream: AsyncIterable[str]) -> AsyncIterable[str]:
+            chunks: list[str] = []
+            async for chunk in stream:
+                chunks.append(chunk)
+                yield chunk
+            if chunks:
+                logger.info("🤖 LLM: %s", "".join(chunks))
 
-        # Step 1: instant local ack (excludes "busy"/"yes" — those imply the wrong state)
-        if should_ack:
-            ack = get_random_query_ack_audio()
-            if ack:
-                name, data = ack
-                logger.info(
-                    "🔊 TTS ack '%s' (Δ=%.0fms since wake)",
-                    name,
-                    (time.perf_counter() - self._turn_t0) * 1000,
-                )
-                async for frame in _ack_audio_frames(data):
-                    yield frame
-
-        # Step 2: stream Cartesia TTS
         frame_count = 0
-        async for frame in Agent.default.tts_node(self, text, model_settings):
+        async for frame in Agent.default.tts_node(self, _logged_text(text), model_settings):
             if frame_count == 0:
                 logger.info(
-                    "🗣️  TTS first Cartesia frame (Δ=%.0fms since wake)",
+                    "🗣️  TTS first frame (Δ=%.0fms since wake)",
                     (time.perf_counter() - self._turn_t0) * 1000,
                 )
             frame_count += 1
@@ -298,10 +283,8 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess) -> None:
-    """Load VAD model and audio cache once at worker startup."""
     proc.userdata["vad"] = silero.VAD.load()
-    load_audio_cache()
-    logger.info("✅ Prewarm done — VAD + audio cache ready")
+    logger.info("✅ Prewarm done — VAD ready")
 
 
 server.setup_fnc = prewarm
@@ -363,12 +346,12 @@ async def entrypoint(ctx: JobContext) -> None:
             },
         ),
 
-        # SPEED: start LLM before end-of-turn is fully confirmed.
-        # With wake-word gating via message content rewrite, this is safe:
-        #   - no-wake speech: on_user_turn_completed clears content → speculative LLM discarded
-        #   - wake speech: content set correctly → speculative output is used directly
-        # Old code had preemptive_generation=False which added 200-400ms of unnecessary latency.
-        preemptive_generation=True,
+        # DISABLED: preemptive_generation=True caused audio glitching ("kirch kirch kirching").
+        # Our wake-word rewrite in on_user_turn_completed ALWAYS changes the message content,
+        # so the speculative LLM is ALWAYS discarded → framework cuts speculative TTS mid-frame
+        # → audible glitch at the start of every response. The ack MP3 already covers the
+        # latency gap, so preemptive_generation adds no benefit here.
+        preemptive_generation=False,
 
         tts_text_transforms=["filter_emoji", "filter_markdown"],
     )

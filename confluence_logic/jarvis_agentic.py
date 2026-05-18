@@ -971,8 +971,13 @@ async def _create_livekit_room(session_id: str, bot_id: str) -> tuple:
             (time.perf_counter() - _t0_dispatch) * 1000,
         )
     except Exception as exc:
-        logger.error("Agent dispatch failed for session %s: %s", session_id, exc)
-        raise
+        # Dispatch failure is non-fatal: the LiveKit room + publisher track are already
+        # created and bot.html is connected. In dev mode the agent_worker picks up rooms
+        # via room watch without an explicit dispatch. Log prominently but don't abort.
+        logger.warning(
+            "⚠️  Agent dispatch failed for session %s — agent may self-dispatch (dev mode): %s",
+            session_id, exc,
+        )
 
     return room, source
 

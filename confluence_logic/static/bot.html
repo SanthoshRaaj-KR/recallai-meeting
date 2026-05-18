@@ -39,18 +39,70 @@
       dynacast: false,
     });
 
-    // Track sid → <audio> element map for clean unsubscribe handling.
-    var audioElements = new Map();
+    // ── Web Audio API playback ──────────────────────────────────────────────
+    // WHY: <audio> element autoplay is blocked in headless Chrome (Recall's bot
+    // environment) without a user gesture. room.startAudio() also requires a
+    // gesture to resume a suspended AudioContext. AudioContext + createMediaStreamSource
+    // bypasses this restriction — Recall captures the AudioContext output as the
+    // bot's camera tab audio and injects it into the meeting.
+    var audioCtx = null;
+    var audioNodes = new Map(); // track.sid → AudioNode (or HTMLElement fallback)
+
+    function ensureAudioCtx() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+          latencyHint: 'interactive',
+        });
+        console.log('[bot.html][subscriber] AudioContext created, state=' + audioCtx.state);
+      }
+      if (audioCtx.state !== 'running') {
+        audioCtx.resume().then(function () {
+          console.log('[bot.html][subscriber] AudioContext resumed, state=' + audioCtx.state);
+        }).catch(function (e) {
+          console.warn('[bot.html][subscriber] AudioContext resume failed:', e);
+        });
+      }
+      return audioCtx;
+    }
+
+    function playTrackWebAudio(track, identity) {
+      var rawTrack = track.mediaStreamTrack;
+      if (!rawTrack) {
+        console.warn('[bot.html][subscriber] mediaStreamTrack not available for ' + identity);
+        return false;
+      }
+      try {
+        var ctx = ensureAudioCtx();
+        var ms  = new MediaStream([rawTrack]);
+        var src = ctx.createMediaStreamSource(ms);
+        src.connect(ctx.destination);
+        audioNodes.set(track.sid, src);
+        console.log('[bot.html][subscriber] WebAudio playing from: ' + identity + ' (ctx=' + ctx.state + ')');
+        return true;
+      } catch (e) {
+        console.warn('[bot.html][subscriber] WebAudio setup failed for ' + identity + ':', e);
+        return false;
+      }
+    }
+
+    function playTrackFallback(track, identity) {
+      // Fallback: HTMLAudioElement (may be blocked, but worth trying)
+      var audioEl = track.attach();
+      audioEl.volume = 1.0;
+      audioEl.autoplay = true;
+      document.body.appendChild(audioEl);
+      audioEl.play().catch(function (e) {
+        console.warn('[bot.html][subscriber] fallback audioEl.play() blocked for ' + identity + ':', e);
+      });
+      audioNodes.set(track.sid, audioEl);
+      console.log('[bot.html][subscriber] <audio> fallback playing from: ' + identity);
+    }
 
     room.on(LivekitClient.RoomEvent.Connected, function () {
       setStatus('Subscriber connected to room: ' + (roomName || '<unknown>'));
-      // Recall headless Chrome usually auto-permits audio playback,
-      // but calling startAudio() is a defensive safety net.
-      if (typeof room.startAudio === 'function') {
-        room.startAudio().catch(function (e) {
-          console.warn('[bot.html][subscriber] startAudio() rejected:', e);
-        });
-      }
+      // Pre-warm AudioContext on connection — before any track arrives — so it is
+      // already running when TrackSubscribed fires.
+      ensureAudioCtx();
     });
 
     room.on(LivekitClient.RoomEvent.Disconnected, function (reason) {
@@ -65,49 +117,44 @@
 
       if (track.kind !== LivekitClient.Track.Kind.Audio) return;
 
-      // PLAYBACK FILTER:
-      // Play audio from any participant that is NOT the Recall publisher
-      // (recall-browser-*). That participant is the Jarvis agent's TTS output.
-      //
-      // OLD CODE was: startsWith('jarvis-publisher-')
-      // That was WRONG — the agent publishes under its own LiveKit-assigned identity
-      // (set by the job dispatch / JARVIS_AGENT_WORKER_NAME), NOT "jarvis-publisher-*".
-      // The fix: exclude recall-browser-* (the publisher) and play everything else.
+      // Play audio from any participant that is NOT the Recall publisher.
+      // recall-browser-* is the meeting audio echo — skip it.
       if (participant.identity.startsWith('recall-browser-')) {
-        console.log('[bot.html][subscriber] Skipping recall-browser (meeting audio echo): ' + participant.identity);
+        console.log('[bot.html][subscriber] Skipping recall-browser: ' + participant.identity);
         return;
       }
 
-      // Clean up any stale element for this sid
-      if (audioElements.has(track.sid)) {
-        var stale = audioElements.get(track.sid);
-        stale.pause();
-        stale.remove();
-        audioElements.delete(track.sid);
+      // Clean up any stale node for this sid (e.g. after reconnect)
+      var existing = audioNodes.get(track.sid);
+      if (existing) {
+        if (typeof existing.disconnect === 'function') {
+          try { existing.disconnect(); } catch (_) {}
+        } else if (existing.pause) {
+          existing.pause();
+          existing.remove();
+        }
+        audioNodes.delete(track.sid);
       }
 
-      var audioEl = track.attach();
-      audioEl.volume = 1.0;
-      audioEl.autoplay = true;
-      document.body.appendChild(audioEl);
-      audioElements.set(track.sid, audioEl);
-
-      audioEl.play().catch(function (e) {
-        console.warn('[bot.html][subscriber] audioEl.play() blocked:', e);
-      });
-
-      console.log('[bot.html][subscriber] Playing audio from: ' + participant.identity);
+      // Try Web Audio API first; fall back to <audio> element
+      if (!playTrackWebAudio(track, participant.identity)) {
+        playTrackFallback(track, participant.identity);
+      }
     });
 
     room.on(LivekitClient.RoomEvent.TrackUnsubscribed, function (track, pub, participant) {
       if (track.kind !== LivekitClient.Track.Kind.Audio) return;
       if (participant.identity.startsWith('recall-browser-')) return;
 
-      var audioEl = audioElements.get(track.sid);
-      if (audioEl) {
-        audioEl.pause();
-        audioEl.remove();
-        audioElements.delete(track.sid);
+      var node = audioNodes.get(track.sid);
+      if (node) {
+        if (typeof node.disconnect === 'function') {
+          try { node.disconnect(); } catch (_) {}
+        } else if (node.pause) {
+          node.pause();
+          node.remove();
+        }
+        audioNodes.delete(track.sid);
       }
     });
 
@@ -172,9 +219,14 @@
       // The room must be connected before publishTrack() is called.
       navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: false,  // AGC OFF: preserves natural volume for STT accuracy
+          // In a Recall headless-Chrome bot the "microphone" is a digital WebRTC
+          // stream, not a physical acoustic echo path. Browser AEC/NS algorithms
+          // designed for physical rooms create metallic artifacts (chirping/stuttering)
+          // on this digital signal. Turn them all off; the LiveKit agent handles
+          // acoustic separation via its own AEC warmup on the publisher side.
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
         }
       })
       .then(function (mediaStream) {
