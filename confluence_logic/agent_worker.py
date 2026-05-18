@@ -6,8 +6,8 @@ Standalone process — run with:
     python -m confluence_logic.agent_worker start    # production
 
 Designed to coexist with the FastAPI server (uvicorn confluence_logic.jarvis_agentic:app).
-Phase 4 (D-02 / D-06 / D-09): Native voice agent — hears via Deepgram Nova-3 STT
-(linked to the recall-relay-{session_id} participant), thinks via inference.LLM,
+Phase 4/6 (D-02 / D-06 / D-09): Native voice agent — hears via Deepgram Nova-3 STT
+(linked to the recall-browser-{session_id} participant), thinks via inference.LLM,
 speaks via Cartesia TTS. Recall transcripts remain in jarvis_agentic.py for the
 Confluence post-meeting review pipeline (untouched). IPC dispatch path removed.
 
@@ -91,10 +91,11 @@ server.setup_fnc = prewarm
 async def entrypoint(ctx: JobContext) -> None:
     """Per-room session: build the AgentSession and start it on ctx.room.
 
-    Phase 4: STT is now active (Deepgram Nova-3 via LiveKit Inference). The session
-    links its STT pipeline to the 'recall-relay-{session_id}' participant published
-    by jarvis_agentic.py's /recall-audio-mixed/{session_id} relay (Pitfall 1: avoids
-    transcribing Jarvis's own TTS output on jarvis-publisher-{session_id}).
+    Phase 4/6: STT is now active (Deepgram Nova-3 via LiveKit Inference). The session
+    links its STT pipeline to the 'recall-browser-{session_id}' participant — the
+    Recall headless browser publishing meeting audio directly via getUserMedia() and
+    the LiveKit JS SDK (Phase 6). Pitfall 1 avoidance: AgentSession ignores
+    jarvis-publisher-{session_id} (Jarvis's own TTS output).
     """
     session = AgentSession(
         stt=inference.STT(model="deepgram/nova-3", language="multi"),              # D-02 / D-09
@@ -132,7 +133,7 @@ async def entrypoint(ctx: JobContext) -> None:
             agent=JarvisAgent(),
             room=ctx.room,
             room_options=room_io.RoomOptions(
-                participant_identity=f"recall-relay-{session_id}",
+                participant_identity=f"recall-browser-{session_id}",
             ),
         )
     else:
