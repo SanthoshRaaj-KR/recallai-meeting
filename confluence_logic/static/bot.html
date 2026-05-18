@@ -87,5 +87,62 @@
         });
     })();
   </script>
+
+  <!-- Phase 6: Publisher IIFE — meeting audio capture -> LiveKit publish -->
+  <!-- Recall headless Chrome auto-grants getUserMedia microphone permission. -->
+  <!-- The "microphone" source is the mixed audio from all meeting participants. -->
+  <script>
+  (function () {
+    'use strict';
+
+    var params = new URLSearchParams(window.location.search);
+    var lkUrl = params.get('url');
+    var pubToken = params.get('pub_token');
+
+    if (!lkUrl || !pubToken) {
+      console.warn('[bot.html][publisher] Missing pub_token — meeting audio will NOT be published to LiveKit');
+      return;
+    }
+
+    // Second Room instance: publisher only.
+    // adaptiveStream/dynacast disabled to minimise background processing (Pitfall 3).
+    var pubRoom = new LivekitClient.Room({
+      adaptiveStream: false,
+      dynacast: false,
+    });
+
+    pubRoom.on(LivekitClient.RoomEvent.Connected, function () {
+      console.log('[bot.html][publisher] Connected, identity:', pubRoom.localParticipant.identity);
+      // getUserMedia called INSIDE Connected handler — room must be up before publishTrack (Pitfall 2).
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(function (mediaStream) {
+          var meetingAudioTrack = mediaStream.getAudioTracks()[0];
+          if (!meetingAudioTrack) {
+            console.error('[bot.html][publisher] getUserMedia returned no audio tracks');
+            return;
+          }
+          return pubRoom.localParticipant.publishTrack(meetingAudioTrack, {
+            name: 'recall-meeting-audio',
+            source: LivekitClient.Track.Source.Microphone,
+          });
+        })
+        .then(function () {
+          console.log('[bot.html][publisher] Meeting audio published to LiveKit room (recall-meeting-audio)');
+        })
+        .catch(function (e) {
+          console.error('[bot.html][publisher] getUserMedia or publishTrack failed:', e);
+        });
+    });
+
+    pubRoom.on(LivekitClient.RoomEvent.Disconnected, function (reason) {
+      console.warn('[bot.html][publisher] Disconnected:', reason);
+    });
+
+    pubRoom.connect(lkUrl, pubToken)
+      .catch(function (e) {
+        console.error('[bot.html][publisher] connect failed:', e);
+      });
+  })();
+  </script>
 </body>
 </html>
