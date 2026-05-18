@@ -6,7 +6,17 @@
       "Skill(gsd-execute-phase)",
       "Bash(conda run *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(command -v gsd-sdk)",
+      "Bash(gsd-sdk query *)",
+      "Bash(conda activate *)",
+      "Bash(pytest tests/test_proposal_quality.py -v --no-header)",
+      "Bash(conda init *)",
+      "Bash(git reset *)",
+      "Bash(npm run *)",
+      "Bash(npm test *)",
+      "Bash(git -C sync-sage-bot log --oneline -3)",
+      "Bash(npx tsc *)"
     ]
   }
 }

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: complete
-stopped_at: Completed 07-02-PLAN.md
-last_updated: "2026-05-17T00:00:00.000Z"
-last_activity: 2026-05-17
+stopped_at: Completed 08-05-PLAN.md
+last_updated: "2026-05-18T00:00:00.000Z"
+last_activity: 2026-05-18
 progress:
-  total_phases: 7
-  completed_phases: 7
-  total_plans: 16
-  completed_plans: 16
+  total_phases: 8
+  completed_phases: 8
+  total_plans: 21
+  completed_plans: 21
   percent: 100
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-16)
 
 **Core value:** Users never manually update Confluence after a meeting — the system proposes the right changes to the right pages and the user just approves or rejects.
-**Current focus:** Phase 7 context captured — Confluence Document Q&A Agent ready for planning
+**Current focus:** Phase 8 complete — auto-proposal quality, accept reliability, UI clarity, and full test coverage shipped
 
 ## Current Position
 
-Phase: 07 of 7 (confluence-document-q-a-agent) — COMPLETE (all plans done)
-Plan: 2 of 2 complete
-Status: Phase 7 complete; ConfluenceQAAgent implemented, 158 tests GREEN
-Last activity: 2026-05-17
+Phase: 08 of 8 (auto-proposal-quality-fix) — COMPLETE (all 5 plans done)
+Plan: 5 of 5 complete
+Status: Phase 8 complete; verbatim-content preservation, page-qualifier hard filter, regenerate endpoint, ProposalCard UI overhaul, and 3-layer test suite all green (19/19 pytest + 5/5 vitest + 37/37 e2e assertions)
+Last activity: 2026-05-18
 
 Progress: [██████████] 100%
 
@@ -82,6 +82,11 @@ Recent decisions affecting current work:
 - sync-sage-bot has its own .git repo (was submodule); Task commits live in sync-sage-bot's git repo on main branch
 - [Phase ?]: PipelinePage Navbar import fix
 - [Phase 7-02]: ConfluenceQAAgent two-model split: gpt-5-mini for tool orchestration (Agent SDK), gpt-4o-mini for synthesis; Pinecone score threshold 0.3 before fallback to Neo4j/REST
+- [Phase 8-01]: post-meeting create-fallback honors `intent.verbatim_content` as bullet list; FACT_EXTRACTION_PROMPT gains EXPLICIT CREATE RULE for 6 phrase triggers; drafter `_enforce_verbatim_content` Python guard re-synthesizes after_content if items mismatch
+- [Phase 8-02]: page_qualifier deterministic hard pre-filter (old_value missing + no title overlap + no heading match → reject without LLM); JARVIS_QUALIFIER_FIT_MIN env (default 6); _verify_and_persist drops stub after_content + synthesizes change_summary + downgrades replace→append when before_content missing on live page
+- [Phase 8-03]: POST /sessions/{sid}/review/regenerate/{pid} re-drafts a single proposal against current Confluence page; heading pre-flight in _verify_and_persist downgrades to create_section when heading gone; frontend executeProposal surfaces real backend errors; Regenerate-from-current-page button on rejected cards; ChangeItem gains change_summary, regenerate_available, last_error
+- [Phase 8-04]: ProposalCard new Region 0 headline (change-type badge + full page title + change_summary one-liner); default-visible compact +/- line diff via sync-sage-bot/src/lib/diff.ts (no new deps); high-density fallback to red/green side-by-side blocks
+- [Phase 8-05]: 10 transcript fixtures + 3 pytest files (proposal_quality, fact_extraction_explicit_create, apply_failure_paths) + e2e scorecard CLI + vitest ProposalCard test + MANUAL_TEST_PLAN.md; deterministic without LLM/Confluence credentials
 
 ### Pending Todos
 
