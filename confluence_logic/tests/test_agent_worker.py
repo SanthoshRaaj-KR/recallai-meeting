@@ -20,21 +20,108 @@ def agent_worker_source() -> str:
     return _AGENT_WORKER_PATH.read_text(encoding="utf-8")
 
 
-def test_stt_enabled_with_deepgram_nova3(agent_worker_source: str) -> None:
-    """D-02/D-09: stt=None must be replaced with inference.STT(model='deepgram/nova-3'...)."""
-    assert "stt=None" not in agent_worker_source, (
-        "stt=None must be removed — replace with inference.STT(model='deepgram/nova-3', language='multi') per D-09"
+def test_stt_switched_to_assemblyai(agent_worker_source: str) -> None:
+    """R7-01 (D-01): STT must use assemblyai.STT(u3-rt-pro, keyterms_prompt=[...], language_detection=False).
+
+    RED until Wave 1 (plan 002) lands D-01.
+    """
+    assert "from livekit.plugins import assemblyai" in agent_worker_source, (
+        "agent_worker.py must import assemblyai plugin (NOT via inference.STT) per D-01"
     )
-    assert 'inference.STT(model="deepgram/nova-3"' in agent_worker_source, (
-        "agent_worker.py must instantiate inference.STT(model=\"deepgram/nova-3\", language=\"multi\") per D-02/D-09"
+    assert "assemblyai.STT(" in agent_worker_source, (
+        "agent_worker.py must instantiate assemblyai.STT(...) per D-01"
     )
-    assert 'language="multi"' in agent_worker_source, (
-        "language='multi' is required per D-09 (multilingual detection)"
+    assert '"u3-rt-pro"' in agent_worker_source, (
+        'model must be "u3-rt-pro" (canonical Literal name per livekit-plugins-assemblyai==1.5.9 — NOT "universal-3-rt-pro")'
+    )
+    assert "keyterms_prompt=" in agent_worker_source, (
+        "keyterms_prompt=[...] required for wake-word reliability (NOT word_boost — that name does not exist in v1.5.9)"
+    )
+    assert '"Jarvis"' in agent_worker_source, (
+        'keyterms_prompt list must contain "Jarvis"'
+    )
+    assert '"Hey Jarvis"' in agent_worker_source, (
+        'keyterms_prompt list must contain "Hey Jarvis"'
+    )
+    assert "language_detection=False" in agent_worker_source, (
+        "language_detection=False required (NOT language_code — that param does not exist in v1.5.9)"
+    )
+    # Old Deepgram strings must be gone — otherwise the switch is incomplete.
+    assert 'inference.STT(model="deepgram/nova-3"' not in agent_worker_source, (
+        "Deepgram Nova-3 STT must be removed per D-01"
+    )
+    assert 'language="multi"' not in agent_worker_source, (
+        'language="multi" was Deepgram-only — must be removed per D-01'
     )
 
 
 # Alias matching the shorter selector in VALIDATION.md.
-test_stt_enabled = test_stt_enabled_with_deepgram_nova3
+test_stt_enabled = test_stt_switched_to_assemblyai
+
+
+def test_llm_upgraded_to_gpt41_mini(agent_worker_source: str) -> None:
+    """R7-02 (D-02): JARVIS_LK_LLM default must be openai/gpt-4.1-mini.
+
+    RED until Wave 1 (plan 002) lands D-02.
+    """
+    assert "openai/gpt-4.1-mini" in agent_worker_source, (
+        "JARVIS_LK_LLM default must be 'openai/gpt-4.1-mini' per D-02"
+    )
+    assert "openai/gpt-4o-mini" not in agent_worker_source, (
+        "Old 'openai/gpt-4o-mini' default must be replaced per D-02"
+    )
+
+
+def test_tts_upgraded_to_sonic_turbo(agent_worker_source: str) -> None:
+    """R7-03 (D-03): TTS model string must be sonic-turbo, not sonic-3.
+
+    RED until Wave 1 (plan 002) lands D-03.
+    """
+    assert "sonic-turbo" in agent_worker_source, (
+        "TTS model must be 'sonic-turbo' per D-03 (40ms TTFA vs 90ms)"
+    )
+    assert "sonic-3" not in agent_worker_source, (
+        "Old 'sonic-3' model string must be replaced per D-03"
+    )
+
+
+def test_endpointing_tightened(agent_worker_source: str) -> None:
+    """R7-04 (D-04): min_delay=0.15 and false_interruption_timeout=0.6.
+
+    RED until Wave 1 (plan 002) lands D-04.
+    """
+    assert '"min_delay": 0.15' in agent_worker_source, (
+        "endpointing.min_delay must be 0.15 per D-04 (was 0.3)"
+    )
+    assert '"min_delay": 0.3' not in agent_worker_source, (
+        "Old min_delay=0.3 must be replaced per D-04"
+    )
+    assert '"false_interruption_timeout": 0.6' in agent_worker_source, (
+        "interruption.false_interruption_timeout must be 0.6 per D-04 (was 1.2)"
+    )
+    assert '"false_interruption_timeout": 1.2' not in agent_worker_source, (
+        "Old false_interruption_timeout=1.2 must be replaced per D-04"
+    )
+
+
+def test_ack_uses_play_ack_frames(agent_worker_source: str) -> None:
+    """R7-05 (D-05): bare wake must call _play_ack_frames, not session.say('Yes?').
+
+    RED until Wave 2 (plan 003) lands D-05.
+    """
+    assert "_play_ack_frames(" in agent_worker_source, (
+        "_play_ack_frames(...) must be called from on_user_turn_completed bare-wake case per D-05"
+    )
+    assert "async def _play_ack_frames" in agent_worker_source, (
+        "_play_ack_frames must be defined as an async function in agent_worker.py per D-05"
+    )
+    assert "AudioStreamDecoder" in agent_worker_source, (
+        "MP3→PCM decode via AudioStreamDecoder is required for _play_ack_frames per RESEARCH §3"
+    )
+    assert 'self.session.say("Yes?"' not in agent_worker_source, (
+        "Old self.session.say(\"Yes?\", ...) bare-wake call site must be removed per D-05. "
+        "Note: _play_ack_frames fallback uses session.say (no self.) — that is correct and expected."
+    )
 
 
 def test_no_data_received_handler(agent_worker_source: str) -> None:
