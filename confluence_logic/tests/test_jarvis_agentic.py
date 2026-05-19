@@ -1316,6 +1316,9 @@ def test_make_subscriber_token_raises_without_credentials():
 
 
 def test_create_livekit_room_uses_session_id_as_room_name():
+    # Phase 6: _create_livekit_room no longer creates AudioSource or publishes tracks.
+    # It creates the rtc.Room, connects as jarvis-publisher-{session_id}, stores the room
+    # in session state, and dispatches the agent worker. No return value (returns None).
     _reset_meeting_state()
     sid = "session-create-room-uuid-abc"
     bot_id = "recall-bot-uuid-123"
@@ -1335,13 +1338,15 @@ def test_create_livekit_room_uses_session_id_as_room_name():
 
     fake_room = Mock()
     fake_room.connect = AsyncMock()
-    fake_room.local_participant = Mock()
-    fake_room.local_participant.publish_track = AsyncMock()
     fake_room.on = Mock(side_effect=lambda *a, **kw: (lambda f: f))
 
-    fake_source = Mock()
-    fake_track = Mock()
-    fake_options = Mock()
+    fake_lk_api = AsyncMock()
+    fake_dispatch = Mock()
+    fake_dispatch.sid = "dispatch-sid-abc"
+    fake_lk_api.__aenter__ = AsyncMock(return_value=fake_lk_api)
+    fake_lk_api.__aexit__ = AsyncMock(return_value=False)
+    fake_lk_api.agent_dispatch = AsyncMock()
+    fake_lk_api.agent_dispatch.create_dispatch = AsyncMock(return_value=fake_dispatch)
 
     ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
 
@@ -1350,40 +1355,35 @@ def test_create_livekit_room_uses_session_id_as_room_name():
          patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
          patch.object(ja.livekit_api, "AccessToken", fake_access_token_cls), \
          patch.object(ja.rtc, "Room", return_value=fake_room), \
-         patch.object(ja.rtc, "AudioSource", return_value=fake_source), \
-         patch.object(ja.rtc, "LocalAudioTrack") as fake_lat, \
-         patch.object(ja.rtc, "TrackPublishOptions", return_value=fake_options), \
-         patch.object(ja.rtc, "TrackSource", create=True) as fake_ts:
-        fake_lat.create_audio_track = Mock(return_value=fake_track)
-        fake_ts.SOURCE_MICROPHONE = "SOURCE_MICROPHONE"
-        room, source = asyncio.run(ja._create_livekit_room(sid, bot_id))
+         patch.object(ja.livekit_api, "LiveKitAPI", return_value=fake_lk_api):
+        result = asyncio.run(ja._create_livekit_room(sid, bot_id))
 
-    assert room is fake_room
-    assert source is fake_source
+    # Phase 6: returns None (no AudioSource)
+    assert result is None
     assert captured["grants"].room == sid
     assert captured["grants"].room != bot_id
     assert captured["grants"].can_publish is True
     assert ja._meeting_sessions[sid]["livekit_room"] is fake_room
-    assert ja._meeting_sessions[sid]["livekit_source"] is fake_source
+    # No livekit_source in Phase 6 — agent_worker.py owns TTS via AgentSession
+    assert ja._meeting_sessions[sid].get("livekit_source") is None
 
     del ja._meeting_sessions[sid]
 
 
 def test_teardown_livekit_room_disconnects_and_clears_state():
+    # Phase 6: _teardown_livekit_room only disconnects and removes livekit_room.
+    # livekit_source is not set in Phase 6 (agent_worker.py owns TTS via AgentSession).
     _reset_meeting_state()
     sid = "session-teardown"
     fake_room = Mock()
     fake_room.disconnect = AsyncMock()
-    fake_source = Mock()
     ja._meeting_sessions[sid] = ja._fresh_meeting_state(sid)
     ja._meeting_sessions[sid]["livekit_room"] = fake_room
-    ja._meeting_sessions[sid]["livekit_source"] = fake_source
 
     asyncio.run(ja._teardown_livekit_room(sid))
 
     fake_room.disconnect.assert_awaited_once()
     assert ja._meeting_sessions[sid].get("livekit_room") is None
-    assert ja._meeting_sessions[sid].get("livekit_source") is None
 
     del ja._meeting_sessions[sid]
 

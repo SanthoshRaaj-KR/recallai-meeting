@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime
 from typing import Any, Dict, List
 
 from livekit.agents import RunContext
@@ -141,6 +142,12 @@ async def summarize_speaker_tool(context: RunContext, speaker_name: str) -> str:
     result = await summarize_speaker(transcript, speaker_name=speaker_name)
     logger.info("⏱️  summarize_speaker_tool: %.0fms (speaker=%.30r)", (time.perf_counter() - t0) * 1000, speaker_name)
     return result
+
+
+@function_tool
+async def get_current_datetime(context: RunContext) -> str:
+    """Return the current date and time. Call this whenever the user asks about the current date, time, or day."""
+    return datetime.now().strftime("%A, %B %d %Y — %I:%M %p")
 
 
 @function_tool
@@ -370,6 +377,8 @@ async def delete_confluence_page(context: RunContext, page_id: str) -> str:
 
 # Export — JarvisAgent in agent_worker.py will pass this list to Agent(tools=JARVIS_TOOLS, ...)
 JARVIS_TOOLS = [
+    # General utility
+    get_current_datetime,
     # Meeting intelligence tools
     summarize_meeting_tool,
     generate_opinion_tool,

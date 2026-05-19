@@ -262,7 +262,6 @@ def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
         "wake_query_ack_pending": False,
         "invoker_participant": None,       # D-04: set when wake word is detected; D-03: cleared after dispatch
         "livekit_room": None,         # rtc.Room — set by _create_livekit_room
-        "livekit_source": None,       # rtc.AudioSource — set by _create_livekit_room
     }
 
 
@@ -893,15 +892,20 @@ def _make_browser_publisher_token(session_id: str) -> str:
     )
 
 
-async def _create_livekit_room(session_id: str, bot_id: str) -> tuple:
-    """Create a LiveKit Room as publisher for this session (D-06, D-07, D-10, D-11).
+async def _create_livekit_room(session_id: str, bot_id: str) -> None:
+    """Create a LiveKit Room and dispatch the agent worker for this session (D-06, D-07, D-10, D-11).
 
     Room name = session_id (UUID from create_meeting_session). bot_id is included in
     the participant identity for traceability ONLY — it is NOT used as the room name,
     because build_create_bot_payload() runs BEFORE bot_id exists and must generate the
     subscriber token with the same room name we use here.
 
-    Stores Room + AudioSource in _meeting_sessions[session_id].
+    Phase 6: No AudioSource is created here. agent_worker.py owns TTS publication via
+    AgentSession. This function only creates the room (to guarantee it exists) and
+    dispatches the agent worker. The publisher participant (jarvis-publisher-{session_id})
+    joins only to trigger room creation.
+
+    Stores Room in _meeting_sessions[session_id].
     """
     if not LIVEKIT_URL or not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
         raise RuntimeError(
@@ -923,10 +927,6 @@ async def _create_livekit_room(session_id: str, bot_id: str) -> tuple:
     )
 
     room = rtc.Room()
-    source = rtc.AudioSource(_LIVEKIT_SAMPLE_RATE, _LIVEKIT_NUM_CHANNELS)
-    track = rtc.LocalAudioTrack.create_audio_track("jarvis-audio", source)
-    options = rtc.TrackPublishOptions()
-    options.source = rtc.TrackSource.SOURCE_MICROPHONE
 
     @room.on("disconnected")
     def _on_disconnected(reason):
@@ -937,14 +937,12 @@ async def _create_livekit_room(session_id: str, bot_id: str) -> tuple:
         logger.info("LiveKit room reconnected for session %s (bot %s)", session_id, bot_id)
 
     await room.connect(LIVEKIT_URL, publisher_token)
-    await room.local_participant.publish_track(track, options)
 
     state = _meeting_sessions.get(session_id)
     if state is None:
         state = _fresh_meeting_state(session_id)
         _meeting_sessions[session_id] = state
     state["livekit_room"] = room
-    state["livekit_source"] = source
 
     logger.info("LiveKit room created — session=%s bot=%s room_name=%s", session_id, bot_id, session_id)
 
@@ -979,7 +977,9 @@ async def _create_livekit_room(session_id: str, bot_id: str) -> tuple:
             session_id, exc,
         )
 
-    return room, source
+    # Phase 6: AudioSource removed — agent_worker.py owns TTS publication via AgentSession.
+    # The publisher room (jarvis-publisher-{session_id}) exists only to trigger room creation
+    # and to dispatch the agent. No audio source is needed here.
 
 
 async def _teardown_livekit_room(session_id: str) -> None:
@@ -995,7 +995,6 @@ async def _teardown_livekit_room(session_id: str) -> None:
 
     # Step 3: Disconnect the publisher LiveKit room
     room = state.pop("livekit_room", None)
-    state.pop("livekit_source", None)
     if room is None:
         return
     try:
