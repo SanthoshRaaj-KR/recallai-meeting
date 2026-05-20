@@ -125,11 +125,14 @@ def _extract_query(text: str) -> str | None:
 
 
 # ── Transcript logging (Phase 7) ─────────────────────────────────────────────
-async def _post_transcript(session_id: str, text: str) -> None:
+async def _post_transcript(session_id: str, text: str, speaker: str = "Meeting") -> None:
     """POST a final STT transcript to the Jarvis server for transcript_log population.
 
     Fires for EVERY utterance (not just wake-word ones) so the post-meeting
     Confluence review pipeline has full meeting context. Non-fatal on failure.
+
+    speaker: "Meeting" for user speech (mixed audio, no per-speaker attribution),
+             "Jarvis" for Jarvis's own TTS responses.
     """
     if not JARVIS_API_BASE or not text.strip():
         return
@@ -138,11 +141,11 @@ async def _post_transcript(session_id: str, text: str) -> None:
         await asyncio.to_thread(
             _req.post,
             f"{JARVIS_API_BASE}/livekit-transcript/{session_id}",
-            json={"text": text, "speaker": "Meeting"},
+            json={"text": text, "speaker": speaker},
             timeout=3,
         )
     except Exception as exc:
-        logger.debug("transcript post failed (session=%s): %s", session_id, exc)
+        logger.debug("transcript post failed (session=%s speaker=%s): %s", session_id, speaker, exc)
 
 
 # ── Tool-call ack helpers ─────────────────────────────────────────────────────
@@ -441,7 +444,11 @@ class JarvisAgent(Agent):
                 chunks.append(chunk)
                 yield chunk
             if chunks:
-                logger.info("🤖 LLM: %s", "".join(chunks))
+                full_response = "".join(chunks)
+                logger.info("🤖 LLM: %s", full_response)
+                # Post Jarvis's response to transcript log so meeting summary includes it.
+                if self._session_id:
+                    asyncio.create_task(_post_transcript(self._session_id, full_response, speaker="Jarvis"))
 
         frame_count = 0
         async for frame in Agent.default.tts_node(self, _logged_text(text), model_settings):
@@ -519,11 +526,13 @@ async def entrypoint(ctx: JobContext) -> None:
 
         turn_handling=TurnHandlingOptions(
             endpointing={
-                # Phase 7 D-04: 150ms floor (was 300ms). Aggressive but safe — premature
-                # cuts on non-wake utterances are discarded by the wake-word regex anyway.
-                "min_delay": 0.15,
-                # Unchanged — prevents hanging on trailing silence
-                "max_delay": 1.5,
+                # 600ms floor: prevents mid-sentence cuts during listening mode.
+                # Non-wake utterances are discarded by wake-word regex anyway so the
+                # extra wait has zero impact on perceived latency for those cases.
+                # 150ms was too aggressive — users pausing between clauses got split turns.
+                "min_delay": 0.6,
+                # Slightly extended to give more room for slow speakers / long pauses.
+                "max_delay": 2.0,
             },
             interruption={
                 # Adaptive interruption model (livekit-agents >= 1.5):
@@ -545,6 +554,10 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     # ── 4. Start session linked to the correct audio participant ──────────────
+    # Store session_id in userdata so agent_bridge tools can read it via
+    # _session_id_from_context(context.session.userdata["session_id"]).
+    session.userdata = {"session_id": session_id}
+
     if session_id:
         # IDENTITY CONTRACT:
         # pub_token in bot.html MUST grant identity = "recall-browser-{session_id}"

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Any, Dict, List
@@ -42,17 +43,42 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Transcript-log access (Plan 05 swaps the body for IPC; today it's in-process)
+# Transcript-log access — HTTP fetch to the FastAPI server (cross-process safe).
+# The agent worker runs in a separate process; in-process dict access would always
+# return [] because the worker has its own empty _meeting_sessions copy.
 # ---------------------------------------------------------------------------
-def get_transcript_log_for_session(session_id: str) -> List[Dict[str, Any]]:
-    """Return the transcript log for a given session_id, or [] if unknown.
+_JARVIS_API_BASE: str = os.getenv("WEBHOOK_URL", "").rstrip("/")
 
-    Performs a LAZY import of jarvis_agentic to avoid a load-time circular import
-    (jarvis_agentic.py will later import THIS module for IPC in Plan 05).
+
+async def get_transcript_log_for_session(session_id: str) -> List[Dict[str, Any]]:
+    """Return the transcript log for session_id by fetching /transcript/{session_id}.
+
+    Falls back to in-process lookup when WEBHOOK_URL is not set (dev / test mode).
     """
+    if not session_id:
+        return []
+
+    if _JARVIS_API_BASE:
+        try:
+            import requests as _req  # noqa: PLC0415
+            resp = await asyncio.to_thread(
+                _req.get,
+                f"{_JARVIS_API_BASE}/transcript/{session_id}",
+                timeout=3,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            log = data.get("transcript_log", [])
+            logger.debug("transcript fetch: %d entries for session=%s", len(log), session_id)
+            return log
+        except Exception as exc:
+            logger.warning("get_transcript_log_for_session HTTP failed (session=%s): %s", session_id, exc)
+            return []
+
+    # Dev fallback: same-process import (only works when not using a separate worker process)
     try:
         from confluence_logic.jarvis_agentic import _meeting_sessions  # noqa: PLC0415
-    except Exception as exc:  # pragma: no cover — import failure is non-fatal
+    except Exception as exc:
         logger.debug("agent_bridge: jarvis_agentic not importable: %s", exc)
         return []
     state = _meeting_sessions.get(session_id)
@@ -96,7 +122,7 @@ async def summarize_meeting_tool(context: RunContext, detail_level: str = "brief
         detail_level: 'brief' for a 2-3 sentence recap, 'full' for a longer summary.
     """
     sid = _session_id_from_context(context)
-    transcript = get_transcript_log_for_session(sid)
+    transcript = await get_transcript_log_for_session(sid)
     t0 = time.perf_counter()
     result = await summarize_meeting(transcript, detail_level=detail_level)
     logger.info("⏱️  summarize_meeting_tool: %.0fms (%d transcript entries)", (time.perf_counter() - t0) * 1000, len(transcript))
@@ -111,7 +137,7 @@ async def generate_opinion_tool(context: RunContext, query: str = "") -> str:
         query: The specific question the user asked (e.g. 'which option is better?').
     """
     sid = _session_id_from_context(context)
-    transcript = get_transcript_log_for_session(sid)
+    transcript = await get_transcript_log_for_session(sid)
     t0 = time.perf_counter()
     result = await generate_opinion(transcript, query=query)
     logger.info("⏱️  generate_opinion_tool: %.0fms (query=%.40r)", (time.perf_counter() - t0) * 1000, query)
@@ -122,7 +148,7 @@ async def generate_opinion_tool(context: RunContext, query: str = "") -> str:
 async def extract_action_items_tool(context: RunContext) -> str:
     """Extract action items, commitments, and next steps from the meeting transcript."""
     sid = _session_id_from_context(context)
-    transcript = get_transcript_log_for_session(sid)
+    transcript = await get_transcript_log_for_session(sid)
     t0 = time.perf_counter()
     result = await extract_action_items(transcript)
     logger.info("⏱️  extract_action_items_tool: %.0fms (%d transcript entries)", (time.perf_counter() - t0) * 1000, len(transcript))
@@ -137,7 +163,7 @@ async def summarize_speaker_tool(context: RunContext, speaker_name: str) -> str:
         speaker_name: The participant's display name as it appears in the transcript.
     """
     sid = _session_id_from_context(context)
-    transcript = get_transcript_log_for_session(sid)
+    transcript = await get_transcript_log_for_session(sid)
     t0 = time.perf_counter()
     result = await summarize_speaker(transcript, speaker_name=speaker_name)
     logger.info("⏱️  summarize_speaker_tool: %.0fms (speaker=%.30r)", (time.perf_counter() - t0) * 1000, speaker_name)

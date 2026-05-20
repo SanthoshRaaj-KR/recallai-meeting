@@ -2654,6 +2654,15 @@ async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str)
         reset_current_meeting_session(token)
 
 
+@app.get("/transcript/{session_id}")
+async def get_transcript(session_id: str):
+    """Return transcript log for a session — called by agent worker tools (cross-process IPC)."""
+    state = _meeting_sessions.get(session_id)
+    if not state:
+        return {"transcript_log": [], "session_id": session_id}
+    return {"transcript_log": list(state.get("transcript_log") or []), "session_id": session_id}
+
+
 @app.get("/health")
 async def health():
     return {
