@@ -48,13 +48,15 @@ IDENTITY CONTRACT (tokens your backend must mint):
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import os
 import re
 import time
 from pathlib import Path
-from typing import AsyncIterable
+from typing import Any, AsyncIterable
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -72,9 +74,11 @@ from livekit.agents import (
 from livekit.agents.voice import room_io
 from livekit.plugins import assemblyai, silero
 from livekit import rtc
+from livekit.agents import stt as _lk_stt
 from livekit.agents.utils.codecs.decoder import AudioStreamDecoder
+from livekit.agents.llm import FunctionTool
 
-from confluence_logic.audio_cache import get_wake_ack_audio, load_audio_cache
+from confluence_logic.audio_cache import get_wake_ack_audio, get_random_query_ack_audio, load_audio_cache
 from confluence_logic.agent_bridge import JARVIS_TOOLS
 
 _MODULE_DIR = Path(__file__).resolve().parent
@@ -92,7 +96,10 @@ logging.basicConfig(
 JARVIS_AGENT_WORKER_NAME = os.getenv("JARVIS_AGENT_WORKER_NAME", "jarvis-agent").strip()
 JARVIS_LK_TTS_PROVIDER   = os.getenv("JARVIS_LK_TTS_PROVIDER", "cartesia").strip().lower()
 JARVIS_LK_TTS_VOICE      = os.getenv("JARVIS_LK_TTS_VOICE", "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc").strip()
-JARVIS_LK_LLM            = os.getenv("JARVIS_LK_LLM", "openai/gpt-5.4-nano").strip()
+JARVIS_LK_LLM            = os.getenv("JARVIS_LK_LLM", "openai/gpt-4.1-mini").strip()
+# Base URL of the Jarvis FastAPI server — used to POST LiveKit transcripts for
+# the transcript_log (replaces Recall BYOB transcript WebSocket, Phase 7).
+JARVIS_API_BASE          = os.getenv("WEBHOOK_URL", "").rstrip("/")
 
 # ── Wake word regex ───────────────────────────────────────────────────────────
 _WAKE_ALIASES = r"(?:jarvis|jarvas|jervis|jarvus|jarves|jarvi|jarv)"
@@ -115,6 +122,84 @@ def _extract_query(text: str) -> str | None:
     """
     m = _WAKE_PATTERN.search(text.strip())
     return m.group(1).strip() if m else None
+
+
+# ── Transcript logging (Phase 7) ─────────────────────────────────────────────
+async def _post_transcript(session_id: str, text: str) -> None:
+    """POST a final STT transcript to the Jarvis server for transcript_log population.
+
+    Fires for EVERY utterance (not just wake-word ones) so the post-meeting
+    Confluence review pipeline has full meeting context. Non-fatal on failure.
+    """
+    if not JARVIS_API_BASE or not text.strip():
+        return
+    try:
+        import requests as _req
+        await asyncio.to_thread(
+            _req.post,
+            f"{JARVIS_API_BASE}/livekit-transcript/{session_id}",
+            json={"text": text, "speaker": "Meeting"},
+            timeout=3,
+        )
+    except Exception as exc:
+        logger.debug("transcript post failed (session=%s): %s", session_id, exc)
+
+
+# ── Tool-call ack helpers ─────────────────────────────────────────────────────
+
+# Instant tools return in <100ms — an ack would still be playing when the answer starts.
+_INSTANT_TOOL_NAMES: frozenset[str] = frozenset({"get_current_datetime"})
+
+# Dedup: fire at most one ack per agent turn (keyed by speech_handle.id).
+_tool_ack_fired: set[str] = set()
+
+
+async def _safe_play_query_ack(session: AgentSession, mp3_bytes: bytes) -> None:
+    """Play a query-ack clip, swallowing all errors (fire-and-forget)."""
+    try:
+        await session.say("", audio=_mp3_bytes_to_frames(mp3_bytes), add_to_chat_ctx=False)
+    except Exception as exc:
+        logger.debug("tool ack play error: %s", exc)
+
+
+def _maybe_fire_tool_ack(ctx: Any) -> None:
+    """Fire a random query-ack clip once per speech turn — non-fatal."""
+    try:
+        speech_id = ctx.speech_handle.id
+        if speech_id in _tool_ack_fired:
+            return
+        _tool_ack_fired.add(speech_id)
+        if len(_tool_ack_fired) > 500:
+            _tool_ack_fired.clear()
+        cached = get_random_query_ack_audio()
+        if cached is None:
+            return
+        _, mp3_bytes = cached
+        asyncio.create_task(_safe_play_query_ack(ctx.session, mp3_bytes))
+        logger.info("🔔 TOOL ACK firing (%s...)", speech_id[:8])
+    except Exception as exc:
+        logger.debug("_maybe_fire_tool_ack error: %s", exc)
+
+
+def _add_tool_call_ack(tool: Any) -> Any:
+    """Return a FunctionTool that fires a query-ack clip before the original executes."""
+    if not isinstance(tool, FunctionTool) or tool.info.name in _INSTANT_TOOL_NAMES:
+        return tool
+
+    original_func = tool._func
+
+    @functools.wraps(original_func)
+    async def _with_ack(*args: Any, **kwargs: Any) -> Any:
+        for arg in (*args, *kwargs.values()):
+            if hasattr(arg, "speech_handle") and hasattr(arg, "session"):
+                _maybe_fire_tool_ack(arg)
+                break
+        return await original_func(*args, **kwargs)
+
+    return FunctionTool(_with_ack, tool.info)
+
+
+_JARVIS_TOOLS_WITH_ACK = [_add_tool_call_ack(t) for t in JARVIS_TOOLS]
 
 
 # == PCM ack helpers (Phase 7 D-05) ============================================
@@ -169,7 +254,7 @@ class JarvisAgent(Agent):
       tts_node               → ack MP3 first, then Cartesia TTS stream
     """
 
-    def __init__(self) -> None:
+    def __init__(self, session_id: str = "") -> None:
         super().__init__(
             instructions=(
                 "You are Jarvis, an AI meeting assistant. You help teams update Confluence "
@@ -184,17 +269,47 @@ class JarvisAgent(Agent):
                 "- For Confluence page operations: use the confluence tools.\n"
                 "- Never answer factual questions from memory alone — use answer_general_question_tool."
             ),
-            tools=JARVIS_TOOLS,
+            tools=_JARVIS_TOOLS_WITH_ACK,
         )
-        self._turn_t0: float = 0.0   # perf_counter at start of turn for latency logs
-        # Listening mode: True after a bare wake — next utterance becomes the query.
+        self._session_id: str = session_id
+        self._turn_t0: float = 0.0
         self._listening_mode: bool = False
-        self._listening_since: float = 0.0  # perf_counter when listening mode started
+        self._listening_since: float = 0.0
+        # Partial-transcript wake detection (fires ack before VAD silence)
+        self._partial_wake_detected: bool = False
+        self._partial_wake_t: float = 0.0
 
     _LISTENING_TIMEOUT_S: float = 8.0  # reset listening mode if silent this long
 
     async def on_enter(self) -> None:
         logger.info("✅ JarvisAgent entered room — listening for 'Hey Jarvis'")
+
+    # ── Partial-transcript wake detection ──────────────────────────────────────
+    async def stt_node(
+        self,
+        audio: AsyncIterable[rtc.AudioFrame],
+        model_settings: ModelSettings,
+    ) -> AsyncIterable[_lk_stt.SpeechEvent | str]:
+        """Spy on INTERIM_TRANSCRIPT events to detect 'Hey Jarvis' before VAD fires.
+
+        When the wake word appears in a partial, the 'Yes?' ack is played immediately —
+        shaving 100-200ms vs waiting for the final transcript + VAD silence window.
+        """
+        async for event in Agent.default.stt_node(self, audio, model_settings):
+            if (
+                not self._partial_wake_detected
+                and event.type == _lk_stt.SpeechEventType.INTERIM_TRANSCRIPT
+            ):
+                text = event.alternatives[0].text if event.alternatives else ""
+                if _WAKE_PATTERN.search(text):
+                    self._partial_wake_detected = True
+                    self._partial_wake_t = time.perf_counter()
+                    logger.info("⚡ PARTIAL WAKE detected in interim: %.60r", text)
+                    try:
+                        asyncio.create_task(_play_ack_frames(self.session, "yes"))
+                    except Exception as exc:
+                        logger.debug("partial wake ack task failed: %s", exc)
+            yield event
 
     # ── Wake word gate ────────────────────────────────────────────────────────
     async def on_user_turn_completed(
@@ -212,7 +327,15 @@ class JarvisAgent(Agent):
           - new_message.content = [] is safe to mutate here.
         """
         self._turn_t0 = time.perf_counter()
+        # Snapshot and reset partial-wake state at the start of every turn.
+        partial_detected = self._partial_wake_detected
+        partial_t = self._partial_wake_t
+        self._partial_wake_detected = False
+
         raw = new_message.text_content or ""
+
+        if raw.strip() and self._session_id:
+            asyncio.create_task(_post_transcript(self._session_id, raw))
 
         query = _extract_query(raw)
 
@@ -244,21 +367,29 @@ class JarvisAgent(Agent):
 
         # ── Case 3: bare wake word — ack + enter listening mode ──────────
         if not query:
-            logger.info("👂 BARE WAKE — entering listening mode")
+            elapsed_partial_ms = (
+                (time.perf_counter() - partial_t) * 1000 if partial_detected else None
+            )
+            logger.info(
+                "👂 BARE WAKE — listening mode (ack %s)",
+                f"pre-fired {elapsed_partial_ms:.0f}ms ago via partial" if elapsed_partial_ms is not None else "firing now",
+            )
             self._listening_mode = True
             self._listening_since = time.perf_counter()
             new_message.content = []
-            await _play_ack_frames(self.session, "yes")
+            if not partial_detected:
+                # Partial detection already played the ack; skip to avoid double-play.
+                await _play_ack_frames(self.session, "yes")
             return
 
         # ── Case 4: full inline query — strip wake word, send to LLM ─────
         logger.info(
-            "🎯 WAKE QUERY (Δ=%.0fms since turn start): %.100r",
+            "🎯 WAKE QUERY (Δ=%.0fms since turn start%s): %.100r",
             (time.perf_counter() - self._turn_t0) * 1000,
+            f", partial Δ={((time.perf_counter() - partial_t) * 1000):.0f}ms" if partial_detected else "",
             query,
         )
         self._listening_mode = False
-        # Rewrite to query-only — LLM never sees "hey jarvis"
         new_message.content = [query]
 
     # ── LLM node ──────────────────────────────────────────────────────────────
@@ -421,7 +552,7 @@ async def entrypoint(ctx: JobContext) -> None:
         # If pub_token grants ANY other identity, the agent hears nothing.
         logger.info("🎧 STT linked to participant: recall-browser-%s", session_id)
         await session.start(
-            agent=JarvisAgent(),
+            agent=JarvisAgent(session_id=session_id),
             room=ctx.room,
             room_options=room_io.RoomOptions(
                 participant_identity=f"recall-browser-{session_id}",

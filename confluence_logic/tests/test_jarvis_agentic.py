@@ -33,28 +33,20 @@ def _reset_meeting_state():
     ja.meeting_state["wake_query_ack_pending"] = False
 
 
-def test_build_create_bot_payload_uses_recall_provider_by_default():
+def test_build_create_bot_payload_has_no_recall_transcript():
+    """Phase 7: Recall BYOB transcription removed — recording_config has no transcript key."""
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
-         patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \
-         patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
-         patch.object(ja, "LANGUAGE_CODE", "en"), \
          patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
          patch.object(ja, "LIVEKIT_API_KEY", "key"), \
          patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
-         patch.object(ja, "_make_subscriber_token", return_value="JWT"):
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"), \
+         patch.object(ja, "_make_browser_publisher_token", return_value="PUB", create=True):
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
 
-    provider = payload["recording_config"]["transcript"]["provider"]
-    endpoint = payload["recording_config"]["realtime_endpoints"][0]
-
-    assert provider == {
-        "recallai_streaming": {
-            "mode": "prioritize_low_latency",
-            "language_code": "en",
-        }
-    }
-    assert endpoint["events"] == ["transcript.data"]
-    assert endpoint["url"] == "wss://example.ngrok-free.app/recall-audio-stream"
+    rc = payload.get("recording_config", {})
+    assert "transcript" not in rc, "Recall BYOB transcript must be absent (Phase 7)"
+    assert all("transcript.data" not in str(e.get("events", [])) for e in rc.get("realtime_endpoints", [])), \
+        "No transcript.data endpoint must remain (Phase 7)"
 
 
 def test_build_create_bot_payload_requires_webhook_url():
@@ -93,23 +85,18 @@ def test_execute_editor_task_queues_proposal_instead_of_committing():
     asyncio.run(run_test())
 
 
-def test_build_create_bot_payload_supports_assembly_provider_opt_in():
+def test_build_create_bot_payload_no_recall_transcript_regardless_of_env():
+    """Phase 7: Recall BYOB transcription absent regardless of RECALL_TRANSCRIPT_PROVIDER."""
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
-         patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "assembly_ai_v3_streaming"), \
-         patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
-         patch.object(ja, "LANGUAGE_CODE", "en"), \
          patch.object(ja, "LIVEKIT_API_KEY", "key"), \
          patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
-         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"):
+         patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
+         patch.object(ja, "_make_subscriber_token", return_value="JWT"), \
+         patch.object(ja, "_make_browser_publisher_token", return_value="PUB", create=True):
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
 
-    provider = payload["recording_config"]["transcript"]["provider"]
-    assert provider == {
-        "assembly_ai_v3_streaming": {
-            "language_code": "en",
-            "speech_model": "u3-rt-pro",
-        }
-    }
+    rc = payload.get("recording_config", {})
+    assert "transcript" not in rc, "Recall BYOB transcript must always be absent (Phase 7)"
 
 
 def test_process_transcript_event_handles_inline_wake_word_query():
@@ -1221,7 +1208,8 @@ def test_build_create_bot_payload_subscriber_room_matches_publisher():
     assert "room=abc-123-uuid" in url
 
 
-def test_build_create_bot_payload_retains_websocket_endpoint():
+def test_build_create_bot_payload_no_transcript_endpoint():
+    """Phase 7: No transcript.data realtime_endpoint — LiveKit STT replaces Recall BYOB."""
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
          patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
          patch.object(ja, "LIVEKIT_API_KEY", "key"), \
@@ -1232,12 +1220,10 @@ def test_build_create_bot_payload_retains_websocket_endpoint():
             "https://meet.google.com/abc-defg-hij", session_id="sess-1"
         )
 
-    endpoints = payload["recording_config"]["realtime_endpoints"]
-    # Phase 6: only transcript endpoint — audio_mixed_raw WebSocket removed
-    assert len(endpoints) == 1
-    assert endpoints[0]["type"] == "websocket"
-    assert endpoints[0]["url"].startswith("wss://")
-    assert endpoints[0]["events"] == ["transcript.data"]
+    rc = payload.get("recording_config", {})
+    endpoints = rc.get("realtime_endpoints", [])
+    assert not any(e.get("events") == ["transcript.data"] for e in endpoints), \
+        "transcript.data endpoint must be absent (Phase 7 — LiveKit STT replaces Recall BYOB)"
     assert not any(e.get("events") == ["audio_mixed_raw.data"] for e in endpoints), \
         "audio_mixed_raw endpoint must be absent (Phase 6)"
 
@@ -1635,14 +1621,8 @@ def test_transcript_websocket_no_longer_dispatches_voice():
 
 
 def test_build_create_bot_payload_no_audio_mixed_raw():
-    """R6-01: build_create_bot_payload must NOT include audio_mixed_raw in recording_config.
-
-    RED until Wave 1 removes audio_mixed_raw from the payload.
-    """
+    """R6-01: build_create_bot_payload must NOT include audio_mixed_raw in recording_config."""
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
-         patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \
-         patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
-         patch.object(ja, "LANGUAGE_CODE", "en"), \
          patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
          patch.object(ja, "LIVEKIT_API_KEY", "key"), \
          patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
@@ -1650,19 +1630,13 @@ def test_build_create_bot_payload_no_audio_mixed_raw():
          patch.object(ja, "_make_browser_publisher_token", return_value="PUB_JWT", create=True):
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij", session_id="sess-1")
 
-    rc = payload["recording_config"]
+    rc = payload.get("recording_config", {})
     assert "audio_mixed_raw" not in rc, "audio_mixed_raw must be absent (Phase 6 / R6-01)"
 
 
-def test_build_create_bot_payload_single_endpoint():
-    """R6-02: build_create_bot_payload must have exactly 1 realtime_endpoint (transcript only).
-
-    RED until Wave 1 removes the audio_mixed_raw WebSocket endpoint.
-    """
+def test_build_create_bot_payload_no_realtime_endpoints():
+    """Phase 7: No realtime_endpoints — LiveKit STT (agent_worker) replaces Recall BYOB."""
     with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
-         patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \
-         patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
-         patch.object(ja, "LANGUAGE_CODE", "en"), \
          patch.object(ja, "LIVEKIT_URL", "wss://test.livekit.cloud"), \
          patch.object(ja, "LIVEKIT_API_KEY", "key"), \
          patch.object(ja, "LIVEKIT_API_SECRET", "secret"), \
@@ -1670,9 +1644,9 @@ def test_build_create_bot_payload_single_endpoint():
          patch.object(ja, "_make_browser_publisher_token", return_value="PUB_JWT", create=True):
         payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij", session_id="sess-1")
 
-    endpoints = payload["recording_config"]["realtime_endpoints"]
-    assert len(endpoints) == 1, f"Expected exactly 1 endpoint after Phase 6; got {endpoints}"
-    assert endpoints[0]["events"] == ["transcript.data"], "Only transcript endpoint must remain (D-03)"
+    rc = payload.get("recording_config", {})
+    endpoints = rc.get("realtime_endpoints", [])
+    assert len(endpoints) == 0, f"No realtime_endpoints after Phase 7; got {endpoints}"
 
 
 def test_build_create_bot_payload_includes_pub_token():

@@ -83,3 +83,13 @@ Plans:
 | 2. Multi-Agent Pipeline Core | 4/4 | Complete   | 2026-05-12 |
 | 3. Async Progress Streaming + Review UI | 3/3 | Complete   | 2026-05-12 |
 | 4. Safe Apply Hardening + Re-indexing | 0/TBD | Not started | - |
+
+### Phase 5: migrate transcript saving from Recall webhooks to LiveKit AgentSession STT transcripts and add short processing-ack audio clips
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 4
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd:plan-phase 5 to break down)

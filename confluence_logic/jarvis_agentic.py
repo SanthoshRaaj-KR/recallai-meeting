@@ -37,7 +37,7 @@ import uvicorn
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from gtts import gTTS
 from openai import OpenAI
@@ -1094,43 +1094,29 @@ async def push_audio_to_livekit(
 
 
 def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None) -> dict:
-    # Transcript stream path (UNCHANGED — D-03/D-04: Confluence pipeline depends on this).
-    transcript_path = f"/recall-audio-stream/{session_id}" if session_id else "/recall-audio-stream"
-
     if not WEBHOOK_URL:
         raise RuntimeError(
             "WEBHOOK_URL is not configured. Set it in confluence_logic/.env or the process environment."
         )
 
-    if WEBHOOK_URL.startswith("https://"):
-        ws_base = WEBHOOK_URL.replace("https://", "wss://", 1)
-    elif WEBHOOK_URL.startswith("http://"):
-        ws_base = WEBHOOK_URL.replace("http://", "ws://", 1)
-    else:
-        ws_base = WEBHOOK_URL
-
-    transcript_ws_url = ws_base + transcript_path
-
-    # D-02 / D-03 / D-14: Recall bot loads bot.html via output_media kind=webpage.
-    # D-16: pass LiveKit url, subscriber token, and room name as URL query params.
-    # CRITICAL: room name = session_id (a UUID). The publisher token in
-    # _create_livekit_room must use the SAME session_id as its room name. Otherwise
-    # the bot.html subscriber and Python publisher land in different rooms and no
-    # audio is delivered. Using session_id (not bot_id) avoids the chicken-and-egg
-    # problem where bot_id isn't available when this function runs.
-    room_name = session_id or _DEFAULT_SESSION_ID
-    subscriber_token = _make_subscriber_token(room_name)
-    browser_pub_token = _make_browser_publisher_token(room_name)  # Phase 6: browser publisher token
     # WEBHOOK_URL must be HTTPS (Recall requirement — Pitfall 5).
     if not WEBHOOK_URL.startswith("https://"):
         raise RuntimeError(
             "WEBHOOK_URL must be HTTPS for Recall.ai output_media (got: %s)" % WEBHOOK_URL
         )
+
+    # D-02 / D-03 / D-14: Recall bot loads bot.html via output_media kind=webpage.
+    # D-16: pass LiveKit url, subscriber token, and room name as URL query params.
+    # CRITICAL: room name = session_id. The publisher token in _create_livekit_room
+    # must use the SAME session_id as its room name.
+    room_name = session_id or _DEFAULT_SESSION_ID
+    subscriber_token = _make_subscriber_token(room_name)
+    browser_pub_token = _make_browser_publisher_token(room_name)
     bot_page_url = (
         f"{WEBHOOK_URL.rstrip('/')}/bot-page"
         f"?url={LIVEKIT_URL}"
         f"&token={subscriber_token}"
-        f"&pub_token={browser_pub_token}"   # Phase 6: browser publisher token
+        f"&pub_token={browser_pub_token}"
         f"&room={room_name}"
     )
 
@@ -1140,22 +1126,10 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
         "metadata": {
             "session_id": session_id or _DEFAULT_SESSION_ID,
         },
-        "recording_config": {
-            # D-03 / D-04: transcript provider stays for Confluence pipeline.
-            # Phase 6: audio_mixed_raw removed — browser publishes directly via getUserMedia.
-            "transcript": {
-                "provider": build_transcript_provider_config()
-            },
-            "realtime_endpoints": [
-                # Transcript endpoint (UNCHANGED — D-03/D-04 — feeds transcript_log → Confluence review).
-                {
-                    "type": "websocket",
-                    "url": transcript_ws_url,
-                    "events": ["transcript.data"],
-                },
-                # audio_mixed_raw endpoint REMOVED (Phase 6) — browser publishes directly via getUserMedia.
-            ],
-        },
+        # Phase 7 cost reduction: Recall BYOB transcription (transcript provider +
+        # realtime_endpoints WebSocket) removed. LiveKit STT (livekit-plugins-assemblyai
+        # in agent_worker.py) transcribes meeting audio and POSTs final transcripts to
+        # POST /livekit-transcript/{session_id} — no Recall transcription charges.
         "output_media": {
             "camera": {
                 "kind": "webpage",
@@ -2557,6 +2531,38 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.websocket("/recall-audio-stream/{session_id}")
 async def websocket_endpoint_for_session(websocket: WebSocket, session_id: str):
     await _websocket_endpoint_for_session(websocket, session_id)
+
+
+@app.post("/livekit-transcript/{session_id}")
+async def receive_livekit_transcript(session_id: str, request: Request):
+    """Receive final STT transcripts from the LiveKit agent worker.
+
+    Replaces the Recall BYOB transcript WebSocket (Phase 7 cost reduction).
+    agent_worker.py POSTs every final utterance here so transcript_log stays
+    populated for the post-meeting Confluence review pipeline.
+    """
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    speaker = (body.get("speaker") or "Meeting").strip()
+    if not text:
+        return {"ok": True}
+    token = set_current_meeting_session(session_id)
+    try:
+        entry = _append_transcript_log_entry(
+            participant=speaker,
+            text=text,
+            timestamp=time.time(),
+            source="livekit",
+        )
+        if entry:
+            try:
+                asyncio.create_task(graph_rag.ingest_transcript_entry(entry))
+            except Exception:
+                pass
+        logger.info("LiveKit transcript [%s] %s: %.80s", session_id, speaker, text)
+    finally:
+        reset_current_meeting_session(token)
+    return {"ok": True}
 
 
 @app.get("/bot-page")
