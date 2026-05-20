@@ -70,7 +70,7 @@ from livekit.agents import (
     llm,
 )
 from livekit.agents.voice import room_io
-from livekit.plugins import silero
+from livekit.plugins import assemblyai, silero
 
 from confluence_logic.agent_bridge import JARVIS_TOOLS
 
@@ -89,7 +89,7 @@ logging.basicConfig(
 JARVIS_AGENT_WORKER_NAME = os.getenv("JARVIS_AGENT_WORKER_NAME", "jarvis-agent").strip()
 JARVIS_LK_TTS_PROVIDER   = os.getenv("JARVIS_LK_TTS_PROVIDER", "cartesia").strip().lower()
 JARVIS_LK_TTS_VOICE      = os.getenv("JARVIS_LK_TTS_VOICE", "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc").strip()
-JARVIS_LK_LLM            = os.getenv("JARVIS_LK_LLM", "openai/gpt-4o-mini").strip()
+JARVIS_LK_LLM            = os.getenv("JARVIS_LK_LLM", "openai/gpt-4.1-mini").strip()
 
 # ── Wake word regex ───────────────────────────────────────────────────────────
 _WAKE_ALIASES = r"(?:jarvis|jarvas|jervis|jarvus|jarves|jarvi|jarv)"
@@ -314,24 +314,28 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.warning("Bad job metadata (%s) — fallback to first participant", exc)
 
     logger.info(
-        "🚀 AgentSession starting  agent=%s  llm=%s  tts=%s/sonic-3  session_id=%s",
+        "🚀 AgentSession starting  agent=%s  llm=%s  tts=%s/sonic-turbo  session_id=%s",
         JARVIS_AGENT_WORKER_NAME, JARVIS_LK_LLM, JARVIS_LK_TTS_PROVIDER,
         session_id or "<none — first participant>",
     )
 
     # ── 3. Build AgentSession with fastest possible settings ──────────────────
     session = AgentSession(
-        # Deepgram Nova-3 via LiveKit Inference
-        # LiveKit Inference co-locates STT with your agent → lowest RTT
-        # Has a Mumbai node → extra-low latency for Indian region users
-        stt=inference.STT(model="deepgram/nova-3", language="multi"),
+        # AssemblyAI Universal-3 Pro Streaming (plugin-direct, NOT via inference.STT — Inference does not expose keyterms_prompt).
+        # keyterms_prompt locks "Jarvis" / "Hey Jarvis" recognition in noisy meeting audio.
+        # language_detection=False eliminates the 30–80 ms multilingual overhead Deepgram added with its multilingual mode.
+        stt=assemblyai.STT(
+            model="u3-rt-pro",
+            keyterms_prompt=["Jarvis", "Hey Jarvis"],
+            language_detection=False,
+        ),
 
         # gpt-4o-mini: fastest OpenAI TTFT at conversational response lengths
         llm=inference.LLM(JARVIS_LK_LLM),
 
-        # Cartesia Sonic-3: 40–90ms time-to-first-audio, best-in-class for latency
+        # Cartesia Sonic-Turbo: ~40ms time-to-first-audio (vs ~90ms for Sonic-3); voice UUID unchanged (cross-model compatible).
         tts=inference.TTS(
-            f"{JARVIS_LK_TTS_PROVIDER}/sonic-3",
+            f"{JARVIS_LK_TTS_PROVIDER}/sonic-turbo",
             voice=JARVIS_LK_TTS_VOICE,
         ),
 
@@ -339,17 +343,18 @@ async def entrypoint(ctx: JobContext) -> None:
 
         turn_handling=TurnHandlingOptions(
             endpointing={
-                # Start processing 300ms after silence — aggressive but correct
-                # for meeting context where people speak in complete sentences
-                "min_delay": 0.3,
-                # Never wait more than 1.5s — prevents hanging on trailing silence
+                # Phase 7 D-04: 150ms floor (was 300ms). Aggressive but safe — premature
+                # cuts on non-wake utterances are discarded by the wake-word regex anyway.
+                "min_delay": 0.15,
+                # Unchanged — prevents hanging on trailing silence
                 "max_delay": 1.5,
             },
             interruption={
                 # Adaptive interruption model (livekit-agents >= 1.5):
                 # distinguishes real interruptions from coughs, "mm-hmm", etc.
                 "resume_false_interruption": True,
-                "false_interruption_timeout": 1.2,
+                # Phase 7 D-04: 0.6s (was 1.2s) — halves resume-from-false-interruption latency.
+                "false_interruption_timeout": 0.6,
             },
         ),
 
