@@ -71,7 +71,10 @@ from livekit.agents import (
 )
 from livekit.agents.voice import room_io
 from livekit.plugins import assemblyai, silero
+from livekit import rtc
+from livekit.agents.utils.codecs.decoder import AudioStreamDecoder
 
+from confluence_logic.audio_cache import get_wake_ack_audio, load_audio_cache
 from confluence_logic.agent_bridge import JARVIS_TOOLS
 
 _MODULE_DIR = Path(__file__).resolve().parent
@@ -112,6 +115,47 @@ def _extract_query(text: str) -> str | None:
     """
     m = _WAKE_PATTERN.search(text.strip())
     return m.group(1).strip() if m else None
+
+
+# == PCM ack helpers (Phase 7 D-05) ============================================
+async def _mp3_bytes_to_frames(mp3_bytes: bytes):
+    """Decode MP3 bytes to a 48kHz mono rtc.AudioFrame async iterator.
+
+    Used by _play_ack_frames to feed AgentSession.say(audio=...) directly,
+    bypassing the Cartesia TTS engine for pre-cached acknowledgements.
+    """
+    decoder = AudioStreamDecoder(
+        sample_rate=48000,
+        num_channels=1,
+        format="mp3",
+    )
+    decoder.push(mp3_bytes)
+    decoder.end_input()
+    async for frame in decoder:
+        yield frame
+
+
+async def _play_ack_frames(session: AgentSession, key: str = "yes") -> None:
+    """Phase 7 D-05: play a pre-cached ack clip with sub-5ms perceived latency.
+
+    Pulls MP3 bytes from audio_cache, decodes to rtc.AudioFrame via AudioStreamDecoder,
+    and feeds them into AgentSession.say(audio=...) - bypasses Cartesia TTS entirely
+    (<5ms vs ~150ms round-trip).
+
+    Falls back to live TTS session.say("Yes?", ...) on cache miss (e.g. yes.mp3 absent).
+    """
+    cached = get_wake_ack_audio()  # Returns ("yes", mp3_bytes) or None - key param is currently informational.
+    if cached is None:
+        logger.warning("_play_ack_frames: cache miss for %r - falling back to TTS", key)
+        await session.say("Yes?", add_to_chat_ctx=False)
+        return
+
+    _, mp3_bytes = cached
+    await session.say(
+        "",  # empty text - `audio` overrides TTS routing
+        audio=_mp3_bytes_to_frames(mp3_bytes),
+        add_to_chat_ctx=False,
+    )
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
@@ -204,7 +248,7 @@ class JarvisAgent(Agent):
             self._listening_mode = True
             self._listening_since = time.perf_counter()
             new_message.content = []
-            await self.session.say("Yes?", add_to_chat_ctx=False)
+            await _play_ack_frames(self.session, "yes")
             return
 
         # ── Case 4: full inline query — strip wake word, send to LLM ─────
@@ -291,7 +335,8 @@ server = AgentServer()
 
 def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load()
-    logger.info("✅ Prewarm done — VAD ready")
+    n_cached = load_audio_cache()
+    logger.info("✅ Prewarm done — VAD ready, %d ack audio files cached", n_cached)
 
 
 server.setup_fnc = prewarm
