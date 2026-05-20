@@ -375,6 +375,250 @@ async def delete_confluence_page(context: RunContext, page_id: str) -> str:
     return await asyncio.to_thread(_run)
 
 
+# ---------------------------------------------------------------------------
+# Advanced Confluence tools — rich wrappers using Graph RAG, Pinecone, and
+# version-conflict retry logic.  These replace / complement the simpler tools
+# above and expose the full capability of the knowledge pipeline to the
+# LiveKit voice agent.
+# ---------------------------------------------------------------------------
+
+def _retry_connector():
+    from confluence_logic.connectors.confluence import ConfluenceConnector
+    return ConfluenceConnector()
+
+
+def _retry_store():
+    from confluence_logic.db.vector_store import PineconeStore
+    return PineconeStore()
+
+
+async def _commit_with_retry_async(
+    page_id: str,
+    apply_fn,
+    expected_version: int,
+    title_override: str | None = None,
+):
+    """Fetch-transform-push with 3-attempt version-conflict backoff retry."""
+    _max = 3
+
+    def _run():
+        nonlocal expected_version
+        connector = _retry_connector()
+        for attempt in range(_max):
+            try:
+                live_html = connector.fetch_page_html(page_id)
+                new_html = apply_fn(live_html)
+                ok = connector.push_update(
+                    page_id, new_html,
+                    expected_version=expected_version,
+                    title_override=title_override,
+                )
+                return ok, (expected_version + 1) if ok else None
+            except ValueError as ve:
+                if "Version Conflict" not in str(ve) or attempt == _max - 1:
+                    raise
+                import time
+                meta = connector.get_page_metadata(page_id)
+                expected_version = meta.get("version", {}).get("number", expected_version)
+                time.sleep(0.5 * (2 ** attempt))
+        return False, None
+
+    return await asyncio.to_thread(_run)
+
+
+@function_tool
+async def search_workspace_knowledge_tool(context: RunContext, query: str) -> str:
+    """Search all Confluence pages using Pinecone vector search and live Confluence search.
+
+    More powerful than search_confluence_pages — use this for complex knowledge lookups
+    that benefit from semantic similarity matching across all indexed content.
+
+    Args:
+        query: Topic, keyword, or natural-language description of what to find.
+    """
+    def _run():
+        import concurrent.futures, difflib
+
+        connector = _retry_connector()
+
+        def _live():
+            try:
+                return connector.search_pages(query, limit=8)
+            except Exception as exc:
+                logger.warning("Live Confluence search failed: %s", exc)
+                return []
+
+        def _vec():
+            try:
+                return _retry_store().search(query, top_k=5)
+            except Exception as exc:
+                logger.warning("Pinecone search unavailable: %s", exc)
+                return []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            live_results = ex.submit(_live).result()
+            pinecone_results = ex.submit(_vec).result()
+
+        def _sim(title: str) -> float:
+            return difflib.SequenceMatcher(None, query.lower(), title.lower()).ratio()
+
+        seen: dict[str, tuple[dict, float]] = {}
+        for item in live_results:
+            pid = item.get("page_id", "")
+            if pid:
+                seen[pid] = (item, _sim(item.get("title", "")))
+        for match in pinecone_results:
+            meta = match.get("metadata", {})
+            pid = meta.get("page_id", "")
+            if pid and pid not in seen:
+                seen[pid] = (meta, _sim(meta.get("title", "")))
+
+        if not seen:
+            return "No Confluence pages found for that query."
+
+        ranked = sorted(seen.values(), key=lambda t: -t[1])[:5]
+        lines = [f"- {v.get('title', 'Untitled')} (id={pid})"
+                 for (v, _), pid in zip(ranked, seen)]
+        return "Found pages:\n" + "\n".join(lines)
+
+    return await asyncio.to_thread(_run)
+
+
+@function_tool
+async def fetch_live_page_tool(context: RunContext, page_id: str, heading: str = "") -> str:
+    """Fetch a Confluence page with its current version number.
+
+    Always call this before commit_document_edit_tool or commit_delete_tool to
+    get the correct expected_version for the page you are about to modify.
+
+    Args:
+        page_id: Confluence page ID.
+        heading: Optional section heading to fetch content for.
+    """
+    def _run():
+        try:
+            from confluence_logic.utils.html_parser import extract_headings, get_section_html
+            connector = _retry_connector()
+            html = connector.fetch_page_html(page_id)
+            meta = connector.get_page_metadata(page_id)
+            version = meta.get("version", {}).get("number", 1)
+            headings = extract_headings(html)
+            result = f"Page {page_id} | version={version}\nHeadings: {', '.join(headings) or '(none)'}"
+            if heading:
+                section = get_section_html(html, heading)
+                result += f"\n\nSection '{heading}':\n{section[:2000] if section else '(section not found)'}"
+            return result
+        except Exception as exc:
+            return f"Failed to fetch page {page_id}: {exc}"
+
+    return await asyncio.to_thread(_run)
+
+
+@function_tool
+async def commit_document_edit_tool(
+    context: RunContext,
+    page_id: str,
+    expected_version: int,
+    heading: str,
+    new_content: str,
+    append: bool = False,
+) -> str:
+    """Edit a section of a Confluence page with automatic version-conflict retry.
+
+    First call fetch_live_page_tool to get the expected_version for the page.
+
+    Args:
+        page_id: Confluence page ID.
+        expected_version: Current page version from fetch_live_page_tool.
+        heading: Section heading to edit.
+        new_content: New markdown content for the section.
+        append: If True, appends new_content instead of replacing the section.
+    """
+    try:
+        from confluence_logic.utils.html_parser import get_section_html, edit_block_in_section
+        from confluence_logic.utils.html_builder import markdown_to_html
+        new_html = markdown_to_html(new_content) if new_content else ""
+
+        if append:
+            def apply_fn(live_html: str) -> str:
+                cur = get_section_html(live_html, heading)
+                merged = (cur.rstrip() + "\n" + new_html) if cur.strip() else new_html
+                return edit_block_in_section(live_html, heading, cur, merged)
+        else:
+            def apply_fn(live_html: str) -> str:
+                old = get_section_html(live_html, heading)
+                return edit_block_in_section(live_html, heading, old, new_html)
+
+        ok, _ = await _commit_with_retry_async(page_id, apply_fn, expected_version)
+        if ok:
+            return f"Section '{heading}' on page {page_id} updated successfully."
+        return f"Failed to update section '{heading}' on page {page_id}."
+    except Exception as exc:
+        return f"Edit failed: {exc}"
+
+
+@function_tool
+async def commit_delete_tool(
+    context: RunContext,
+    page_id: str,
+    expected_version: int,
+    heading: str,
+    delete_entire_section: bool = False,
+) -> str:
+    """Delete content in a Confluence page section with automatic version-conflict retry.
+
+    First call fetch_live_page_tool to get the expected_version for the page.
+
+    Args:
+        page_id: Confluence page ID.
+        expected_version: Current page version from fetch_live_page_tool.
+        heading: Section heading to target.
+        delete_entire_section: If True, removes the entire section including its heading.
+    """
+    try:
+        from confluence_logic.utils.html_parser import delete_content_in_section
+
+        def apply_fn(live_html: str) -> str:
+            return delete_content_in_section(
+                live_html, heading,
+                delete_entire_section=delete_entire_section,
+            )
+
+        ok, _ = await _commit_with_retry_async(page_id, apply_fn, expected_version)
+        if ok:
+            return f"Section '{heading}' deleted from page {page_id}."
+        return f"Failed to delete section '{heading}' from page {page_id}."
+    except Exception as exc:
+        return f"Delete failed: {exc}"
+
+
+@function_tool
+async def update_page_title_tool(
+    context: RunContext,
+    page_id: str,
+    expected_version: int,
+    new_title: str,
+) -> str:
+    """Rename a Confluence page.
+
+    First call fetch_live_page_tool to get the expected_version for the page.
+
+    Args:
+        page_id: Confluence page ID.
+        expected_version: Current page version from fetch_live_page_tool.
+        new_title: New title for the page.
+    """
+    try:
+        ok, _ = await _commit_with_retry_async(
+            page_id, lambda html: html, expected_version, title_override=new_title,
+        )
+        if ok:
+            return f"Page {page_id} renamed to '{new_title}'."
+        return f"Failed to rename page {page_id}."
+    except Exception as exc:
+        return f"Title update failed: {exc}"
+
+
 # Export — JarvisAgent in agent_worker.py will pass this list to Agent(tools=JARVIS_TOOLS, ...)
 JARVIS_TOOLS = [
     # General utility
@@ -385,7 +629,7 @@ JARVIS_TOOLS = [
     extract_action_items_tool,
     summarize_speaker_tool,
     answer_general_question_tool,
-    # Confluence page tools
+    # Confluence page tools — basic
     search_confluence_pages,
     list_confluence_pages,
     fetch_confluence_page,
@@ -393,6 +637,12 @@ JARVIS_TOOLS = [
     edit_confluence_section,
     delete_confluence_section,
     delete_confluence_page,
+    # Confluence page tools — advanced (Graph RAG + Pinecone + version-retry)
+    search_workspace_knowledge_tool,
+    fetch_live_page_tool,
+    commit_document_edit_tool,
+    commit_delete_tool,
+    update_page_title_tool,
 ]
 
 

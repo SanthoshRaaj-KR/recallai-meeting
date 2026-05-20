@@ -17,7 +17,7 @@ FULL PIPELINE (what actually happens, in order):
        no wake word  → clear message content → llm_node returns None → total silence
        bare "Jarvis" → clear message content + await session.say(ack mp3) → silence
        "Jarvis, X"   → rewrite message content to X only → llm_node dispatches to LLM
-  8. llm_node → gpt-4o-mini streams tokens (preemptive_generation=True speeds this up)
+  8. llm_node → gpt-5.4-nano streams tokens (preemptive_generation=True speeds this up)
   9. tts_node → yields pre-recorded ack MP3 frames immediately (local, ~0ms)
               → then Cartesia Sonic-3 streams TTS frames in parallel
  10. AgentSession publishes TTS audio as agent's own participant track
@@ -28,7 +28,7 @@ LATENCY BUDGET (what you should see in logs):
   VAD end-of-speech:            30–80 ms
   Deepgram final transcript:    100–200 ms
   on_user_turn_completed:       ~1 ms  (regex only, no I/O)
-  LLM TTFT (gpt-4o-mini):       200–400 ms
+  LLM TTFT (gpt-5.4-nano):      150–250 ms
   Ack MP3 first frame:          ~0 ms  (local disk)
   Cartesia TTFA:                40–90 ms
   ── Total perceived latency ── ~400–800 ms after user stops speaking
@@ -92,7 +92,7 @@ logging.basicConfig(
 JARVIS_AGENT_WORKER_NAME = os.getenv("JARVIS_AGENT_WORKER_NAME", "jarvis-agent").strip()
 JARVIS_LK_TTS_PROVIDER   = os.getenv("JARVIS_LK_TTS_PROVIDER", "cartesia").strip().lower()
 JARVIS_LK_TTS_VOICE      = os.getenv("JARVIS_LK_TTS_VOICE", "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc").strip()
-JARVIS_LK_LLM            = os.getenv("JARVIS_LK_LLM", "openai/gpt-4.1-mini").strip()
+JARVIS_LK_LLM            = os.getenv("JARVIS_LK_LLM", "openai/gpt-5.4-nano").strip()
 
 # ── Wake word regex ───────────────────────────────────────────────────────────
 _WAKE_ALIASES = r"(?:jarvis|jarvas|jervis|jarvus|jarves|jarvi|jarv)"
@@ -375,7 +375,7 @@ async def entrypoint(ctx: JobContext) -> None:
             language_detection=False,
         ),
 
-        # gpt-4o-mini: fastest OpenAI TTFT at conversational response lengths
+        # gpt-5.4-nano: lowest TTFT at conversational response lengths (JARVIS_LK_LLM env override)
         llm=inference.LLM(JARVIS_LK_LLM),
 
         # Cartesia Sonic-Turbo: ~40ms time-to-first-audio (vs ~90ms for Sonic-3); voice UUID unchanged (cross-model compatible).

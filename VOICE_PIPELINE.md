@@ -1,443 +1,463 @@
-# Jarvis Voice Pipeline — Architecture, Latency & Optimizations
+# Jarvis Voice Pipeline — Complete Architecture & Technical Reference
 
-> **Status:** Working as of 2026-05-19 (Phase 6 architecture confirmed functional)
-> **Scope:** Real-time voice path only — Confluence review pipeline is separate and not covered here.
-
----
-
-## 0. Recent Fixes That Made the Pipeline Work
-
-Before the pipeline worked end-to-end, two bugs were silently breaking audio delivery. Both were found and fixed on 2026-05-19.
+> **Status:** Phase 7 implemented (2026-05-20). All five latency optimisations live.
+> **Scope:** Real-time voice path only. Confluence review pipeline (post-meeting) is separate.
 
 ---
 
-### Fix A — `jarvis_agentic.py`: NameError on every bot start (`return room, source`)
+## Table of Contents
 
-**What was broken:**
-`_create_livekit_room()` ended with `return room, source`. In Phase 6 the `AudioSource` object was removed (the agent now publishes TTS directly via AgentSession, not via a manually created audio track), but the `source` variable was never cleaned up. Every call to `POST /bot/start` raised a `NameError: name 'source' is not defined`.
-
-The exception was caught by `_start_bot_for_session`, which marked the session as `"error"` and returned an error response to the caller. Crucially, the agent dispatch ran *before* the crash, so the agent was alive and generating TTS — but the API always reported failure, causing the UI and orchestrator to think the bot never started successfully.
-
-**Fix:**
-Removed `return room, source`. The function now returns `None` implicitly, which is what the caller expected (the return value was already being discarded). One-line change.
-
----
-
-### Fix B — `bot.html`: AudioContext async race condition (audio never played reliably)
-
-**What was broken:**
-The subscriber IIFE in `bot.html` used WebAudio API (`AudioContext → createMediaStreamSource → ctx.destination`) as the primary audio path with `HTMLAudioElement` as fallback. The logic was:
-
-```javascript
-function ensureAudioCtx() {
-  audioCtx = new AudioContext({ latencyHint: 'interactive' });
-  audioCtx.resume();   // ← fire-and-forget Promise — does NOT block
-  return audioCtx;     // ← returned immediately, ctx.state still 'suspended'
-}
-
-function attachTrack(track, identity) {
-  var ctx = ensureAudioCtx();
-  if (ctx.state === 'running') {        // ← ALWAYS false — resume() is async
-    _attachViaWebAudio(rawTrack, track, identity);
-  } else {
-    // AudioContext suspended — call resume() AGAIN inside .then()
-    ctx.resume().then(function () {
-      if (ctx.state === 'running') {    // ← may or may not work in headless Chrome
-        _attachViaWebAudio(rawTrack, track, identity);
-      } else {
-        playTrackFallback(track, identity);  // ← fallback
-      }
-    });
-  }
-}
-```
-
-The problem: `ensureAudioCtx()` called `ctx.resume()` as a fire-and-forget Promise and returned the context object immediately. The caller then synchronously checked `ctx.state === 'running'` — but since `resume()` is async, the state was still `'suspended'` at that check. **The WebAudio primary path was never taken.** The code always fell into the `else` branch, which called `ctx.resume()` a second time inside a `.then()` handler. Whether that second attempt succeeded in Recall's headless Chrome was non-deterministic — sometimes it worked, sometimes it silently dropped the audio.
-
-**Fix:**
-Flipped the priority. `HTMLAudioElement` via `track.attach()` is now the **primary** path, called first and unconditionally. Recall's official docs confirm that headless Chrome reliably captures audio from `<audio>` elements and injects it into the meeting. WebAudio is only layered on top if `ctx.state === 'running'` at the moment a track arrives (i.e., the pre-warm on `RoomEvent.Connected` already resolved). This eliminates the race condition entirely.
-
-```javascript
-function attachTrack(track, identity) {
-  // Primary: HTMLAudioElement — always reliable in Recall's headless Chrome
-  var audioEl = playTrackFallback(track, identity);   // plays immediately
-
-  // Secondary: WebAudio — only if context already confirmed running
-  var ctx = ensureAudioCtx();
-  if (ctx.state === 'running') {
-    // Swap out the <audio> element for the WebAudio node
-    audioEl.pause(); audioEl.remove();
-    _attachViaWebAudio(rawTrack, track, identity);
-  } else {
-    // Kick off a background resume() — doesn't block audio delivery
-    ctx.resume().catch(function (e) { console.warn(...); });
-  }
-}
-```
-
-**Why this matters:** Before the fix, audio playback in Recall depended entirely on a second async `ctx.resume()` call succeeding in a headless Chrome environment where autoplay policies are non-standard. After the fix, audio plays the moment the `TrackSubscribed` event fires, via a synchronous `track.attach()` call that Recall's Chrome handles natively.
+1. [What Jarvis Does in a Meeting](#1-what-jarvis-does-in-a-meeting)
+2. [Full End-to-End Pipeline](#2-full-end-to-end-pipeline)
+3. [How LiveKit Powers the Voice Pipeline](#3-how-livekit-powers-the-voice-pipeline)
+4. [Audio Pipeline Deep Dive](#4-audio-pipeline-deep-dive)
+5. [Latency Budget (Phase 7 State)](#5-latency-budget-phase-7-state)
+6. [Tool System — What the Agent Can Do](#6-tool-system--what-the-agent-can-do)
+7. [Key Files](#7-key-files)
+8. [Environment Variables](#8-environment-variables)
+9. [Phase History & Fixes Applied](#9-phase-history--fixes-applied)
+10. [Phase 7 Upgrade Spec (Reference)](#10-phase-7-upgrade-spec-reference)
 
 ---
 
-## 1. End-to-End Pipeline
+## 1. What Jarvis Does in a Meeting
+
+Jarvis is a wake-word-activated AI assistant that joins meetings as a bot and listens to all participants. When someone says **"Hey Jarvis, &lt;question&gt;"**, the agent:
+
+1. Detects the wake word and query in the transcript
+2. Calls the appropriate tool (Confluence search, meeting summary, general Q&A, etc.)
+3. Synthesises a spoken response and plays it back into the meeting
+
+No wake word → total silence. Bare "Hey Jarvis" (no query) → brief "Yes?" acknowledgement. All processing is in real time; there is no buffering or post-meeting batch step in the voice path.
+
+---
+
+## 2. Full End-to-End Pipeline
 
 ```
-Participants speak in meeting
+Participants speak in the meeting
   │
   ▼
-Recall.ai headless Chrome (bot.html, loaded via output_media.camera.kind="webpage")
-  │  bot.html publisher IIFE: getUserMedia({ echoCancellation:false, noiseSuppression:false })
-  │  Joins LiveKit room as "recall-browser-{session_id}" (can_publish=True)
+Recall.ai headless Chrome joins the meeting as a bot
+  │  bot.html publisher IIFE runs:
+  │    navigator.mediaDevices.getUserMedia({ audio: true, ... })
+  │    ↓ captures the browser's mixed meeting audio
+  │  LiveKit JS SDK pubRoom.localParticipant.publishTrack(audioTrack)
+  │    identity = "recall-browser-{session_id}"   ← must match pub_token exactly
   │
-  ▼  WebRTC Opus encode → LiveKit SFU relay
-  │  ~20–50 ms
+  ▼  WebRTC Opus encode → LiveKit SFU → relay to agent process
+  │  ~20–50 ms encode+network
   ▼
-AgentSession (agent_worker.py)
-  │  Subscribed to participant "recall-browser-{session_id}" only
+AgentSession (agent_worker.py, livekit-agents 1.5.9)
+  │  Subscribes ONLY to the "recall-browser-{session_id}" participant track
   │
-  ├─▶ Silero VAD (prewarmed in prewarm() at worker startup)
-  │     Detects speech start/end, gates STT
-  │     ~10–20 ms end-of-speech detection
+  ├─▶ Silero VAD (pre-warmed at worker start via prewarm())
+  │     Runs on every decoded audio frame
+  │     Fires on_voice_start / on_voice_end events to gate STT
+  │     ~10–30 ms end-of-speech detection latency
   │
-  ├─▶ Deepgram Nova-3 STT (LiveKit Inference cloud)
-  │     Streaming — partial + final transcripts in real time
-  │     ~100–200 ms to final transcript after VAD end-of-speech
+  ├─▶ AssemblyAI Universal-3 Pro Streaming STT  (Phase 7)
+  │     Plugin-direct: livekit-plugins-assemblyai 1.5.9
+  │     model="u3-rt-pro", keyterms_prompt=["Jarvis","Hey Jarvis"]
+  │     language_detection=False  → removes multilingual overhead
+  │     Streams partial + final transcripts in real time
+  │     ~150 ms P50 to final transcript after VAD end-of-speech
   │
   ▼
-on_user_turn_completed (JarvisAgent)
-  │  Wake word gate via regex — no I/O, pure string match
+on_user_turn_completed(turn_ctx, new_message)   ← JarvisAgent method
+  │  Pure regex wake-word gate — no I/O, no await
   │  ~1 ms
   │
-  ├─ No wake word → content cleared → llm_node returns None → complete silence
-  ├─ Bare "Hey Jarvis" → session.say("Yes?") + listening mode → no LLM
-  └─ "Hey Jarvis, <query>" → content rewritten to query only → dispatched to LLM
+  ├── No wake word     → new_message.content = [] → llm_node returns None → silence
+  ├── Bare wake        → new_message.content = [] → _play_ack_frames() → silence
+  └── Wake + query     → new_message.content = [query_only] → llm_node dispatches
   │
   ▼
-llm_node → gpt-4o-mini (LiveKit Inference)
-  │  Streams tokens — AgentSession pipes directly to TTS node
-  │  TTFT: ~200–400 ms
+llm_node(chat_ctx, tools, model_settings)
+  │  If content is empty: returns None (agent.default.llm_node is skipped entirely)
+  │  If content is present: delegates to Agent.default.llm_node
+  │    → inference.LLM("openai/gpt-5.4-nano")  via LiveKit Inference
+  │    → streams tokens; tools are dispatched as needed (Confluence, meeting, general)
+  │    TTFT: ~150–250 ms
   │
   ▼
-tts_node → Cartesia Sonic-3 (LiveKit Inference)
-  │  Streaming — first audio frame after ~40–90 ms from first LLM token
-  │  Text transforms: filter_emoji, filter_markdown
+tts_node(text_stream, model_settings)
+  │  Wraps Agent.default.tts_node
+  │  inference.TTS("cartesia/sonic-turbo", voice=JARVIS_LK_TTS_VOICE)
+  │  Text transforms: filter_emoji, filter_markdown (removes stars, dashes, etc.)
+  │  First audio frame: ~40 ms after first LLM token
   │
-  ▼  AgentSession publishes TTS as agent's own participant track in LiveKit room
+  ▼  AgentSession publishes TTS audio as the agent's own LiveKit participant track
   │
   ▼
-bot.html subscriber IIFE (same Recall headless Chrome)
-  │  TrackSubscribed fires for the agent's track
-  │  Skips any "recall-browser-*" participant (prevents echo)
-  │  Plays via HTMLAudioElement (track.attach(), autoplay=true)
+bot.html subscriber IIFE  (same Recall headless Chrome, different LiveKit room token)
+  │  TrackSubscribed fires when the agent's track arrives
+  │  Filters out "recall-browser-*" tracks (prevents echo)
+  │  Primary path: track.attach() → <audio> element → autoplay=true
   │  ~20–50 ms WebRTC decode + playback buffer
   │
   ▼
-Recall captures browser audio output → injects into meeting
+Recall captures the browser's audio output → injects into the meeting
   │
   ▼
-All meeting participants hear Jarvis
-```
-
-**Total perceived latency (P50):** ~400–800 ms after user stops speaking
-**Worst case (P95):** ~1500–2000 ms (false interruption timeout adds up to 1.2 s)
-
----
-
-## 2. Latency Budget Per Stage
-
-| Stage | Component | P50 | P95 | Notes |
-|-------|-----------|-----|-----|-------|
-| WebRTC capture + encode | getUserMedia → LiveKit SFU | 20–50 ms | 80 ms | Opus codec, no bitrate override |
-| VAD end-of-speech | Silero (prewarmed) | 30–80 ms | 150 ms | Silence detection after last voice frame |
-| STT final transcript | Deepgram Nova-3 (multi) | 100–200 ms | 400 ms | `language="multi"` adds ~30–80 ms vs EN |
-| Wake word gate | Regex in on_user_turn_completed | <1 ms | <1 ms | Pure string match, no I/O |
-| Turn detection endpointing | min_delay=0.3 s, max_delay=1.5 s | 300 ms | 1500 ms | Waits for VAD silence gap |
-| False interruption timeout | resume_false_interruption=True | 0 ms | 1200 ms | Only fires on brief interjections during response |
-| LLM TTFT | gpt-4o-mini (LiveKit Inference) | 200–400 ms | 800 ms | Full tool calls add 300–800 ms |
-| TTS first audio frame | Cartesia Sonic-3 | 40–90 ms | 150 ms | Streams in parallel with LLM tokens |
-| WebRTC decode + playback | bot.html → Recall Chrome | 20–50 ms | 80 ms | |
-| **Total (no tool call)** | | **~400–800 ms** | **~1500 ms** | |
-| **Total (with tool call)** | | **~700–1600 ms** | **~2500 ms** | |
-
----
-
-## 3. Current Bottlenecks
-
-### HIGH IMPACT — Turn detection endpointing (min_delay: 0.3 s)
-
-The `endpointing.min_delay = 0.3` means the agent waits at least 300 ms of silence after the user stops speaking before committing to processing. This is the single largest controllable latency element. Reducing to 0.15 s would cut 150 ms from every response with minimal risk of premature cutoffs on natural speech pauses.
-
-### HIGH IMPACT — `language="multi"` on Deepgram
-
-The multilingual Nova-3 model is ~30–80 ms slower than the English-only variant. For any deployment that is English-only, this is a free win.
-
-### MEDIUM IMPACT — False interruption timeout (1.2 s)
-
-`false_interruption_timeout: 1.2` means after Jarvis starts speaking, if someone says something brief, the agent waits 1.2 s before deciding it's not a real interruption. In practice this only fires when someone speaks over Jarvis, but it can extend the tail end of latency perception.
-
-### MEDIUM IMPACT — No pre-recorded ack for the listening mode response
-
-When the user says bare "Hey Jarvis" (listening mode), the agent calls `session.say("Yes?")` which routes through the full TTS pipeline (Cartesia cloud round-trip, ~100–200 ms). A pre-cached PCM frame for "Yes?" would play instantly (<5 ms) and feel much snappier.
-
-### LOW IMPACT — `preemptive_generation=False`
-
-Currently disabled because the wake-word rewrite in `on_user_turn_completed` always changes the message content, which causes the speculative LLM output to be discarded and its TTS frames to produce an audible glitch at response start. This is the correct tradeoff given the wake-word architecture. No change recommended here.
-
-### LOW IMPACT — No audio bitrate set on publisher
-
-The publisher IIFE uses default LiveKit Opus bitrate (~32–64 kbps). Explicitly setting `audioBitrate: 24000` would slightly reduce encode time in constrained environments, but the latency impact is negligible on a local/cloud setup.
-
----
-
-## 4. Optimization Recommendations (Ranked by Impact)
-
-### 1. Reduce endpointing min_delay: 0.3 → 0.15 s  ★★★
-
-**Saves: ~150 ms on every single response**
-
-```python
-# agent_worker.py — in AgentSession constructor
-turn_handling=TurnHandlingOptions(
-    endpointing={
-        "min_delay": 0.15,   # was 0.3 — cut 150ms from every turn
-        "max_delay": 1.5,
-    },
-    ...
-),
-```
-
-Risk: Very low. Users who speak in complete sentences won't notice. Only affects users who pause mid-sentence and then resume — Jarvis might cut them off slightly earlier. Easy to tune back up if needed.
-
----
-
-### 2. Switch STT to English-only if meeting is EN  ★★★
-
-**Saves: ~30–80 ms on every STT round-trip**
-
-```python
-# agent_worker.py
-stt=inference.STT(model="deepgram/nova-3", language="en"),   # was "multi"
-```
-
-Or add a config variable:
-```python
-JARVIS_STT_LANGUAGE = os.getenv("JARVIS_STT_LANGUAGE", "en").strip()
-stt=inference.STT(model="deepgram/nova-3", language=JARVIS_STT_LANGUAGE),
-```
-
-Risk: Zero for English-only meetings. Multilingual meetings would lose STT accuracy for non-English speech.
-
----
-
-### 3. Pre-cache "Yes?" ack as PCM frames  ★★
-
-**Saves: ~100–200 ms on bare wake-word responses (the snappiness of the first interaction)**
-
-Instead of routing "Yes?" through Cartesia TTS on every bare wake, pre-generate the audio once at startup and push it directly:
-
-```python
-# agent_worker.py — in on_user_turn_completed, bare wake case
-if not query:
-    logger.info("👂 BARE WAKE — entering listening mode")
-    self._listening_mode = True
-    self._listening_since = time.perf_counter()
-    new_message.content = []
-    # session.say() goes through full TTS pipeline (~150 ms).
-    # Pre-cached frames would play in <5 ms:
-    # await _play_ack_frames(self.session, "yes")   ← target implementation
-    await self.session.say("Yes?", add_to_chat_ctx=False)
-    return
-```
-
-The `audio_cache.py` module already implements this pattern — it pre-generates acknowledgement MP3s and caches them. The `push_audio_to_livekit()` function in `jarvis_agentic.py` handles the PCM conversion. This would need to be wired into the AgentSession path.
-
----
-
-### 4. Reduce false_interruption_timeout: 1.2 → 0.6 s  ★★
-
-**Saves: up to 600 ms on turns where a participant briefly speaks while Jarvis is responding**
-
-```python
-turn_handling=TurnHandlingOptions(
-    ...
-    interruption={
-        "resume_false_interruption": True,
-        "false_interruption_timeout": 0.6,   # was 1.2
-    },
-),
-```
-
-Risk: Low-medium. Brief interjections ("mm-hmm", "yeah") during Jarvis responses will now more aggressively interrupt. For a meeting assistant this is usually acceptable — users in meetings don't accidentally say "Hey Jarvis" often.
-
----
-
-### 5. Add min_endpointing_delay to STT config  ★
-
-**Saves: 0 ms (but locks in behavior and prevents upstream regressions)**
-
-```python
-stt=inference.STT(
-    model="deepgram/nova-3",
-    language="en",
-    # min_endpointing_delay=100,   ← explicit; removes dependency on Deepgram default
-),
-```
-
-This is hygiene, not a latency win. Documents and pins the endpointing behavior so Deepgram API changes don't silently affect response timing.
-
----
-
-### 6. Add wake-word health check + publisher presence detection  ★
-
-**Saves: 0 ms latency, but prevents silent failures**
-
-If the publisher IIFE fails (token error, getUserMedia denied), the agent subscribes to `recall-browser-{session_id}` but that participant never joins. The agent silently hears nothing with no error surfaced.
-
-```python
-# agent_worker.py entrypoint — after session.start()
-async def _wait_for_publisher(room, session_id, timeout=30.0):
-    target = f"recall-browser-{session_id}"
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        if any(p.identity == target for p in room.remote_participants.values()):
-            return True
-        await asyncio.sleep(1.0)
-    return False
-
-if session_id:
-    present = await _wait_for_publisher(ctx.room, session_id)
-    if not present:
-        logger.error("❌ Publisher recall-browser-%s never joined — agent is deaf", session_id)
+All meeting participants hear Jarvis respond
 ```
 
 ---
 
-## 5. Quick Summary
+## 3. How LiveKit Powers the Voice Pipeline
 
-| Optimization | Latency Saved | Effort | Risk |
-|---|---|---|---|
-| Reduce endpointing min_delay 0.3→0.15 | 150 ms every turn | 1 line | Low |
-| Switch STT to language="en" | 30–80 ms every turn | 1 line | Zero (EN-only) |
-| Pre-cache "Yes?" ack | 100–200 ms on bare wakes | Medium | Low |
-| Reduce false_interruption_timeout 1.2→0.6 | Up to 600 ms on interruptions | 1 line | Low-Medium |
-| Publisher health check | 0 ms (reliability) | ~15 lines | Zero |
+LiveKit is the real-time media infrastructure that makes the whole pipeline work. Here is what it does and why it is the right choice.
 
-**Recommended first pass:** Apply optimizations 1 and 2 — they are single-line changes with no risk and together shave ~180–230 ms off the P50 latency of every response.
+### 3.1 What LiveKit Is
 
----
+[LiveKit](https://livekit.io) is an open-source WebRTC SFU (Selective Forwarding Unit) plus a cloud service that provides:
 
-## 6. Phase 7 Upgrade Plan — Voice Pipeline v2
+- A **media relay** — routes audio/video between participants without mixing or decoding at the server
+- An **Agents SDK** (`livekit-agents`) — a Python framework for building AI voice agents that connect to LiveKit rooms
+- A **plugin ecosystem** — drop-in STT, LLM, and TTS plugins (`livekit-plugins-*`) with a unified interface
 
-> **Status:** Planned — not yet implemented
-> **Goal:** Cut P50 total latency from ~400–800 ms to ~200–400 ms by upgrading every stage of the pipeline.
+### 3.2 LiveKit Rooms and Participants
 
-### Stack Comparison
+Every Jarvis meeting session uses **two LiveKit rooms** (one token pair):
 
-| Component | Current | Target | Why |
-|-----------|---------|--------|-----|
-| STT | Deepgram Nova-3 (multi, via LiveKit Inference) | AssemblyAI Universal-3 Pro Streaming (plugin-direct) | Better accuracy, keyterm prompting for wake-word, ~150 ms P50, cheaper |
-| LLM | gpt-4o-mini | gpt-4.1-mini | ~50% lower TTFT, better instruction-following, 1M token context |
-| TTS | Cartesia Sonic-3 | Cartesia Sonic-Turbo | 40 ms TTFA vs 90 ms — same price, same API, same voices |
-| Endpointing | min_delay=0.3 s | min_delay=0.15 s | Saves 150 ms every turn; safe with wake-word gate |
-| False interruption | 1.2 s | 0.6 s | Halves tail latency on interrupted responses |
+| Token | Room | Identity | Purpose |
+|-------|------|----------|---------|
+| `pub_token` | `{session_id}` | `recall-browser-{session_id}` | Publisher: Recall Chrome sends meeting audio INTO LiveKit |
+| `token` (subscriber) | `{session_id}` | `recall-listener-{session_id}` | Subscriber: second bot identity for teardown parity |
+| Agent track | `{session_id}` | auto-assigned by AgentSession | Publisher: Jarvis TTS audio goes OUT via LiveKit |
 
-### Change 1 — STT: AssemblyAI Universal-3 Pro Streaming
+The Recall headless Chrome loads `bot.html` (served from `GET /bot-page`). The publisher IIFE inside bot.html uses the **LiveKit JavaScript SDK** to:
+1. Capture the browser's mixed meeting audio via `getUserMedia`
+2. Join the LiveKit room as `recall-browser-{session_id}`
+3. Publish the audio track
 
-**Why plugin-direct (not LiveKit Inference):** LiveKit Inference does not expose mid-stream prompting controls. Using `assemblyai.STT` directly gives access to `word_boost` and `boost_param`, which is the entire point of switching.
+The AgentSession in `agent_worker.py` subscribes specifically to that participant's track — and only that participant's track.
 
-**Important constraint:** Recall is only used for joining the meeting and publishing audio to LiveKit via the browser publisher (`recall-browser-{session_id}`). Recall's transcript/realtime_endpoints are NOT used — Jarvis hears via STT on the LiveKit audio track, not via Recall's transcript webhook.
+### 3.3 AgentSession — The Core Abstraction
+
+`AgentSession` (from `livekit.agents`) is the orchestrator that wires STT → LLM → TTS into a single pipeline:
 
 ```python
-# requirements.txt
-# livekit-agents[assemblyai]
-
-from livekit.plugins import assemblyai
-
 session = AgentSession(
-    vad=silero.VAD.load(),   # keep Silero — required for barge-in detection
-    stt=assemblyai.STT(
-        model="universal-3-rt-pro",
-        word_boost=["Jarvis", "Hey Jarvis"],  # reduces "Hey Travis"/"Hey Gervis" misses
-        boost_param="high",
-        language_code="en_us",               # drop multi — saves 30–80 ms
-    ),
-    ...
+    stt=assemblyai.STT(...),        # transcribes incoming audio
+    llm=inference.LLM("openai/gpt-5.4-nano"),   # generates responses
+    tts=inference.TTS("cartesia/sonic-turbo"),   # synthesises speech
+    vad=silero.VAD.load(),          # detects voice activity (speech/silence)
+    turn_handling=TurnHandlingOptions(...),      # endpointing + interruption
+    preemptive_generation=False,    # disabled — wake-word rewrite always fires
+    tts_text_transforms=["filter_emoji", "filter_markdown"],
 )
 ```
 
-**Dynamic keyterms:** Pull attendee names and project names from meeting metadata at session start and add them to `word_boost` — improves transcription of names mentioned in the meeting.
+AgentSession manages the full lifecycle:
+- Subscribing to the target participant's audio track
+- Routing audio frames through VAD → STT
+- Calling `on_user_turn_completed` when a transcript is ready
+- Calling `llm_node` to generate a response stream
+- Calling `tts_node` to convert text to audio frames
+- Publishing the audio frames as the agent's own participant track
 
-**New env var:** `ASSEMBLYAI_API_KEY`
+This replaces what would otherwise require hundreds of lines of WebRTC, audio format conversion, and pipeline management code.
 
-### Change 2 — LLM: gpt-4o-mini → gpt-4.1-mini
+### 3.4 LiveKit Inference — Cloud Plugin Gateway
 
-```python
-# agent_worker.py
-llm=inference.LLM("openai/gpt-4.1-mini"),
-# or via env: JARVIS_LK_LLM=openai/gpt-4.1-mini
+`inference.LLM` and `inference.TTS` route through **LiveKit's Inference service** — a cloud gateway that proxies to OpenAI, Cartesia, and other providers. This means:
+
+- API keys are managed centrally (LiveKit handles them, not the agent process)
+- The agent code uses `"openai/gpt-5.4-nano"` / `"cartesia/sonic-turbo"` as opaque model identifiers
+- Latency is comparable to calling OpenAI/Cartesia directly (the gateway is low-overhead)
+
+For STT, AssemblyAI is used **plugin-direct** (`livekit-plugins-assemblyai`) rather than through LiveKit Inference, because the Inference gateway does not expose AssemblyAI's `keyterms_prompt` parameter, which is essential for reliable wake-word recognition in noisy meeting audio.
+
+### 3.5 Silero VAD — Pre-warmed Voice Activity Detection
+
+The Silero Voice Activity Detector runs on every decoded audio frame and:
+- **Starts** a turn when it detects speech energy above the threshold
+- **Ends** a turn when it detects a silence gap ≥ `endpointing.min_delay` (0.15 s after Phase 7)
+
+Without VAD, the STT would send audio continuously, wasting credits and producing partial transcripts from background noise. VAD is pre-warmed at worker startup (`prewarm()`) so the first turn has no warm-up latency.
+
+**Why Silero stays even with AssemblyAI STT:** AssemblyAI has its own built-in turn detection, but it cannot replace Silero for **barge-in detection** — the ability to interrupt Jarvis while it is speaking. Silero's VAD events are what the AgentSession uses to decide "the user is interrupting me" vs "this is background noise".
+
+### 3.6 The PCM Ack Path (Phase 7 D-05)
+
+For bare wake-word responses ("Yes?"), the agent bypasses the full TTS pipeline:
+
+```
+"Hey Jarvis" detected
+  ↓
+_play_ack_frames(session, "yes")
+  ↓
+get_wake_ack_audio()  →  (key, mp3_bytes) from in-memory audio_cache
+  ↓
+_mp3_bytes_to_frames(mp3_bytes)
+  →  AudioStreamDecoder(sample_rate=48000, num_channels=1, format="mp3")
+  →  async generator of rtc.AudioFrame objects
+  ↓
+session.say(audio=_mp3_bytes_to_frames(mp3_bytes), add_to_chat_ctx=False)
+  →  AgentSession feeds frames directly into the agent's publish track
+  →  <5 ms perceived latency (vs ~150 ms Cartesia round-trip)
 ```
 
-~50% TTFT reduction. Better instruction-following. 1M token context window (useful for long meeting transcripts in chat context). Only fires on wake-word hits so the per-token cost increase is negligible.
+The `yes.mp3` file is loaded into memory at `prewarm()` time via `load_audio_cache()`. If the cache is empty (file missing), the code falls back to live TTS with a logged warning.
 
-### Change 3 — TTS: Sonic-3 → Sonic-Turbo
+---
 
-```python
-# agent_worker.py
-tts=inference.TTS(
-    f"{JARVIS_LK_TTS_PROVIDER}/sonic-turbo",  # was sonic-3
-    voice=JARVIS_LK_TTS_VOICE,
-),
+## 4. Audio Pipeline Deep Dive
+
+### 4.1 Inbound Audio Path (Meeting → Jarvis)
+
+```
+Meeting participant's microphone
+  → meeting platform (Teams, Zoom, Meet) audio mixing
+  → Recall.ai bot's Chrome browser audio output (mixed)
+  → bot.html: navigator.mediaDevices.getUserMedia({ audio: true, echoCancellation: false })
+  → LiveKit JS SDK: room.localParticipant.publishTrack(audioTrack)
+  → Opus encode → WebRTC → LiveKit SFU
+  → AgentSession: subscribes to "recall-browser-{session_id}" participant
+  → Opus decode → PCM audio frames (48 kHz, mono)
+  → Silero VAD: frame-level energy check
+  → [if voice detected] AssemblyAI STT: streams PCM to AssemblyAI cloud
+  → AssemblyAI returns final transcript
+  → on_user_turn_completed fires with transcript text
 ```
 
-40 ms TTFA vs 90 ms. Same SSM architecture, same voice IDs, same price ($50/M chars). Free 50 ms back on every response.
+**Note on echoCancellation=false:** The getUserMedia call deliberately disables echo cancellation and noise suppression. Recall's Chrome is already isolated (headless, no speakers); applying browser echo cancellation would degrade the audio quality of the mixed meeting audio.
 
-### Change 4 — Endpointing: 0.3 s → 0.15 s + false_interruption_timeout: 1.2 → 0.6
+### 4.2 Outbound Audio Path (Jarvis → Meeting)
+
+```
+llm_node returns text stream
+  → tts_node calls Agent.default.tts_node
+  → inference.TTS("cartesia/sonic-turbo") streams audio frames
+  → AgentSession publishes frames as the agent participant's audio track in LiveKit
+  → WebRTC Opus encode → LiveKit SFU
+  → bot.html subscriber IIFE: TrackSubscribed event fires
+  → track.attach() → <audio> element (primary, always works in headless Chrome)
+  → Recall captures Chrome's audio output (the <audio> element playback)
+  → Recall injects captured audio into the meeting
+  → All participants hear Jarvis
+```
+
+**Primary path is HTMLAudioElement, not WebAudio:** Earlier versions used the WebAudio API (`AudioContext → createMediaStreamSource`). This caused a race condition — `AudioContext.resume()` is async, but the code checked `ctx.state === 'running'` synchronously, so the WebAudio path was never taken. `track.attach()` (which creates an `<audio>` element) is synchronous and works reliably in Recall's headless Chrome. The WebAudio path was demoted to a secondary/optional enhancement.
+
+### 4.3 Wake Word Gate
+
+The wake-word gate in `on_user_turn_completed` is a pure regex match — no I/O, no network, no LLM call:
+
+```python
+_WAKE_PATTERN = re.compile(
+    r"(?:hey|yo|ok|hi|okay)[,\s]+(?:jarvis|jarvas|jervis|jarvus|jarves|jarvi|jarv)[,.\s!?]*\s*(.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+```
+
+Three cases:
+- **No match** → `new_message.content = []` → `llm_node` sees empty content → returns `None` → agent is silent
+- **Match with empty capture** → bare wake word → play pre-cached PCM ack → enter listening mode (next utterance is treated as the query, even without a wake word)
+- **Match with non-empty capture** → query present → `new_message.content = [query]` → LLM dispatched with query only (wake word stripped)
+
+The listening mode has an 8-second timeout: if no query arrives within 8 s of "Hey Jarvis", listening mode resets silently.
+
+---
+
+## 5. Latency Budget (Phase 7 State)
+
+| Stage | Component | P50 | P95 | Notes |
+|-------|-----------|-----|-----|-------|
+| WebRTC capture + encode | getUserMedia → LiveKit SFU | 20–50 ms | 80 ms | Opus at default bitrate |
+| VAD end-of-speech | Silero (pre-warmed) | 10–30 ms | 80 ms | |
+| STT final transcript | AssemblyAI U3-RT-Pro | ~150 ms | 350 ms | `language_detection=False` removes multilingual overhead |
+| Wake word gate | Regex | <1 ms | <1 ms | Pure string match |
+| Turn endpointing | `min_delay=0.15 s` | 150 ms | 1500 ms | Waits for VAD silence gap |
+| False interruption timeout | `0.6 s` (Phase 7) | 0 ms | 600 ms | Only fires on brief interjections |
+| LLM TTFT | gpt-5.4-nano (LiveKit Inference) | 150–250 ms | 500 ms | Tool calls add 300–800 ms |
+| TTS first audio frame | Cartesia Sonic-Turbo | ~40 ms | 120 ms | Streams in parallel with LLM tokens |
+| WebRTC decode + playback | bot.html → Recall Chrome | 20–50 ms | 80 ms | |
+| **Bare wake "Yes?" ack** | Pre-cached PCM | **<5 ms** | **<5 ms** | Phase 7 D-05 |
+| **Total (no tool call)** | | **~200–400 ms** | **~1000 ms** | |
+| **Total (with tool call)** | | **~500–1200 ms** | **~2000 ms** | |
+
+P50 improved from **~400–800 ms** (pre-Phase 7) to **~200–400 ms** (Phase 7).
+
+---
+
+## 6. Tool System — What the Agent Can Do
+
+The agent has access to 18 tools defined in `agent_bridge.py` and passed to `Agent(tools=JARVIS_TOOLS)`.
+
+### General / Utility
+
+| Tool | Description |
+|------|-------------|
+| `get_current_datetime` | Returns current date and time. Jarvis always calls this for time questions instead of guessing. |
+
+### Meeting Intelligence
+
+| Tool | Description |
+|------|-------------|
+| `summarize_meeting_tool` | Summarise what has been said so far. Accepts `detail_level="brief"` or `"full"`. |
+| `generate_opinion_tool` | Give Jarvis's opinion or recommendation on the current discussion topic. |
+| `extract_action_items_tool` | Extract commitments, action items, and next steps from the transcript. |
+| `summarize_speaker_tool` | Summarise what a specific participant has said. |
+| `answer_general_question_tool` | Answer any factual or general question; optionally forces a Tavily web search for live data. |
+
+All meeting tools read the live `transcript_log` for the session via `get_transcript_log_for_session()`.
+
+### Confluence — Basic
+
+| Tool | Description |
+|------|-------------|
+| `search_confluence_pages` | Simple keyword search via the Confluence REST API. |
+| `list_confluence_pages` | List recent pages in the workspace. |
+| `fetch_confluence_page` | Fetch a page's HTML and headings; optionally isolate a section. |
+| `create_confluence_page` | Create a new page with plain-text body. |
+| `edit_confluence_section` | Edit or append to a named section in a page. |
+| `delete_confluence_section` | Delete content within a named section. |
+| `delete_confluence_page` | Permanently delete an entire page. |
+
+### Confluence — Advanced (Graph RAG + Pinecone + Version Retry)
+
+| Tool | Description |
+|------|-------------|
+| `search_workspace_knowledge_tool` | Parallel search: Pinecone vector search + live Confluence REST, merged and ranked by semantic similarity. More powerful than `search_confluence_pages` for fuzzy/semantic lookups. |
+| `fetch_live_page_tool` | Fetch a page including its current **version number**. Required before any commit operation — use the returned version as `expected_version`. |
+| `commit_document_edit_tool` | Edit a page section with automatic version-conflict retry (up to 3 attempts, 0.5×2^n backoff). Supports `append=True` to add content without overwriting. |
+| `commit_delete_tool` | Delete a page section with automatic version-conflict retry. |
+| `update_page_title_tool` | Rename a Confluence page with automatic version-conflict retry. |
+
+**Typical commit workflow:**
+```
+1. search_workspace_knowledge_tool("sprint planning") → find page_id
+2. fetch_live_page_tool(page_id, heading="Goals") → get version + section content
+3. commit_document_edit_tool(page_id, version, "Goals", new_content) → apply
+```
+
+---
+
+## 7. Key Files
+
+| File | Purpose |
+|------|---------|
+| `confluence_logic/agent_worker.py` | AgentSession setup, wake-word gate, LLM/TTS nodes, LiveKit worker entry point |
+| `confluence_logic/agent_bridge.py` | All 18 `@function_tool` definitions; `JARVIS_TOOLS` export |
+| `confluence_logic/audio_cache.py` | In-memory pre-generated TTS MP3 cache (`yes.mp3`, filler clips) |
+| `confluence_logic/jarvis_agentic.py` | FastAPI app; bot lifecycle, pub/sub token minting, LiveKit room management |
+| `confluence_logic/review/api.py` | Bot start/stop/status endpoints; Supabase meeting persistence |
+| `static/bot.html` | Served to Recall Chrome via `/bot-page`; publisher + subscriber IIFEs |
+| `confluence_logic/connectors/confluence.py` | Confluence REST API client |
+| `confluence_logic/db/vector_store.py` | Pinecone client |
+| `confluence_logic/meeting_responder.py` | LLM-based meeting summarisation, opinions, action items |
+| `confluence_logic/general_responder.py` | General Q&A with optional Tavily web search |
+| `Confluence/requirements.txt` | All Python dependencies (livekit-agents + plugins pinned at 1.5.9) |
+
+---
+
+## 8. Environment Variables
+
+| Variable | Default | Used By | Notes |
+|----------|---------|---------|-------|
+| `LIVEKIT_URL` | — | `agent_worker.py`, `jarvis_agentic.py` | `wss://...livekit.cloud` format |
+| `LIVEKIT_API_KEY` | — | token minting in `jarvis_agentic.py` | |
+| `LIVEKIT_API_SECRET` | — | token minting in `jarvis_agentic.py` | |
+| `ASSEMBLYAI_API_KEY` | — | `livekit-plugins-assemblyai` | Separate from legacy `ASSEMBLY_API` (Recall BYOB) |
+| `OPENAI_API_KEY` | — | LLM + TTS via LiveKit Inference | |
+| `RECALL_API_KEY` | — | `jarvis_agentic.py` | Recall.ai bot management |
+| `JARVIS_LK_LLM` | `openai/gpt-5.4-nano` | `agent_worker.py` | Override the LLM model string |
+| `JARVIS_LK_TTS_PROVIDER` | `cartesia` | `agent_worker.py` | TTS provider prefix |
+| `JARVIS_LK_TTS_VOICE` | `9626c31c-bec5-4cca-baa8-f8ba9e84c8bc` | `agent_worker.py` | Cartesia voice UUID |
+| `JARVIS_AGENT_WORKER_NAME` | `jarvis-agent` | `agent_worker.py` | Worker name for LiveKit dispatch |
+| `JARVIS_WAKE_ALIASES` | `""` | `agent_worker.py` | Pipe-separated extra wake word aliases |
+
+---
+
+## 9. Phase History & Fixes Applied
+
+### Fix A (2026-05-19) — `jarvis_agentic.py` NameError on bot start
+
+`_create_livekit_room()` returned `room, source` but `source` was removed in Phase 6 when the manually-created AudioSource was replaced by AgentSession's built-in TTS publish. Every `POST /bot/start` raised `NameError: name 'source' is not defined`. Fixed by removing `return room, source`.
+
+### Fix B (2026-05-19) — `bot.html` AudioContext race condition
+
+The subscriber IIFE used `AudioContext.resume()` fire-and-forget then synchronously checked `ctx.state === 'running'`. Since `resume()` is async, the state was always `'suspended'` at the check, so the WebAudio path was never taken. Headless Chrome audio playback was non-deterministic. Fixed by making `track.attach() → <audio>` the unconditional primary path.
+
+### Phase 6 (2026-05-18) — Browser publisher architecture
+
+Replaced the Phase 4 relay WebSocket + AudioResampler Python path with a browser-native publisher: Recall's Chrome loads `bot.html`, runs `getUserMedia`, and publishes the mixed audio track directly to LiveKit. Eliminated relay server complexity, reduced latency, removed `recall-relay-{id}` participant identity.
+
+### Phase 7 (2026-05-20) — Voice pipeline v2 (all five optimisations live)
+
+| Change | Before | After |
+|--------|--------|-------|
+| STT | Deepgram Nova-3 multi (LiveKit Inference) | AssemblyAI U3-RT-Pro plugin-direct |
+| LLM | openai/gpt-4.1-mini | openai/gpt-5.4-nano |
+| TTS | Cartesia Sonic-3 | Cartesia Sonic-Turbo |
+| Endpointing min_delay | 0.3 s | 0.15 s |
+| False interruption timeout | 1.2 s | 0.6 s |
+| Bare wake ack | session.say("Yes?") via Cartesia ~150 ms | Pre-cached PCM frames <5 ms |
+
+---
+
+## 10. Phase 7 Upgrade Spec (Reference)
+
+### D-01: AssemblyAI Universal-3 Pro Streaming
+
+Plugin-direct (NOT via LiveKit Inference) so `keyterms_prompt` is accessible:
+
+```python
+from livekit.plugins import assemblyai
+stt=assemblyai.STT(
+    model="u3-rt-pro",
+    keyterms_prompt=["Jarvis", "Hey Jarvis"],
+    language_detection=False,
+)
+```
+
+Requirement: `ASSEMBLYAI_API_KEY` in `.env`. Dependency: `livekit-plugins-assemblyai==1.5.9` in `requirements.txt`.
+
+### D-02: LLM — gpt-5.4-nano
+
+```python
+JARVIS_LK_LLM = os.getenv("JARVIS_LK_LLM", "openai/gpt-5.4-nano")
+llm=inference.LLM(JARVIS_LK_LLM)
+```
+
+Override via `JARVIS_LK_LLM` env var if a different model is needed.
+
+### D-03: TTS — Cartesia Sonic-Turbo
+
+```python
+tts=inference.TTS(f"{JARVIS_LK_TTS_PROVIDER}/sonic-turbo", voice=JARVIS_LK_TTS_VOICE)
+```
+
+Voice UUID unchanged — Sonic-Turbo uses the same voice IDs as Sonic-3. ~40 ms TTFA vs ~90 ms.
+
+### D-04: Endpointing tightening
 
 ```python
 turn_handling=TurnHandlingOptions(
-    endpointing={
-        "min_delay": 0.15,   # was 0.3
-        "max_delay": 1.5,
-    },
-    interruption={
-        "resume_false_interruption": True,
-        "false_interruption_timeout": 0.6,   # was 1.2
-    },
-),
+    endpointing={"min_delay": 0.15, "max_delay": 1.5},
+    interruption={"resume_false_interruption": True, "false_interruption_timeout": 0.6},
+)
 ```
 
-Endpointing cut is safe with the wake-word gate: a premature cut on a non-Jarvis utterance just means the regex sees a partial transcript, finds no wake word, and discards it — no LLM misfire possible. False interruption cut halves tail latency when someone speaks over Jarvis mid-response.
+Safe with wake-word gate: premature cuts on non-Jarvis speech are discarded by the regex.
 
-### Change 5 — Pre-cache the "Yes?" Ack
+### D-05: Pre-cached PCM ack
 
 ```python
-# agent_worker.py — on_user_turn_completed, bare wake case
-# Current (full TTS pipeline, ~150 ms):
-await self.session.say("Yes?", add_to_chat_ctx=False)
-
-# Target (<5 ms, pre-generated PCM frames):
+# In on_user_turn_completed bare-wake case:
 await _play_ack_frames(self.session, "yes")
+
+# _play_ack_frames implementation:
+async def _play_ack_frames(session, key="yes"):
+    cached = get_wake_ack_audio()          # returns (key, mp3_bytes) or None
+    if cached is None:
+        await session.say("Yes?", add_to_chat_ctx=False)  # fallback
+        return
+    _, mp3_bytes = cached
+    await session.say("", audio=_mp3_bytes_to_frames(mp3_bytes), add_to_chat_ctx=False)
 ```
 
-Generate the "Yes?" audio once at worker startup using Cartesia, cache as PCM frames, push directly into the AgentSession audio track. `audio_cache.py` already implements the pattern — wiring into the AgentSession path is the only new work.
-
-### What Does NOT Change
-
-| Component | Why it stays |
-|-----------|-------------|
-| Silero VAD | Still required for barge-in detection — AssemblyAI's built-in turn detection does not replace VAD for interruption handling |
-| `preemptive_generation=False` | Our `on_user_turn_completed` always rewrites message content → speculative output is always discarded → audible glitch if enabled |
-| Recall for joining/streaming | Recall joins the meeting and publishes audio via the browser publisher IIFE. It is NOT used for transcription — `realtime_endpoints` transcript webhook is not consulted by the voice agent |
-| Wake-word gate architecture | The gate stays as the primary turn-detection mechanism; `turn_detection="stt"` is explicitly NOT used |
-
-### Expected Latency After Upgrade
-
-| Stage | Before | After |
-|-------|--------|-------|
-| STT final transcript | 100–200 ms | ~150 ms (U3 Pro P50) |
-| STT language overhead | +30–80 ms (multi) | 0 ms (EN only) |
-| Endpointing wait | 300 ms floor | 150 ms floor |
-| LLM TTFT | ~300–400 ms | ~150–200 ms |
-| TTS first audio | ~90 ms | ~40 ms |
-| Bare wake "Yes?" | ~150 ms | <5 ms (cached) |
-| **Total P50 (no tool call)** | **~400–800 ms** | **~200–400 ms** |
+`audio_cache.py` pre-generates the MP3 at startup. `AudioStreamDecoder` decodes MP3 to 48 kHz mono PCM frames on the fly. The `session.say(audio=...)` API feeds frames directly into the agent's publish track, bypassing Cartesia entirely.
