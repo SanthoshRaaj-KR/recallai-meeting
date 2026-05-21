@@ -76,10 +76,11 @@ from livekit.plugins import assemblyai, silero
 from livekit import rtc
 from livekit.agents import stt as _lk_stt
 from livekit.agents.utils.codecs.decoder import AudioStreamDecoder
-from livekit.agents.llm import FunctionTool
+from livekit.agents.llm import FunctionTool, function_tool
 
 from confluence_logic.audio_cache import get_wake_ack_audio, get_random_query_ack_audio, load_audio_cache
 from confluence_logic.agent_bridge import JARVIS_TOOLS
+from confluence_logic.agents.confluence_qa_agent import ConfluenceQAAgent
 
 _MODULE_DIR = Path(__file__).resolve().parent
 load_dotenv(_MODULE_DIR.parent / ".env")
@@ -202,7 +203,23 @@ def _add_tool_call_ack(tool: Any) -> Any:
     return FunctionTool(_with_ack, tool.info)
 
 
-_JARVIS_TOOLS_WITH_ACK = [_add_tool_call_ack(t) for t in JARVIS_TOOLS]
+_confluence_qa_agent: ConfluenceQAAgent | None = None
+
+
+def _get_confluence_qa_agent() -> ConfluenceQAAgent:
+    global _confluence_qa_agent
+    if _confluence_qa_agent is None:
+        _confluence_qa_agent = ConfluenceQAAgent()
+    return _confluence_qa_agent
+
+
+@function_tool
+async def answer_confluence_question_tool(query: str, user_id: str = "default") -> str:
+    """Answer a Confluence read-only question using the project's Pinecone-first ConfluenceQAAgent (Phase 7)."""
+    return await _get_confluence_qa_agent().run(query=query, graph_user_id=user_id)
+
+
+_JARVIS_TOOLS_WITH_ACK = [_add_tool_call_ack(t) for t in [*JARVIS_TOOLS, answer_confluence_question_tool]]
 
 
 # == PCM ack helpers (Phase 7 D-05) ============================================
