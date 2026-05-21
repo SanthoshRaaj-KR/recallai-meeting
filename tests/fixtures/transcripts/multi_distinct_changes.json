@@ -1,0 +1,36 @@
+{
+  "name": "multi_distinct_changes",
+  "description": "Four unrelated decisions in one meeting — must produce four distinct proposals.",
+  "transcript": [
+    {"participant": "Kate", "text": "We're upgrading Python from 2 to 3 in the dev environment.", "timestamp": 1.0},
+    {"participant": "Leo", "text": "Priya is taking over payments on-call from Marcus, effective Monday.", "timestamp": 8.0},
+    {"participant": "Kate", "text": "Also the customer SLA is now 99.95 percent, up from 99.9.", "timestamp": 15.0},
+    {"participant": "Leo", "text": "And we need a new page for the Inventory Service we just launched.", "timestamp": 22.0}
+  ],
+  "live_pages": [
+    {
+      "page_id": "pg-dev-runbook",
+      "title": "Dev Runbook",
+      "html": "<h2>Setup</h2><p>We use Python 2 for the dev environment.</p>",
+      "available_headings": ["Setup"]
+    },
+    {
+      "page_id": "pg-oncall",
+      "title": "Payments On-Call Rotation",
+      "html": "<h2>Current Rotation</h2><p>Primary: Marcus</p>",
+      "available_headings": ["Current Rotation"]
+    },
+    {
+      "page_id": "pg-sla",
+      "title": "Customer SLA",
+      "html": "<h2>Availability</h2><p>99.9% uptime guarantee.</p>",
+      "available_headings": ["Availability"]
+    }
+  ],
+  "expected": {
+    "n_proposals_min": 3,
+    "n_proposals_max": 5,
+    "must_have_change_summary": true,
+    "contains_verbatim_any": ["Python 3", "Priya", "99.95", "Inventory"]
+  }
+}

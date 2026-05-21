@@ -453,3 +453,55 @@ async def refresh_known_user_graphs_forever(stop_event: asyncio.Event) -> None:
             await asyncio.wait_for(stop_event.wait(), timeout=REFRESH_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             continue
+
+
+async def refresh_page_in_graph(user_id: str, page_id: str) -> bool:
+    """Delete and re-create the Neo4j graph nodes for one Confluence page (APPLY-03).
+
+    Lightweight alternative to `ensure_user_confluence_graph(force=True)` — only
+    touches the single committed page rather than re-building the entire user graph.
+    Swallows all exceptions and logs at WARNING so callers can use fire-and-forget.
+    """
+    if not user_id or not page_id:
+        return False
+    driver = _driver()
+    if driver is None:
+        logger.warning("refresh_page_in_graph: Neo4j driver unavailable for user %s page %s", user_id, page_id)
+        return False
+
+    import neo4j
+
+    try:
+        # 1. Detach-delete the existing CfPage node (cascades to CfSection children via DETACH DELETE)
+        await driver.execute_query(
+            "MATCH (p:CfPage {user_id: $user_id, page_id: $page_id}) "
+            "DETACH DELETE p",
+            {"user_id": user_id, "page_id": page_id},
+            routing_=neo4j.RoutingControl.WRITE,
+        )
+
+        # 2. Fetch fresh metadata from Confluence to build the page dict _write_single_page expects
+        connector = ConfluenceConnector()
+        try:
+            meta = await asyncio.to_thread(connector.get_page_metadata, page_id)
+        except Exception as exc:
+            logger.warning("refresh_page_in_graph: could not fetch metadata for page %s: %s", page_id, exc)
+            return False
+
+        page_dict = {
+            "page_id": page_id,
+            "title": meta.get("title", ""),
+            "space_key": (meta.get("space") or {}).get("key", ""),
+            "version": (meta.get("version") or {}).get("number"),
+            "excerpt": "",
+        }
+
+        # 3. Re-create via the existing single-page writer
+        await _write_single_page(driver, user_id, connector, page_dict)
+        logger.info("refresh_page_in_graph: re-indexed page %s for user %s", page_id, user_id)
+        return True
+
+    except Exception as exc:
+        _reset_driver_on_error(exc)
+        logger.warning("refresh_page_in_graph failed for user %s page %s: %s", user_id, page_id, exc)
+        return False

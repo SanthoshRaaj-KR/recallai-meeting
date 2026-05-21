@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -7,6 +8,14 @@ from confluence_logic.agents.tools import (
 )
 from confluence_logic.core.schemas import CandidatePage
 from confluence_logic.utils.html_parser import delete_content_in_section, edit_block_in_section, get_section_html
+
+
+def _call(tool, *args, **kwargs):
+    """Invoke a FunctionTool synchronously — maps positional args to schema property order."""
+    props = list(tool.params_json_schema.get('properties', {}).keys())
+    call_args = dict(zip(props, args))
+    call_args.update(kwargs)
+    return asyncio.run(tool.on_invoke_tool(None, json.dumps(call_args)))
 
 @patch('confluence_logic.agents.tools.get_connector')
 @patch('confluence_logic.agents.tools.get_store')
@@ -20,7 +29,7 @@ def test_page_selection_disambiguation(mock_get_store, mock_get_connector):
         {"metadata": {"page_id": "1", "title": "Quarterly Goals", "heading": "Q1", "text_summary": "Heading: Q1\nExcerpt:", "space_key": "DEV"}},
         {"metadata": {"page_id": "1", "title": "Quarterly Goals", "heading": "Q2", "text_summary": "Heading: Q2\nExcerpt:", "space_key": "DEV"}}
     ]
-    resp = search_workspace_knowledge("Quarterly")
+    resp = _call(search_workspace_knowledge, "Quarterly")
     assert len(resp.candidates) == 1
     assert resp.candidates[0].page_id == "1"
     assert resp.candidates[0].heading in {"Q1", "Q2"}
@@ -34,9 +43,10 @@ def test_page_selection_live_search_without_pinecone(mock_get_store, mock_get_co
     mock_connector.search_pages.return_value = [
         {"page_id": "9", "title": "Introduction to Machine Learning", "space_key": "DEV", "excerpt": "ML page"},
     ]
+    mock_connector.list_pages.return_value = []
     mock_store.search.side_effect = Exception("pinecone unavailable")
 
-    resp = search_workspace_knowledge("intro to machine learning")
+    resp = _call(search_workspace_knowledge, "intro to machine learning")
     assert len(resp.candidates) == 1
     assert resp.candidates[0].page_id == "9"
     assert resp.candidates[0].title == "Introduction to Machine Learning"
@@ -53,7 +63,7 @@ def test_page_selection_includes_recent_pages_when_live_search_is_empty(mock_get
     ]
     mock_store.search.side_effect = Exception("pinecone unavailable")
 
-    resp = search_workspace_knowledge("some vague request")
+    resp = _call(search_workspace_knowledge, "some vague request")
     assert len(resp.candidates) == 2
     assert {cand.page_id for cand in resp.candidates} == {"11", "12"}
 
@@ -63,7 +73,7 @@ def test_live_fetch_and_headings(mock_get_connector):
     mock_connector.get_page_metadata.return_value = {"version": {"number": 5}}
     mock_connector.fetch_page_html.return_value = "<h1>Doc</h1><h2>Section A</h2><p>text</p><h3>Sub</h3><h2>Section B</h2>"
     
-    resp = fetch_live_page("123", heading_string="Section A")
+    resp = _call(fetch_live_page, "123", heading_string="Section A")
     assert resp.expected_version == 5
     assert resp.available_headings == ["Doc", "Section A", "Sub", "Section B"]
     assert "<p>text</p><h3>Sub</h3>" == str(resp.section_html).strip()
@@ -89,7 +99,7 @@ def test_version_conflict_handling(mock_get_connector):
     # Simulate a version conflict being thrown by connector on push
     mock_connector.push_update.side_effect = ValueError("Version Conflict: Expected version 4, but live version is 5.")
     
-    resp = commit_document_edit("123", 4, "H1", "<p>test</p>", "<p>new</p>")
+    resp = _call(commit_document_edit, "123", 4, "H1", "<p>test</p>", "<p>new</p>")
     assert resp.success is False
     assert "ConflictError" in resp.message
 
@@ -144,36 +154,36 @@ def test_preview_delete(mock_get_connector):
     mock_connector = mock_get_connector.return_value
     mock_connector.fetch_page_html.return_value = "<h2>Common mistakes</h2><p>mistake body</p><h2>Keep</h2><p>keep me</p>"
 
-    resp = preview_delete("123", "Common mistakes", delete_entire_section=True)
+    resp = _call(preview_delete, "123", "Common mistakes", delete_entire_section=True)
     assert resp.success is True
     assert "Common mistakes" in resp.diff
 
+@patch('confluence_logic.agents.tools._reindex_in_background')
 @patch('confluence_logic.agents.tools.get_connector')
-@patch('confluence_logic.ingestion.doc_pipeline.IngestionPipeline.process_page')
-def test_commit_delete(mock_pipeline, mock_get_connector):
+def test_commit_delete(mock_get_connector, mock_reindex):
     mock_connector = mock_get_connector.return_value
     mock_connector.fetch_page_html.return_value = "<h2>Common mistakes</h2><p>mistake body</p><h2>Keep</h2><p>keep me</p>"
     mock_connector.push_update.return_value = True
 
-    resp = commit_delete("123", 4, "Common mistakes", delete_entire_section=True)
+    resp = _call(commit_delete, "123", 4, "Common mistakes", delete_entire_section=True)
     assert resp.success is True
     mock_connector.push_update.assert_called_once()
     pushed_html = mock_connector.push_update.call_args.args[1]
     assert "Common mistakes" not in pushed_html
     assert "Keep" in pushed_html
-    mock_pipeline.assert_called_once_with("123")
+    mock_reindex.assert_called_once_with("123")
 
+@patch('confluence_logic.agents.tools._reindex_in_background')
 @patch('confluence_logic.agents.tools.get_connector')
-@patch('confluence_logic.ingestion.doc_pipeline.IngestionPipeline.process_page')
-def test_create_confluence_page_tool(mock_pipeline, mock_get_connector):
+def test_create_confluence_page_tool(mock_get_connector, mock_reindex):
     from confluence_logic.agents.tools import create_confluence_page
     mock_connector = mock_get_connector.return_value
     mock_connector.create_page.return_value = {"id": "999", "title": "Test Page", "version": {"number": 1}}
-    
-    resp = create_confluence_page("DEV", "Test Page", body_text="Hello World")
+
+    resp = _call(create_confluence_page, "DEV", "Test Page", body_text="Hello World")
     assert resp.success is True
     assert resp.page_id == "999"
-    mock_pipeline.assert_called_once_with("999")
+    mock_reindex.assert_called_once_with("999")
 
 def test_html_builder():
     from confluence_logic.utils.html_builder import build_page_html
@@ -190,7 +200,7 @@ def test_list_workspace_pages(mock_get_connector):
         {"page_id": "124", "title": "ML Notes", "space_key": "DEV", "excerpt": "About ML"},
     ]
 
-    resp = list_workspace_pages(10)
+    resp = _call(list_workspace_pages, 10)
     assert len(resp.candidates) == 2
     assert resp.candidates[0].title == "Sample AI Page"
     assert resp.candidates[1].page_id == "124"
@@ -214,14 +224,14 @@ def test_format_page_titles_for_user_disambiguates_duplicates_with_heading():
     assert "Notes - Quarterly Goals" in formatted
     assert "Notes - QBR" in formatted
 
+@patch('confluence_logic.agents.tools._reindex_in_background')
 @patch('confluence_logic.agents.tools.get_connector')
-@patch('confluence_logic.ingestion.doc_pipeline.IngestionPipeline.process_page')
-def test_update_page_title_tool(mock_pipeline, mock_get_connector):
+def test_update_page_title_tool(mock_get_connector, mock_reindex):
     mock_connector = mock_get_connector.return_value
     mock_connector.fetch_page_html.return_value = "<h2>Overview</h2><p>Hello</p>"
     mock_connector.push_update.return_value = True
 
-    resp = update_page_title("123", 4, "Why Donuts Are Awesome")
+    resp = _call(update_page_title, "123", 4, "Why Donuts Are Awesome")
     assert resp.success is True
     mock_connector.push_update.assert_called_once_with(
         "123",
@@ -229,7 +239,7 @@ def test_update_page_title_tool(mock_pipeline, mock_get_connector):
         expected_version=4,
         title_override="Why Donuts Are Awesome",
     )
-    mock_pipeline.assert_called_once_with("123")
+    mock_reindex.assert_called_once_with("123")
 
 @patch("confluence_logic.agents.editor_agent.Runner.run", new_callable=AsyncMock)
 def test_handle_prepared_query_bypasses_reframer(mock_runner_run):

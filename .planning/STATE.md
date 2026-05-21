@@ -3,34 +3,34 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-05-15T18:50:15.796Z"
-last_activity: 2026-05-15
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-05-21T08:53:29.175Z"
+last_activity: 2026-05-21 -- Phase 09 planning complete
 progress:
-  total_phases: 4
-  completed_phases: 2
-  total_plans: 9
-  completed_plans: 7
-  percent: 90
+  total_phases: 8
+  completed_phases: 6
+  total_plans: 29
+  completed_plans: 20
+  percent: 69
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-05-11)
+See: .planning/PROJECT.md (updated 2026-05-16)
 
 **Core value:** Users never manually update Confluence after a meeting — the system proposes the right changes to the right pages and the user just approves or rejects.
-**Current focus:** Phase 3 — Async Progress Streaming + Review UI
+**Current focus:** Phase 9 — merge `master` (LiveKit voice path) and `confluence` (Phase 7 Q&A + Phase 8 auto-proposals + UI) onto a new `omg_merged` branch off master
 
 ## Current Position
 
-Phase: 03 of 4 (async progress streaming review ui)
-Plan: Not started
-Status: In progress — Plan 03-03 next
-Last activity: 2026-05-15
+Phase: 09 of 9 (merge-livekit-voice-path-confluence-q-a-pipeline-into-master) — CONTEXT gathered, ready for planning
+Plan: 0 of TBD
+Status: Ready to execute
+Last activity: 2026-05-21 -- Phase 09 planning complete
 
-Progress: [█████████░] 90%
+Progress: [█████████░] 89%
 
 ## Performance Metrics
 
@@ -66,6 +66,14 @@ Progress: [█████████░] 90%
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
+### Roadmap Evolution
+
+- Phase 7 added: Confluence Document Q&A Agent — ConfluenceQAAgent (OpenAI Agents SDK) replacing _answer_confluence_question() function
+- Phase 7 Plan 01: RED test suite for ConfluenceQAAgent written; patch targets use confluence_logic.agents.confluence_qa_agent.* namespace; _get_openai_client is module-local (no circular import from jarvis_agentic)
+- Phase 7 Plan 02: ConfluenceQAAgent implemented with Pinecone-first (>=0.3 score), Neo4j secondary, REST fallback; gpt-5-mini orchestration + gpt-4o-mini synthesis two-model split; _answer_confluence_question() deleted; _get_qa_agent() lazy singleton added to jarvis_agentic.py; latency benchmark < 3000ms confirmed
+
+### Decisions
+
 - Multi-agent with verifier/critic: accuracy over speed; verifier enriches cards before user sees them
 - Model split: gpt-5.4-nano routing, gpt-5-mini extraction+drafting, gpt-5.4-mini orchestrator+verifier
 - SSE (not WebSocket) for pipeline progress: one-directional server push is sufficient
@@ -73,6 +81,12 @@ Recent decisions affecting current work:
 - activeJobId lazy initializer uses sessionId (URL param) not resolvedSessionId — avoids temporal dead zone at first render
 - sync-sage-bot has its own .git repo (was submodule); Task commits live in sync-sage-bot's git repo on main branch
 - [Phase ?]: PipelinePage Navbar import fix
+- [Phase 7-02]: ConfluenceQAAgent two-model split: gpt-5-mini for tool orchestration (Agent SDK), gpt-4o-mini for synthesis; Pinecone score threshold 0.3 before fallback to Neo4j/REST
+- [Phase 8-01]: post-meeting create-fallback honors `intent.verbatim_content` as bullet list; FACT_EXTRACTION_PROMPT gains EXPLICIT CREATE RULE for 6 phrase triggers; drafter `_enforce_verbatim_content` Python guard re-synthesizes after_content if items mismatch
+- [Phase 8-02]: page_qualifier deterministic hard pre-filter (old_value missing + no title overlap + no heading match → reject without LLM); JARVIS_QUALIFIER_FIT_MIN env (default 6); _verify_and_persist drops stub after_content + synthesizes change_summary + downgrades replace→append when before_content missing on live page
+- [Phase 8-03]: POST /sessions/{sid}/review/regenerate/{pid} re-drafts a single proposal against current Confluence page; heading pre-flight in _verify_and_persist downgrades to create_section when heading gone; frontend executeProposal surfaces real backend errors; Regenerate-from-current-page button on rejected cards; ChangeItem gains change_summary, regenerate_available, last_error
+- [Phase 8-04]: ProposalCard new Region 0 headline (change-type badge + full page title + change_summary one-liner); default-visible compact +/- line diff via sync-sage-bot/src/lib/diff.ts (no new deps); high-density fallback to red/green side-by-side blocks
+- [Phase 8-05]: 10 transcript fixtures + 3 pytest files (proposal_quality, fact_extraction_explicit_create, apply_failure_paths) + e2e scorecard CLI + vitest ProposalCard test + MANUAL_TEST_PLAN.md; deterministic without LLM/Confluence credentials
 
 ### Pending Todos
 
@@ -91,6 +105,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-12T16:35:24.069Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-05-17T03:56:10.222Z
+Stopped at: Completed 07-01-PLAN.md
 Resume file: None

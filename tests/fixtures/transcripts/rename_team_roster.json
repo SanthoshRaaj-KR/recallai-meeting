@@ -1,0 +1,23 @@
+{
+  "name": "rename_team_roster",
+  "description": "User asks to rename 'Old Team Roster' to 'Team Roster 2026'.",
+  "transcript": [
+    {"participant": "Grace", "text": "The Old Team Roster page is finally going to be refreshed for 2026.", "timestamp": 1.0},
+    {"participant": "Henry", "text": "Rename the page 'Old Team Roster' to 'Team Roster 2026'.", "timestamp": 5.0}
+  ],
+  "live_pages": [
+    {
+      "page_id": "pg-roster",
+      "title": "Old Team Roster",
+      "html": "<h2>Members</h2><p>Alice, Bob, Carol</p>",
+      "available_headings": ["Members"]
+    }
+  ],
+  "expected": {
+    "n_proposals": 1,
+    "change_types_any_of": [{"title": 1}, {"edit": 1}, {"rename": 1}],
+    "contains_verbatim": ["Team Roster 2026"],
+    "must_have_change_summary": true,
+    "must_have_page_title": "roster"
+  }
+}

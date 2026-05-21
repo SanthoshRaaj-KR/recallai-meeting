@@ -118,6 +118,51 @@ _SENTINEL_IDX = sys.maxsize  # Largest int — guarantees the sentinel is sorted
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+async def _pinecone_startup_index() -> None:
+    """Background task: index all Confluence pages into Pinecone on server startup.
+
+    Uses version checks — unchanged pages are skipped in milliseconds.  Runs
+    once per process start so Pinecone is always populated before the first
+    voice query arrives.  Failures are logged but never surface to callers.
+    """
+    try:
+        from confluence_logic.ingestion.doc_pipeline import IngestionPipeline  # noqa: PLC0415
+        from confluence_logic.connectors.confluence import ConfluenceConnector  # noqa: PLC0415
+        from confluence_logic.confluence_page_graph import MAX_INDEX_PAGES  # noqa: PLC0415
+        connector = ConfluenceConnector()
+        pages = await asyncio.to_thread(connector.list_pages, MAX_INDEX_PAGES)
+        pipeline = IngestionPipeline()
+        logger.info("Pinecone startup index: found %d pages to check", len(pages))
+        for page in pages:
+            page_id = page.get("page_id")
+            if not page_id:
+                continue
+            try:
+                await asyncio.to_thread(pipeline.process_page, page_id)
+            except Exception as exc:
+                logger.debug("Pinecone startup index skipped page %s: %s", page_id, exc)
+        logger.info("Pinecone startup index complete")
+    except Exception as exc:
+        logger.warning("Pinecone startup index failed (non-fatal): %s", exc)
+
+
+async def _pinecone_periodic_sync(interval_seconds: int = 1800) -> None:
+    """Background loop: re-index recently changed Confluence pages every 30 minutes.
+
+    Re-uses _sync_recent_pinecone_pages from the review API which checks
+    the 30 most recently modified pages.  Catches any page edited directly
+    in Confluence between pipeline runs.
+    """
+    from confluence_logic.review.api import _sync_recent_pinecone_pages  # noqa: PLC0415
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await _sync_recent_pinecone_pages(limit=30)
+            logger.debug("Pinecone periodic sync complete")
+        except Exception as exc:
+            logger.warning("Pinecone periodic sync failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Bot is started on-demand via POST /bot/start from the review UI.
@@ -127,15 +172,20 @@ async def lifespan(app: FastAPI):
     graph_refresh_task = asyncio.create_task(
         confluence_page_graph.refresh_known_user_graphs_forever(stop_graph_refresh)
     )
+    # Populate Pinecone in the background — voice queries resolve in <1s once indexed.
+    pinecone_startup_task = asyncio.create_task(_pinecone_startup_index())
+    # Re-check recently modified pages every 30 minutes to catch direct Confluence edits.
+    pinecone_sync_task = asyncio.create_task(_pinecone_periodic_sync())
     try:
         yield
     finally:
         stop_graph_refresh.set()
-        graph_refresh_task.cancel()
-        try:
-            await graph_refresh_task
-        except asyncio.CancelledError:
-            pass
+        for task in (graph_refresh_task, pinecone_startup_task, pinecone_sync_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -170,6 +220,8 @@ _DYNAMIC_ACK_FALLBACKS = {
     "switching": "On it, switching now.",
     "error": "Sorry, I hit a snag there.",
 }
+QUEUE_ACK = _DYNAMIC_ACK_FALLBACKS["queued"]
+SWITCH_ACK = _DYNAMIC_ACK_FALLBACKS["switching"]
 
 _INSTANT_ACKS = [
     "On it.",
@@ -483,65 +535,23 @@ async def _queue_confluence_proposal(task: VoiceTask, prepared_request: str) -> 
     return "I could not find a concrete Confluence change to queue from that request."
 
 
-async def _answer_confluence_question(query: str) -> str:
-    graph_user_id = _current_confluence_graph_user_id()
-    try:
-        await asyncio.wait_for(confluence_page_graph.ensure_user_confluence_graph(graph_user_id), timeout=0.7)
-    except (asyncio.TimeoutError, Exception):
-        asyncio.create_task(confluence_page_graph.ensure_user_confluence_graph(graph_user_id))
+_qa_agent = None
 
-    if re.search(r"\b(?:list|show|what).*(?:pages|documents|docs)\b", query, re.IGNORECASE):
-        pages = await confluence_page_graph.list_user_confluence_pages(graph_user_id, limit=10)
-        if pages:
-            titles = ", ".join(page.get("title") or "Untitled" for page in pages[:10])
-            return f"I found these Confluence pages in the graph: {titles}."
 
-    try:
-        contexts = await asyncio.wait_for(
-            confluence_page_graph.query_user_confluence_graph(graph_user_id, query, limit=6),
-            timeout=0.8,
-        )
-    except (asyncio.TimeoutError, Exception):
-        contexts = []
-
-    if not contexts:
-        return "I could not find a relevant Confluence page for that yet. The workspace graph may still be refreshing."
-
-    context_text = json.dumps(
-        [
-            {
-                "page_title": item.get("title"),
-                "heading": item.get("heading"),
-                "content": item.get("relevant_content"),
-            }
-            for item in contexts
-        ],
-        ensure_ascii=False,
-    )
-    response = await asyncio.to_thread(
-        lambda: get_openai_client().chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You answer questions about Confluence pages using only the retrieved page/section context. "
-                        "Keep the answer concise and useful for spoken delivery. If context is insufficient, say so."
-                    ),
-                },
-                {"role": "user", "content": f"Question: {query}\n\nRetrieved Confluence context:\n{context_text}"},
-            ],
-            max_tokens=220,
-            temperature=0.2,
-        )
-    )
-    return (response.choices[0].message.content or "").strip() or "I could not answer that from the Confluence graph."
+def _get_qa_agent():
+    """Lazy singleton getter for ConfluenceQAAgent. Deferred import avoids circular imports."""
+    global _qa_agent
+    if _qa_agent is None:
+        from confluence_logic.agents.confluence_qa_agent import ConfluenceQAAgent  # noqa: PLC0415
+        _qa_agent = ConfluenceQAAgent()
+    return _qa_agent
 
 
 async def _handle_confluence_question(query: str, bot_id: str) -> None:
     generation = meeting_state["output_generation"]
     try:
-        answer_task = asyncio.create_task(_answer_confluence_question(query))
+        graph_user_id = _current_confluence_graph_user_id()
+        answer_task = asyncio.create_task(_get_qa_agent().run(query, graph_user_id))
         gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
         answer = await answer_task
         await gap_filler_task

@@ -10,6 +10,7 @@ class PineconeStore:
     def __init__(self, index_name: str = "confluence-kb"):
         api_key = (os.getenv("PINECONE_API_KEY") or "").strip()
         self.index_name = (os.getenv("PINECONE_INDEX_NAME") or index_name).strip()
+        self.namespace = (os.getenv("PINECONE_NAMESPACE") or "").strip()
         self.embedding_model = (os.getenv("OPENAI_EMBEDDING_MODEL") or "text-embedding-3-small").strip()
         configured_dims = (os.getenv("OPENAI_EMBEDDING_DIMENSIONS") or os.getenv("PINECONE_INDEX_DIMENSION") or "").strip()
         self.embedding_dimensions = int(configured_dims) if configured_dims else None
@@ -23,7 +24,10 @@ class PineconeStore:
         if not hasattr(self, 'index'):
             return None
         try:
-            resp = self.index.fetch(ids=[f"{page_id}_0"])
+            kwargs = {"ids": [f"{page_id}_0"]}
+            if self.namespace:
+                kwargs["namespace"] = self.namespace
+            resp = self.index.fetch(**kwargs)
             if resp and resp.get('vectors') and f"{page_id}_0" in resp['vectors']:
                 return resp['vectors'][f"{page_id}_0"].get("metadata", {}).get("version")
             return None  # page not in index — not an error
@@ -37,7 +41,10 @@ class PineconeStore:
             return
         stale_ids = [f"{page_id}_{i}" for i in range(new_section_count, new_section_count + 100)]
         try:
-            self.index.delete(ids=stale_ids)
+            kwargs = {"ids": stale_ids}
+            if self.namespace:
+                kwargs["namespace"] = self.namespace
+            self.index.delete(**kwargs)
         except Exception as exc:
             logger.error(
                 "Pinecone stale section cleanup failed for %s (sections %d+): %s",
@@ -81,7 +88,10 @@ class PineconeStore:
             })
             
         try:
-            self.index.upsert(vectors=vectors)
+            upsert_kwargs = {"vectors": vectors}
+            if self.namespace:
+                upsert_kwargs["namespace"] = self.namespace
+            self.index.upsert(**upsert_kwargs)
         except Exception as exc:
             logger.error(
                 "Pinecone upsert failed for index '%s'. Check OPENAI_EMBEDDING_DIMENSIONS/PINECONE_INDEX_DIMENSION. Error: %s",
@@ -95,11 +105,14 @@ class PineconeStore:
             return []
         query_embedding = self.get_embeddings([query])[0]
         try:
-            results = self.index.query(
-                vector=query_embedding,
-                top_k=top_k,
-                include_metadata=True
-            )
+            query_kwargs = {
+                "vector": query_embedding,
+                "top_k": top_k,
+                "include_metadata": True,
+            }
+            if self.namespace:
+                query_kwargs["namespace"] = self.namespace
+            results = self.index.query(**query_kwargs)
         except Exception as exc:
             logger.error(
                 "Pinecone query failed for index '%s'. Check OPENAI_EMBEDDING_DIMENSIONS/PINECONE_INDEX_DIMENSION. Error: %s",
