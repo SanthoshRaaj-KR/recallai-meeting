@@ -66,6 +66,7 @@ from livekit.agents import (
     JobContext,
     JobProcess,
     ModelSettings,
+    RunContext,
     TurnHandlingOptions,
     cli,
     inference,
@@ -79,7 +80,7 @@ from livekit.agents.utils.codecs.decoder import AudioStreamDecoder
 from livekit.agents.llm import FunctionTool, function_tool
 
 from confluence_logic.audio_cache import get_wake_ack_audio, get_random_query_ack_audio, load_audio_cache
-from confluence_logic.agent_bridge import JARVIS_TOOLS
+from confluence_logic.agent_bridge import JARVIS_TOOLS, _session_id_from_context
 from confluence_logic.agents.confluence_qa_agent import ConfluenceQAAgent
 
 _MODULE_DIR = Path(__file__).resolve().parent
@@ -214,9 +215,18 @@ def _get_confluence_qa_agent() -> ConfluenceQAAgent:
 
 
 @function_tool
-async def answer_confluence_question_tool(query: str, user_id: str = "default") -> str:
-    """Answer a Confluence read-only question using the project's Pinecone-first ConfluenceQAAgent (Phase 7)."""
-    return await _get_confluence_qa_agent().run(query=query, graph_user_id=user_id)
+async def answer_confluence_question_tool(context: RunContext, query: str) -> str:
+    """Answer a Confluence read-only question using the project's Pinecone-first ConfluenceQAAgent (Phase 7).
+
+    Args:
+        query: The Confluence question to answer (e.g. 'what is the deployment process?').
+    """
+    sid = _session_id_from_context(context)
+    graph_user_id = f"session:{sid}" if sid else "session:default"
+    t0 = time.perf_counter()
+    result = await _get_confluence_qa_agent().run(query=query, graph_user_id=graph_user_id)
+    logger.info("⏱️  answer_confluence_question_tool: %.0fms (q=%.50r)", (time.perf_counter() - t0) * 1000, query)
+    return result
 
 
 _JARVIS_TOOLS_WITH_ACK = [_add_tool_call_ack(t) for t in [*JARVIS_TOOLS, answer_confluence_question_tool]]
