@@ -1,0 +1,14 @@
+{
+  "name": "hallucinate_jargon_not_in_transcript",
+  "failure_mode": "hallucinate",
+  "transcript_text": "Grace: We should improve the onboarding documentation. The current version is too brief.\nHenry: Yeah, more detail would help.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-onboarding",
+      "title": "Onboarding",
+      "headings": ["Welcome"],
+      "content_html": "<h2>Welcome</h2><p>Welcome to the team.</p>"
+    }
+  ],
+  "expected_proposals": []
+}

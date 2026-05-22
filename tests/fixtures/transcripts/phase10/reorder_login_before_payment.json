@@ -1,0 +1,24 @@
+{
+  "name": "reorder_login_before_payment",
+  "failure_mode": "reorder",
+  "transcript_text": "Alice: In the Onboarding Flow, login should happen before payment. Right now the docs list payment first.\nBob: Right, login then payment.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-onboarding-flow",
+      "title": "Onboarding Flow",
+      "headings": ["Steps"],
+      "content_html": "<h2>Steps</h2><ol><li>Open the app.</li><li>Enter payment.</li><li>Log in to the account.</li><li>Confirm welcome screen.</li></ol>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-onboarding-flow",
+      "action": "reorder",
+      "section_heading": "Steps",
+      "old_text": null,
+      "new_text": null,
+      "from_index": 2,
+      "to_index": 1
+    }
+  ]
+}

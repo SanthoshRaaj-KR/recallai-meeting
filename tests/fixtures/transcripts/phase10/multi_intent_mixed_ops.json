@@ -1,0 +1,33 @@
+{
+  "name": "multi_intent_mixed_ops",
+  "failure_mode": "mixed",
+  "transcript_text": "Ivy: Two changes for the Release Notes page. First, in the Highlights section, replace 'v1.2' with 'v1.3'. Second, add a new bullet 'Improved error logging' after 'Bug fixes' in the Highlights section.\nJack: Got it, v1.3 and an Improved error logging bullet after Bug fixes.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-release-notes",
+      "title": "Release Notes",
+      "headings": ["Highlights"],
+      "content_html": "<h2>Highlights</h2><ul><li>Bug fixes</li><li>Performance gains</li></ul><p>v1.2 ships next week.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-release-notes",
+      "action": "replace",
+      "section_heading": "Highlights",
+      "old_text": "v1.2",
+      "new_text": "v1.3",
+      "from_index": null,
+      "to_index": null
+    },
+    {
+      "page_id": "pg-release-notes",
+      "action": "insert_after",
+      "section_heading": "Highlights",
+      "old_text": "Bug fixes",
+      "new_text": "Improved error logging",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

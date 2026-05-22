@@ -1,0 +1,24 @@
+{
+  "name": "reorder_at_end_of_list",
+  "failure_mode": "reorder",
+  "transcript_text": "Grace: In the Daily Standup runbook, the retrospective should be the very last step, not before the action review.\nHenry: Right, retro last.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-daily-standup",
+      "title": "Daily Standup",
+      "headings": ["Agenda"],
+      "content_html": "<h2>Agenda</h2><ol><li>Share yesterday updates.</li><li>Run the retrospective.</li><li>Discuss blockers.</li><li>Review action items.</li></ol>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-daily-standup",
+      "action": "reorder",
+      "section_heading": "Agenda",
+      "old_text": null,
+      "new_text": null,
+      "from_index": 1,
+      "to_index": 3
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "name": "database_postgres_to_mongodb",
+  "failure_mode": "wrong_page",
+  "transcript_text": "Grace: The Database page lists Postgres as the primary store. We are migrating to MongoDB. Please update the Database page.\nHenry: Yes, change Postgres to MongoDB on the Database page.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-database",
+      "title": "Database",
+      "headings": ["Primary Store"],
+      "content_html": "<h2>Primary Store</h2><p>Postgres is the primary data store.</p>"
+    },
+    {
+      "page_id": "pg-data-strategy",
+      "title": "Data Strategy",
+      "headings": ["Principles"],
+      "content_html": "<h2>Principles</h2><p>We favor durability and consistency in our data layer.</p>"
+    },
+    {
+      "page_id": "pg-platform",
+      "title": "Platform Overview",
+      "headings": ["Stack"],
+      "content_html": "<h2>Stack</h2><p>Generic platform components.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-database",
+      "action": "replace",
+      "section_heading": "Primary Store",
+      "old_text": "Postgres",
+      "new_text": "MongoDB",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

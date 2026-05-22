@@ -1,0 +1,24 @@
+{
+  "name": "reorder_three_step_swap",
+  "failure_mode": "reorder",
+  "transcript_text": "Carol: In the Release Checklist, run the smoke tests before the database migration, not after.\nDan: Agreed, smoke tests first then migration.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-release-checklist",
+      "title": "Release Checklist",
+      "headings": ["Steps"],
+      "content_html": "<h2>Steps</h2><ol><li>Tag the release commit.</li><li>Run the database migration.</li><li>Run the smoke tests.</li><li>Announce the release.</li></ol>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-release-checklist",
+      "action": "reorder",
+      "section_heading": "Steps",
+      "old_text": null,
+      "new_text": null,
+      "from_index": 2,
+      "to_index": 1
+    }
+  ]
+}

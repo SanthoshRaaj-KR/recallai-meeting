@@ -1,0 +1,24 @@
+{
+  "name": "reorder_with_unrelated_other_steps",
+  "failure_mode": "reorder",
+  "transcript_text": "Ivy: In the New Hire Onboarding, the security training should come before laptop provisioning, not after.\nJack: Yes, security training before laptop.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-new-hire",
+      "title": "New Hire Onboarding",
+      "headings": ["First Week"],
+      "content_html": "<h2>First Week</h2><ol><li>Send the welcome email.</li><li>Provision the laptop.</li><li>Complete the security training.</li><li>Schedule the manager meeting.</li><li>Add to the team mailing list.</li></ol>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-new-hire",
+      "action": "reorder",
+      "section_heading": "First Week",
+      "old_text": null,
+      "new_text": null,
+      "from_index": 2,
+      "to_index": 1
+    }
+  ]
+}

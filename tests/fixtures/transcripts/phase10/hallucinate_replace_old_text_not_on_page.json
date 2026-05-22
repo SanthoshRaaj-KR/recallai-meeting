@@ -1,0 +1,14 @@
+{
+  "name": "hallucinate_replace_old_text_not_on_page",
+  "failure_mode": "hallucinate",
+  "transcript_text": "Eve: Replace 'manual deployment via SSH' with 'automated deployment via GitHub Actions' in the Deployment section.\nFrank: Sure, sounds good.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-deploy-guide",
+      "title": "Deployment Guide",
+      "headings": ["Deployment"],
+      "content_html": "<h2>Deployment</h2><p>We deploy via CircleCI. The pipeline runs on every merge to main.</p>"
+    }
+  ],
+  "expected_proposals": []
+}

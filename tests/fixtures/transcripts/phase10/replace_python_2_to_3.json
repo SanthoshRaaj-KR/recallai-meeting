@@ -1,0 +1,24 @@
+{
+  "name": "replace_python_2_to_3",
+  "failure_mode": "mixed",
+  "transcript_text": "Alice: The Dev Runbook still says Python 2 in the Setup section. We standardized on Python 3 last quarter.\nBob: Change Python 2 to Python 3 in the Setup section of the Dev Runbook.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-dev-runbook",
+      "title": "Dev Runbook",
+      "headings": ["Setup", "Deployment"],
+      "content_html": "<h2>Setup</h2><p>We use Python 2 for the dev environment.</p><h2>Deployment</h2><p>Deploy via CI.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-dev-runbook",
+      "action": "replace",
+      "section_heading": "Setup",
+      "old_text": "Python 2",
+      "new_text": "Python 3",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

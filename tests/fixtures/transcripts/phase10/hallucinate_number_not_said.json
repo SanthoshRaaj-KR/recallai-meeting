@@ -1,0 +1,14 @@
+{
+  "name": "hallucinate_number_not_said",
+  "failure_mode": "hallucinate",
+  "transcript_text": "Ivy: We agreed the SLA target is tighter than before. Let's reflect that in the Service Level Agreement page.\nJack: Yes, tighter SLA in the SLA page.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-sla",
+      "title": "Service Level Agreement",
+      "headings": ["Targets"],
+      "content_html": "<h2>Targets</h2><p>Response time under one hour for priority tickets.</p>"
+    }
+  ],
+  "expected_proposals": []
+}

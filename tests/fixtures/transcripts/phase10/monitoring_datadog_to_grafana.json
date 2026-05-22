@@ -1,0 +1,36 @@
+{
+  "name": "monitoring_datadog_to_grafana",
+  "failure_mode": "wrong_page",
+  "transcript_text": "Ivy: For monitoring we are moving off Datadog and onto Grafana. The Monitoring page should reflect Grafana as the primary tool.\nJack: Yes, change Datadog to Grafana on the Monitoring page.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-monitoring",
+      "title": "Monitoring",
+      "headings": ["Primary Tool"],
+      "content_html": "<h2>Primary Tool</h2><p>We use Datadog for application metrics.</p>"
+    },
+    {
+      "page_id": "pg-observability",
+      "title": "Observability Overview",
+      "headings": ["Pillars"],
+      "content_html": "<h2>Pillars</h2><p>Logs, metrics, and traces are the three pillars of observability.</p>"
+    },
+    {
+      "page_id": "pg-oncall-tools",
+      "title": "On-Call Tools",
+      "headings": ["Setup"],
+      "content_html": "<h2>Setup</h2><p>PagerDuty handles paging.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-monitoring",
+      "action": "replace",
+      "section_heading": "Primary Tool",
+      "old_text": "Datadog",
+      "new_text": "Grafana",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

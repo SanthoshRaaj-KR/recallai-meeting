@@ -1,0 +1,20 @@
+{
+  "name": "hallucinate_nonexistent_page",
+  "failure_mode": "hallucinate",
+  "transcript_text": "Alice: We should update the Quarterly Forecast Tracker page to reflect the new Q3 numbers.\nBob: Make sure the revised projections land on that page by Friday.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-launch-plan",
+      "title": "Launch Plan",
+      "headings": ["Overview", "Decisions", "Timeline"],
+      "content_html": "<h2>Overview</h2><p>This page tracks the launch plan.</p><h2>Decisions</h2><p>Launch on Friday.</p><h2>Timeline</h2><p>Kickoff in week 1.</p>"
+    },
+    {
+      "page_id": "pg-team-roster",
+      "title": "Team Roster",
+      "headings": ["Members"],
+      "content_html": "<h2>Members</h2><p>Alice, Bob, Carol.</p>"
+    }
+  ],
+  "expected_proposals": []
+}

@@ -1,0 +1,36 @@
+{
+  "name": "deployment_docker_migration",
+  "failure_mode": "wrong_page",
+  "transcript_text": "Carol: We're changing the deployment architecture to use Docker. The Deployment Architecture page should be updated.\nDan: Yes, use Docker for deployment in the Deployment Architecture page.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-deployment-arch",
+      "title": "Deployment Architecture",
+      "headings": ["Topology"],
+      "content_html": "<h2>Topology</h2><p>We deploy directly to bare-metal hosts via Ansible.</p>"
+    },
+    {
+      "page_id": "pg-intro-deploy",
+      "title": "Engineering Introduction",
+      "headings": ["Overview"],
+      "content_html": "<h2>Overview</h2><p>We are a small engineering team. Deployment happens nightly.</p>"
+    },
+    {
+      "page_id": "pg-onboard-deploy",
+      "title": "Engineer Onboarding",
+      "headings": ["Tools"],
+      "content_html": "<h2>Tools</h2><p>Standard IDE and chat tools.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-deployment-arch",
+      "action": "replace",
+      "section_heading": "Topology",
+      "old_text": "Ansible",
+      "new_text": "Docker",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

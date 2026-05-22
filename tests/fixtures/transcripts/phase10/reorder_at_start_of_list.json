@@ -1,0 +1,24 @@
+{
+  "name": "reorder_at_start_of_list",
+  "failure_mode": "reorder",
+  "transcript_text": "Eve: The Incident Response runbook should start with paging the on-call, not with opening the ticket. Move the on-call page step to the top.\nFrank: Yes, on-call paging first.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-incident-response",
+      "title": "Incident Response",
+      "headings": ["Procedure"],
+      "content_html": "<h2>Procedure</h2><ol><li>Open the incident ticket.</li><li>Page the on-call engineer.</li><li>Assemble the response team.</li><li>Begin mitigation.</li></ol>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-incident-response",
+      "action": "reorder",
+      "section_heading": "Procedure",
+      "old_text": null,
+      "new_text": null,
+      "from_index": 1,
+      "to_index": 0
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "hallucinate_new_token_in_after_content",
+  "failure_mode": "hallucinate",
+  "transcript_text": "Carol: The setup section is fine as-is. Let's not change it for now.\nDan: Agreed, leave Setup alone.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-dev-runbook",
+      "title": "Dev Runbook",
+      "headings": ["Setup", "Deployment"],
+      "content_html": "<h2>Setup</h2><p>Install dependencies via pip.</p><h2>Deployment</h2><p>Deploy via CI.</p>"
+    }
+  ],
+  "expected_proposals": []
+}

@@ -1,0 +1,36 @@
+{
+  "name": "auth_oauth_to_saml",
+  "failure_mode": "wrong_page",
+  "transcript_text": "Eve: We are switching authentication from OAuth to SAML for enterprise customers. The Authentication page should reflect SAML.\nFrank: Yes, update Authentication to SAML.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-auth",
+      "title": "Authentication",
+      "headings": ["Provider"],
+      "content_html": "<h2>Provider</h2><p>We use OAuth for all sign-ins.</p>"
+    },
+    {
+      "page_id": "pg-security",
+      "title": "Security Overview",
+      "headings": ["Posture"],
+      "content_html": "<h2>Posture</h2><p>We follow standard security best practices including auth and encryption.</p>"
+    },
+    {
+      "page_id": "pg-enterprise",
+      "title": "Enterprise Features",
+      "headings": ["Highlights"],
+      "content_html": "<h2>Highlights</h2><p>SSO support for enterprise customers.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-auth",
+      "action": "replace",
+      "section_heading": "Provider",
+      "old_text": "OAuth",
+      "new_text": "SAML",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

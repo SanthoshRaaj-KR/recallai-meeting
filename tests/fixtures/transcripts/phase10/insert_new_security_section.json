@@ -1,0 +1,24 @@
+{
+  "name": "insert_new_security_section",
+  "failure_mode": "mixed",
+  "transcript_text": "Carol: The API Reference page is missing a security section. We should add one right after the Overview that explains the OAuth token flow.\nDan: Yes, add a Security section after Overview describing OAuth token flow.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-api-reference",
+      "title": "API Reference",
+      "headings": ["Overview", "Endpoints"],
+      "content_html": "<h2>Overview</h2><p>This page documents the public API.</p><h2>Endpoints</h2><p>List of endpoints.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-api-reference",
+      "action": "create_section",
+      "section_heading": "Security",
+      "old_text": null,
+      "new_text": "OAuth token flow",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

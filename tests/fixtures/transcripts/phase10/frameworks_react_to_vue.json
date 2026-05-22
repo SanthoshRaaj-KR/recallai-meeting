@@ -1,0 +1,36 @@
+{
+  "name": "frameworks_react_to_vue",
+  "failure_mode": "wrong_page",
+  "transcript_text": "Alice: We are moving our frameworks from React to Vue. The Frameworks page should reflect that.\nBob: Yes, change React to Vue in the Frameworks list.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-frameworks",
+      "title": "Frameworks",
+      "headings": ["Current Stack"],
+      "content_html": "<h2>Current Stack</h2><p>We use React on the frontend.</p>"
+    },
+    {
+      "page_id": "pg-intro",
+      "title": "Team Introduction",
+      "headings": ["Welcome"],
+      "content_html": "<h2>Welcome</h2><p>We are a frontend team using modern frameworks.</p>"
+    },
+    {
+      "page_id": "pg-process",
+      "title": "Engineering Process",
+      "headings": ["Workflow"],
+      "content_html": "<h2>Workflow</h2><p>Standard agile process.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-frameworks",
+      "action": "replace",
+      "section_heading": "Current Stack",
+      "old_text": "React",
+      "new_text": "Vue",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

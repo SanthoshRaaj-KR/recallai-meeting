@@ -1,0 +1,24 @@
+{
+  "name": "delete_deprecated_warning",
+  "failure_mode": "mixed",
+  "transcript_text": "Eve: The Legacy Notes section on the Migration Guide is no longer relevant. We can delete that whole section.\nFrank: Yes, drop the Legacy Notes section from the Migration Guide.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-migration-guide",
+      "title": "Migration Guide",
+      "headings": ["Overview", "Legacy Notes"],
+      "content_html": "<h2>Overview</h2><p>How to migrate.</p><h2>Legacy Notes</h2><p>Old caveats from version 1.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-migration-guide",
+      "action": "delete_section",
+      "section_heading": "Legacy Notes",
+      "old_text": null,
+      "new_text": null,
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}
