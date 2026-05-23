@@ -3424,6 +3424,21 @@ async def _verify_and_persist(
                     if live_html:
                         full_page_text = BeautifulSoup(live_html, "html.parser").get_text(separator=" ", strip=True)
                         if _normalize_for_fuzzy(candidate_before) not in _normalize_for_fuzzy(full_page_text):
+                            # Plan 10-09 / Rule 2: for Phase 10 structured
+                            # ``replace`` ops the old_text MUST exist on the
+                            # page — otherwise the LLM picked the wrong page
+                            # and a silent fall-through to append (legacy
+                            # behavior) would persist hallucinated content.
+                            # Drop the card so the user does not get a
+                            # misleading "added text" proposal.
+                            if (draft.get("operation_type") or "").lower() == "replace":
+                                logger.warning(
+                                    "_verify_and_persist: Phase 10 replace dropped — "
+                                    "old_text '%s...' NOT on page '%s' "
+                                    "(wrong-page targeting; cannot safely degrade to append)",
+                                    candidate_before[:60], page_title,
+                                )
+                                return  # do not persist
                             logger.warning(
                                 "_verify_and_persist: before_content '%s...' NOT on page '%s' — "
                                 "clearing to prevent replace-failure at execution",
@@ -3528,10 +3543,26 @@ async def _verify_and_persist(
         # Deletions legitimately have no after_content, so they're exempt.
         _after_content = (verified.get("after_content") or "").strip()
         _change_type = (verified.get("change_type") or "edit").lower()
+        _operation_type = (verified.get("operation_type") or "").lower()
         # WR-03: title renames are legitimately short ("Q3 Plan"=7 chars) and
         # must NOT be dropped by the stub-length guard. Delete is also exempt
         # because deletes have no after_content to populate.
-        if _change_type not in {"delete", "title"} and len(_after_content) < 20:
+        # Plan 10-09 / Rule 2: Phase 10 ``reorder`` ops carry empty
+        # after_content by design — the dispatcher reconstructs the after-section
+        # from the live HTML by swapping <li>s (Pitfall 5). Exempt them so
+        # legitimate reorder cards are not dropped as "stubs".
+        # Replace ops with a short ``new_text`` (e.g. "React" -> "Vue", a 3-char
+        # token swap) are also legitimate — the operation_type tag identifies
+        # them as a structured replace, not a free-form drafter stub.
+        _structured_phase10 = _operation_type in {
+            "reorder", "replace", "insert_after",
+            "delete_section", "create_section",
+        }
+        if (
+            _change_type not in {"delete", "title"}
+            and not _structured_phase10
+            and len(_after_content) < 20
+        ):
             logger.warning(
                 "Verifier dropped stub proposal for '%s' (%s): after_content len=%d",
                 verified.get("page_title"), _change_type, len(_after_content),
@@ -4906,11 +4937,29 @@ async def _run_pipeline(
 
             # For intents with action='create' OR intents where retrieval returned no pages
             # AND the intent is documentation-worthy: emit a create proposal with page_id=null.
+            # Plan 10-09 / Rule 1: skip the legacy fallback when the Phase 10
+            # path already produced a structured create_page op for this intent
+            # — otherwise we double-emit the same create proposal (once with
+            # full Phase 10 metadata, once with the legacy null-page-id form).
+            owner_create_page_drafted: set = set()
+            for p in proposals:
+                audit = p.get("_audit") or {}
+                if (
+                    audit.get("owner_intent_idx") is not None
+                    and (p.get("operation_type") or "").lower() == "create_page"
+                ):
+                    owner_create_page_drafted.add(audit["owner_intent_idx"])
+
             for idx, (intent_obj, pages) in enumerate(intent_pages):
                 action = (getattr(intent_obj, "action", "") or "").strip().lower()
                 drafted = intent_drafted_count.get(idx, 0)
                 no_pages_found = not pages
                 explicit_create = action == "create"
+
+                if idx in owner_create_page_drafted:
+                    # Phase 10 already produced a create_page op for this
+                    # intent; the legacy fallback would create a duplicate.
+                    continue
 
                 if explicit_create or (no_pages_found and drafted == 0):
                     # No relevant page exists for this change — propose creating one
