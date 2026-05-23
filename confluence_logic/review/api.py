@@ -185,6 +185,10 @@ class ChangeItem(BaseModel):
     Fields transcript_evidence, confidence, risk, and verifier_note have safe
     defaults so existing Supabase rows (which lack these columns) can be read
     in Phase 1 without validation errors. Phase 2 agents will populate them.
+
+    Phase 10 (PROP-V2-02 / PROP-V2-06 / D-02 / D-07) extends ChangeItem with
+    structured-operation + UI-presentation fields. All new fields default to
+    None / empty so Phase 1/2 rows still deserialize without migration.
     """
     id: int
     change_type: str
@@ -204,6 +208,29 @@ class ChangeItem(BaseModel):
     confidence: Literal["high", "medium", "low"] = "low"
     risk: Literal["safe", "review", "risky"] = "safe"
     verifier_note: Optional[str] = None
+    # --- Phase 10 structured-operation + UI fields (additive; safe defaults) ---
+    # The D-02 instruction shape this card maps to (replace / insert_after /
+    # reorder / delete_section / create_section / create_page). None for
+    # pre-Phase-10 rows; the Accept endpoint falls back to its legacy path
+    # when operation_type is unset.
+    operation_type: Optional[str] = None
+    # ASTRoot path of the affected node (e.g., "section[2].ordered_list[0]"),
+    # carried through so the dispatcher and UI can locate the exact node.
+    ast_path: Optional[str] = None
+    # Reorder ops only — 0-based source/target indices into the OrderedList.
+    reorder_indices: Optional[Dict[str, int]] = None
+    # GroundingGate diagnostics — tokens that failed the per-op grounding rule
+    # at draft time. Populated only for cards that ALMOST dropped but passed;
+    # cards that fully fail the gate are not persisted at all.
+    grounding_failures: List[str] = []
+    # Visual breadcrumb shown in the ProposalCard header (D-07) — typically
+    # [space_name, ...ancestor titles, page_title]. May be empty when the
+    # connector's metadata fetch is incomplete or fails.
+    breadcrumb: List[str] = []
+    # Direct Confluence URL for the page (target="_blank" link from the card).
+    page_url: Optional[str] = None
+    # Stable HTML anchor for the section heading (D-07 "In section: «X»").
+    section_heading_anchor: Optional[str] = None
 
 
 def _bearer_token(authorization: Optional[str]) -> str:

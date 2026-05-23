@@ -225,6 +225,80 @@ def update_pipeline_job(
 # SUPABASE_MIGRATION.sql is run. See .planning/phases/08-auto-proposal-quality-fix/SUPABASE_MIGRATION.sql.
 _CHANGE_SUMMARY_COL_WARNED = False
 
+# Plan 10-07 / PROP-V2-02 / PROP-V2-06: Phase 10 introduces structured-operation
+# fields on the proposals row (operation_type, ast_path, reorder_indices,
+# grounding_failures, breadcrumb, page_url, section_heading_anchor). The table
+# may not yet have these columns in older deployments — mirror the
+# change_summary degrade-and-retry pattern: on a PostgREST schema error
+# mentioning any of these columns, drop the offending column(s) from the
+# payload, emit a single warning per process per column, and retry once.
+_PHASE10_NEW_COLUMNS = (
+    "operation_type",
+    "ast_path",
+    "reorder_indices",
+    "grounding_failures",
+    "breadcrumb",
+    "page_url",
+    "section_heading_anchor",
+)
+_PHASE10_COL_WARNED: set = set()
+
+
+def _drop_missing_columns_and_retry(
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    response: "requests.Response",
+    *,
+    method: str = "POST",
+    params: Optional[Dict[str, str]] = None,
+) -> "requests.Response":
+    """Helper: when PostgREST 4xx mentions a missing column, drop matching keys and retry once.
+
+    Inspects ``response.text`` for any of the Phase 10 additive columns AND the
+    legacy ``change_summary`` column. Any mentioned column is removed from
+    ``payload`` (in place) and the same request is re-issued. Emits one warning
+    per (process, column) pair so repeated calls don't spam the log.
+
+    Returns the (possibly new) response. If no missing-column hint is found,
+    returns the original response unchanged.
+    """
+    global _CHANGE_SUMMARY_COL_WARNED
+    if response.status_code < 400:
+        return response
+    body_text = (response.text or "").lower()
+    if "could not find" not in body_text and "schema cache" not in body_text:
+        return response
+
+    dropped_any = False
+    for col in (*_PHASE10_NEW_COLUMNS, "change_summary"):
+        if col in payload and col in body_text:
+            if col == "change_summary":
+                if not _CHANGE_SUMMARY_COL_WARNED:
+                    logger.warning(
+                        "Supabase proposals table is missing the 'change_summary' column — "
+                        "run .planning/phases/08-auto-proposal-quality-fix/SUPABASE_MIGRATION.sql. "
+                        "Dropping the field from this request."
+                    )
+                    _CHANGE_SUMMARY_COL_WARNED = True
+            else:
+                if col not in _PHASE10_COL_WARNED:
+                    logger.warning(
+                        "Supabase proposals table is missing the Phase 10 column '%s' — "
+                        "apply the Phase 10 migration. Dropping the field from this request.",
+                        col,
+                    )
+                    _PHASE10_COL_WARNED.add(col)
+            payload.pop(col, None)
+            dropped_any = True
+
+    if not dropped_any:
+        return response
+
+    if method.upper() == "PATCH":
+        return requests.patch(url, headers=headers, params=params or {}, json=payload, timeout=8)
+    return requests.post(url, headers=headers, json=payload, timeout=8)
+
 
 def upsert_proposal(row: Dict[str, Any]) -> Optional[str]:
     """Write one verified proposal card row to the proposals table. Returns the Supabase UUID on success, None on failure."""
@@ -234,31 +308,14 @@ def upsert_proposal(row: Dict[str, Any]) -> Optional[str]:
     payload = {k: v for k, v in row.items() if v is not None}
     payload["created_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        response = requests.post(
-            f"{SUPABASE_URL}/rest/v1/proposals",
-            headers=_rest_headers("return=representation"),
-            json=payload,
-            timeout=8,
-        )
+        url = f"{SUPABASE_URL}/rest/v1/proposals"
+        headers = _rest_headers("return=representation")
+        response = requests.post(url, headers=headers, json=payload, timeout=8)
         # PostgREST returns 4xx if the schema is missing a column; retry without
-        # change_summary so we degrade gracefully until the migration runs.
-        if response.status_code >= 400 and "change_summary" in payload:
-            body_text = (response.text or "").lower()
-            if "change_summary" in body_text or "could not find" in body_text or "schema cache" in body_text:
-                if not _CHANGE_SUMMARY_COL_WARNED:
-                    logger.warning(
-                        "Supabase proposals table is missing the 'change_summary' column — "
-                        "run .planning/phases/08-auto-proposal-quality-fix/SUPABASE_MIGRATION.sql. "
-                        "Dropping the field from this insert; UI will show a synthesized fallback."
-                    )
-                    _CHANGE_SUMMARY_COL_WARNED = True
-                payload.pop("change_summary", None)
-                response = requests.post(
-                    f"{SUPABASE_URL}/rest/v1/proposals",
-                    headers=_rest_headers("return=representation"),
-                    json=payload,
-                    timeout=8,
-                )
+        # the offending column(s) so we degrade gracefully until the migration runs.
+        response = _drop_missing_columns_and_retry(
+            url, headers, payload, response, method="POST",
+        )
         response.raise_for_status()
         data = response.json()
         if isinstance(data, list) and data:
@@ -297,31 +354,17 @@ def update_proposal_full(proposal_id: str, fields: Dict[str, Any]) -> Optional[D
     payload = {k: v for k, v in fields.items() if k != "id"}
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
     try:
+        url = f"{SUPABASE_URL}/rest/v1/proposals"
+        headers = _rest_headers("return=representation")
+        params = {"id": f"eq.{proposal_id}"}
         response = requests.patch(
-            f"{SUPABASE_URL}/rest/v1/proposals",
-            headers=_rest_headers("return=representation"),
-            params={"id": f"eq.{proposal_id}"},
-            json=payload,
-            timeout=8,
+            url, headers=headers, params=params, json=payload, timeout=8,
         )
-        if response.status_code >= 400 and "change_summary" in payload:
-            body_text = (response.text or "").lower()
-            if "change_summary" in body_text or "could not find" in body_text or "schema cache" in body_text:
-                if not _CHANGE_SUMMARY_COL_WARNED:
-                    logger.warning(
-                        "Supabase proposals table is missing the 'change_summary' column — "
-                        "run .planning/phases/08-auto-proposal-quality-fix/SUPABASE_MIGRATION.sql. "
-                        "Dropping the field from this update; UI will show a synthesized fallback."
-                    )
-                    _CHANGE_SUMMARY_COL_WARNED = True
-                payload.pop("change_summary", None)
-                response = requests.patch(
-                    f"{SUPABASE_URL}/rest/v1/proposals",
-                    headers=_rest_headers("return=representation"),
-                    params={"id": f"eq.{proposal_id}"},
-                    json=payload,
-                    timeout=8,
-                )
+        # Plan 10-07: degrade gracefully on missing change_summary OR any Phase
+        # 10 additive column. _drop_missing_columns_and_retry mutates payload.
+        response = _drop_missing_columns_and_retry(
+            url, headers, payload, response, method="PATCH", params=params,
+        )
         response.raise_for_status()
         data = response.json()
         if isinstance(data, list) and data:
