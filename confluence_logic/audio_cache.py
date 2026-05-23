@@ -89,3 +89,13 @@ def get_cache_size() -> int:
     if not _cache_loaded:
         load_audio_cache()
     return len(_cache)
+
+
+def get_all_audio_items() -> Dict[str, bytes]:
+    """Return a snapshot of the full cache dict (key → mp3 bytes).
+
+    Used by agent_worker to pre-decode all clips to PCM frames at startup.
+    """
+    if not _cache_loaded:
+        load_audio_cache()
+    return dict(_cache)

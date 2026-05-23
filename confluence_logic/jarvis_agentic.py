@@ -299,6 +299,8 @@ def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
 _DEFAULT_SESSION_ID = "default"
 _meeting_sessions: dict[str, dict] = {_DEFAULT_SESSION_ID: _fresh_meeting_state(_DEFAULT_SESSION_ID)}
 _bot_session_ids: dict[str, str] = {}
+# Tracks the currently-speaking participant per session (updated by Recall speech_on/speech_off webhooks).
+_current_speakers: dict[str, str] = {}  # session_id → participant display name
 _current_meeting_state: ContextVar[dict] = ContextVar(
     "current_meeting_state",
     default=_meeting_sessions[_DEFAULT_SESSION_ID],
@@ -787,30 +789,6 @@ def _is_override_request(text: str) -> bool:
 def _is_additive_request(text: str) -> bool:
     return bool(_ADDITIVE_PATTERN.search((text or "").lower()))
 
-
-def build_transcript_provider_config() -> dict:
-    if RECALL_TRANSCRIPT_PROVIDER == "recallai_streaming":
-        return {
-            "recallai_streaming": {
-                "mode": STREAMING_MODE,
-                "language_code": LANGUAGE_CODE,
-            }
-        }
-
-    if RECALL_TRANSCRIPT_PROVIDER in ("assembly_ai_v3", "assembly_ai_v3_streaming"):
-        return {
-            "assembly_ai_v3_streaming": {
-                "language_code": LANGUAGE_CODE,
-                "speech_model": os.getenv("ASSEMBLY_SPEECH_MODEL", "u3-rt-pro"),
-            }
-        }
-
-    return {
-        RECALL_TRANSCRIPT_PROVIDER: {
-            "mode": STREAMING_MODE,
-            "language_code": LANGUAGE_CODE,
-        }
-    }
 
 
 def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None) -> dict:
@@ -2505,6 +2483,110 @@ async def websocket_endpoint_for_session(websocket: WebSocket, session_id: str):
     await _websocket_endpoint_for_session(websocket, session_id)
 
 
+<<<<<<< Updated upstream
+=======
+@app.post("/livekit-transcript/{session_id}")
+async def receive_livekit_transcript(session_id: str, request: Request):
+    """Receive final STT transcripts from the LiveKit agent worker.
+
+    Replaces the Recall BYOB transcript WebSocket (Phase 7 cost reduction).
+    agent_worker.py POSTs every final utterance here so transcript_log stays
+    populated for the post-meeting Confluence review pipeline.
+    """
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    raw_speaker = (body.get("speaker") or "Meeting").strip()
+    # If agent_worker sends "Meeting" (no per-speaker attribution from STT), substitute
+    # the last known speaker from Recall participant_events webhooks.
+    if raw_speaker == "Meeting":
+        speaker = _current_speakers.get(session_id, "Meeting")
+    else:
+        speaker = raw_speaker
+    if not text:
+        return {"ok": True}
+    token = set_current_meeting_session(session_id)
+    try:
+        entry = _append_transcript_log_entry(
+            participant=speaker,
+            text=text,
+            timestamp=time.time(),
+            source="livekit",
+        )
+        if entry:
+            try:
+                asyncio.create_task(graph_rag.ingest_transcript_entry(entry))
+            except Exception:
+                pass
+        logger.info("LiveKit transcript [%s] %s: %.80s", session_id, speaker, text)
+    finally:
+        reset_current_meeting_session(token)
+    return {"ok": True}
+
+
+@app.post("/recall-webhook")
+async def receive_recall_webhook(request: Request):
+    """Receive Recall.ai project-level webhook events.
+
+    Register this URL (WEBHOOK_URL/recall-webhook) in the Recall dashboard
+    under Webhooks → subscribe to bot.participant_events.
+
+    Handles speech_on / speech_off to track the current speaker per session,
+    enabling per-participant attribution in the transcript_log.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": True}
+
+    event = body.get("event", "")
+    data = body.get("data", {})
+
+    if event != "bot.participant_events":
+        return {"ok": True}
+
+    bot_id = data.get("bot_id", "")
+    session_id = get_session_id_for_bot(bot_id) if bot_id else None
+
+    if not session_id:
+        logger.debug("recall_webhook: no session for bot_id=%s", bot_id)
+        return {"ok": True}
+
+    for evt in data.get("events", []):
+        etype = evt.get("type", "")
+        participant_name = (evt.get("participant") or {}).get("name", "").strip()
+        if not participant_name:
+            continue
+        if etype == "speech_on":
+            _current_speakers[session_id] = participant_name
+            logger.debug("Speaker ON  [%s] → %s", session_id, participant_name)
+        elif etype == "speech_off":
+            if _current_speakers.get(session_id) == participant_name:
+                _current_speakers.pop(session_id, None)
+            logger.debug("Speaker OFF [%s] → %s", session_id, participant_name)
+
+    return {"ok": True}
+
+
+@app.get("/bot-page")
+async def serve_bot_page():
+    """Serve the LiveKit subscriber page that Recall's headless Chrome loads (D-15)."""
+    if not _BOT_HTML_PATH.exists():
+        logger.error("bot.html not found at %s", _BOT_HTML_PATH)
+        return FileResponse(_BOT_HTML_PATH, status_code=404)
+    return FileResponse(_BOT_HTML_PATH, media_type="text/html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def serve_favicon():
+    """Serve favicon.ico so Recall's headless Chrome (loading /bot-page) gets a 200 instead of 404."""
+    _favicon_path = _STATIC_DIR / "favicon.ico"
+    if not _favicon_path.exists():
+        from fastapi.responses import Response
+        return Response(status_code=204)  # No content — silences the 404 without a file
+    return FileResponse(_favicon_path, media_type="image/x-icon")
+
+
+>>>>>>> Stashed changes
 async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str):
     token = set_current_meeting_session(session_id)
     await websocket.accept()

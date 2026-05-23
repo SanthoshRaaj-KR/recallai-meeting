@@ -33,26 +33,6 @@ def _reset_meeting_state():
     ja.meeting_state["parallel_runners"] = []
 
 
-def test_build_create_bot_payload_uses_recall_provider_by_default():
-    with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
-         patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming"), \
-         patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
-         patch.object(ja, "LANGUAGE_CODE", "en"):
-        payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
-
-    provider = payload["recording_config"]["transcript"]["provider"]
-    endpoint = payload["recording_config"]["realtime_endpoints"][0]
-
-    assert provider == {
-        "recallai_streaming": {
-            "mode": "prioritize_low_latency",
-            "language_code": "en",
-        }
-    }
-    assert endpoint["events"] == ["transcript.data"]
-    assert endpoint["url"] == "wss://example.ngrok-free.app/recall-audio-stream"
-
-
 def test_build_create_bot_payload_requires_webhook_url():
     with patch.object(ja, "WEBHOOK_URL", None):
         try:
@@ -87,22 +67,6 @@ def test_execute_editor_task_queues_proposal_instead_of_committing():
         speak.assert_awaited_once()
 
     asyncio.run(run_test())
-
-
-def test_build_create_bot_payload_supports_assembly_provider_opt_in():
-    with patch.object(ja, "WEBHOOK_URL", "https://example.ngrok-free.app"), \
-         patch.object(ja, "RECALL_TRANSCRIPT_PROVIDER", "assembly_ai_v3_streaming"), \
-         patch.object(ja, "STREAMING_MODE", "prioritize_low_latency"), \
-         patch.object(ja, "LANGUAGE_CODE", "en"):
-        payload = ja.build_create_bot_payload("https://meet.google.com/abc-defg-hij")
-
-    provider = payload["recording_config"]["transcript"]["provider"]
-    assert provider == {
-        "assembly_ai_v3_streaming": {
-            "language_code": "en",
-            "speech_model": "u3-rt-pro",
-        }
-    }
 
 
 def test_process_transcript_event_handles_inline_wake_word_query():

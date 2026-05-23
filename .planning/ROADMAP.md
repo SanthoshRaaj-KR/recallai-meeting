@@ -94,9 +94,15 @@ Plans:
 - [x] 05-01-PLAN.md — Failing tests for pre-flight heading check, version chain, and post-commit re-index (Wave 0)
 - [x] 05-02-PLAN.md — Implementation: _version_cache, heading pre-flight, version chain, _fire_reindex, refresh_page_in_graph, _execute_pipeline_proposal rewire (Wave 1)
 
+- [ ] **Phase 10: my-agent LiveKit Meeting Pipeline** - Port the confluence_logic meeting pipeline to my-agent: build a new pipeline under my-agent/ that uses the LiveKit-based bot logic (recall_bridge.py + agent.py) to join meetings via Recall.ai, capture transcripts, generate proposed Confluence page changes post-meeting, and connect to the same review UI (sync-sage-bot) for per-card approve/reject workflow
+
 ## Progress
 
+<<<<<<< Updated upstream
 **Execution Order:** 1 → 2 → 3 → 4 → 5 → 7 → 8
+=======
+**Execution Order:** 1 → 2 → 3 → 4 → 5 → 7 → 8 → 9 → 10
+>>>>>>> Stashed changes
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -107,6 +113,11 @@ Plans:
 | 5. Safe Apply Hardening + Re-indexing | 2/2 | Complete | 2026-05-16 |
 | 7. Confluence Document Q&A Agent | 2/2 | Complete | 2026-05-17 |
 | 8. Auto-Generated Proposals — Quality, Accept, UI, Tests | 0/5 | Ready to execute | - |
+<<<<<<< Updated upstream
+=======
+| 9. Merge LiveKit + Confluence Branches | 0/0 | Awaiting plans | - |
+| 10. my-agent LiveKit Meeting Pipeline | 0/0 | Not planned yet | - |
+>>>>>>> Stashed changes
 
 ### Phase 7: Confluence Document Q&A Agent
 **Goal**: A voice query like "hey Jarvis, when is SOC2 coming?" is correctly classified as a Confluence read question, routed to a new `ConfluenceQAAgent` (OpenAI Agents SDK), answered via Pinecone-first semantic retrieval with live Confluence REST fallback, and spoken back — without touching the edit/proposal pipeline
@@ -145,3 +156,38 @@ Plans:
 - [ ] 08-03-PLAN.md — Accept reliability: `sync-sage-bot/src/lib/api.ts` executeProposal surfaces `json.message`; ProposalCard toast shows real error; new `POST /sessions/{session_id}/review/regenerate/{proposal_id}` endpoint re-drafts against current page; pre-flight heading downgrade to `create_section` at proposal time (AUTOPROP-04)
 - [ ] 08-04-PLAN.md — Card UI clarity: per-card headline (page_title + change_summary always visible); default-visible compact before/after preview (3 lines each) with "Show full" expansion; per-card change-type pill; optional inline diff highlighting via tiny LCS util (AUTOPROP-05)
 - [ ] 08-05-PLAN.md — Test suite: 10 transcript fixtures in `tests/fixtures/transcripts/`; pytest unit tests (`test_proposal_quality.py`, `test_fact_extraction_explicit_create.py`, `test_apply_failure_paths.py`); vitest UI tests (`ProposalCard.test.tsx`); e2e quality scorecard (`tests/e2e_proposal_quality_eval.py`); documented `tests/MANUAL_TEST_PLAN.md`
+<<<<<<< Updated upstream
+=======
+
+### Phase 9: Merge LiveKit Voice Path + Confluence Q&A Pipeline into Master
+**Goal**: A single `omg_merged` branch off `master` contains BOTH (a) master's LiveKit-based fast voice answering path (agent_worker.py, agent_bridge.py, static/bot.html browser publisher, AssemblyAI STT, sonic-turbo, tighter endpointing, audio_cache.py) AND (b) confluence branch's Phase 7 ConfluenceQAAgent + Phase 8 auto-proposal pipeline (FactExtraction → merged RAG → Drafter pool → Verifier → SSE stream → review UI) + Phase 8 sync-sage-bot UI redesign — with no underlying logic of either feature set rewritten. The merged tree must build, the LiveKit voice path must still answer in <3s, the auto-proposal pipeline must still produce verbatim-faithful cards, and the UI submodule must point at the confluence-branch tip.
+**Depends on**: Phase 8 (completion of confluence-branch work is the source of truth being merged in)
+**Requirements**: MERGE-01, MERGE-02, MERGE-03, MERGE-04, MERGE-05
+**Branch Strategy** (LOCKED):
+  - Target: new `omg_merged` branch off `master` — neither `master` nor `confluence` is rewritten
+  - Direction: merge `confluence` INTO the integration branch (so master's LiveKit code is the base; confluence features are layered on)
+  - UI submodule: advance `sync-sage-bot` from `72f2541` to `be285fc` (5 newer commits, Phase 8 UI)
+**Conflict Surface** (known incompatibilities — must be reconciled, not auto-resolved):
+  - `confluence_logic/jarvis_agentic.py` — ~927-line diff; both branches rewrote it independently
+  - `confluence_logic/review/api.py` — ~1022-line diff; confluence added pipeline endpoints, master removed IPC relay code
+  - `confluence_logic/tests/test_jarvis_agentic.py` — heavily refactored on both sides
+  - `confluence_logic/classifier.py`, `agents/drafter_agent.py`, `agents/fact_extraction_agent.py`, `agents/page_qualifier.py`, `db/vector_store.py`, `confluence_page_graph.py` — moderate conflicts
+**Scope Lock** (MUST NOT be modified during the merge):
+  - The behaviour of `agent_worker.py` / `agent_bridge.py` / `static/bot.html` — preserved verbatim from master
+  - The behaviour of `agents/confluence_qa_agent.py` / `agents/drafter_agent.py` / `agents/fact_extraction_agent.py` / Phase 8 review pipeline endpoints — preserved verbatim from confluence
+  - ROADMAP.md, REQUIREMENTS.md, prior phase CONTEXT.md / PLAN.md / VERIFICATION.md files — read-only history
+**Success Criteria** (what must be TRUE):
+  1. `git checkout omg_merged && pip install -r requirements.txt && pytest` runs to completion: no import errors, no missing-symbol errors, no tests removed silently from either side
+  2. `agent_worker.py` and `agent_bridge.py` (from master) exist on the integration branch with byte-identical logic to master's tip; their tests (`test_agent_worker.py`, `test_agent_bridge.py`) pass
+  3. `agents/confluence_qa_agent.py` (from confluence) exists with byte-identical logic to confluence's tip; `test_confluence_qa_agent.py` and `test_qa_latency.py` pass
+  4. `POST /review/pipeline/start` and the SSE stream endpoint (from confluence's `review/api.py`) function end-to-end; the 10 transcript fixtures + e2e quality scorecard still score the same as on the confluence branch
+  5. `sync-sage-bot` submodule pointer is `be285fc`; the UI builds (`npm run build`) and Phase 8 ProposalCard renders with headline + diff + accept-error toast
+  6. The LiveKit voice path answers a Confluence read query in under 3s (Phase 7 latency target), with the LiveKit agent now routing read queries to `ConfluenceQAAgent` as a tool (the only intentional integration point — not a rewrite of either side)
+**Plans**: TBD (created by /gsd:plan-phase after discuss-phase locks the integration-point decisions)
+
+### Phase 10: my-agent LiveKit Meeting Pipeline
+**Goal**: The my-agent/ LiveKit stack (recall_bridge.py + agent.py) can join any meeting via Recall.ai, capture a full transcript, run the post-meeting pipeline (fact extraction → merged RAG → drafter pool → verifier), and present proposal cards in sync-sage-bot for per-card approve/reject — exactly mirroring what confluence_logic does but built on the LiveKit Agents foundation in my-agent/
+**Depends on**: Phase 9
+**Plans**: TBD
+
+>>>>>>> Stashed changes
