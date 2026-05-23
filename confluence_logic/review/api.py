@@ -38,6 +38,22 @@ from confluence_logic.agents.fact_extraction_agent import (
 from confluence_logic.agents.drafter_agent import _run_drafter
 from confluence_logic.agents.verifier_agent import _run_verifier
 
+# --- Phase 10 (Plan 10-07) integration imports ----------------------------
+# These are the Wave 1+2 modules wired into _run_pipeline + the regenerate
+# endpoint. All imports are at top level so monkey-patching in tests can
+# target ``confluence_logic.review.api.<symbol>`` directly.
+from confluence_logic.agents.page_router import route_intent
+from confluence_logic.agents.page_parser import PageParser
+from confluence_logic.agents.structure_aware_drafter import (
+    draft_operation,
+    StructureAwareDrafterInput,
+)
+from confluence_logic.agents.grounding_gate import (
+    check_grounding,
+    check_page_existence,
+)
+from confluence_logic.agents.editor_dispatcher import apply_structured
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -137,6 +153,23 @@ JARVIS_PROPOSE_CHANGES_MAX_TOKENS = int(os.getenv("JARVIS_PROPOSE_CHANGES_MAX_TO
 # off-values disable the flag.
 _RAW_PIPELINE_FLAG = (os.getenv("JARVIS_PIPELINE_USE_EDITOR_AGENT") or "1").strip().lower()
 JARVIS_PIPELINE_USE_EDITOR_AGENT = _RAW_PIPELINE_FLAG not in {"0", "false", "no", "off"}
+
+# Plan 10-07 / Phase 10 rewire: route the post-meeting pipeline through
+# PageRouter → PageParser → StructureAwareDrafter → GroundingGate. When 0,
+# fall back to the legacy _retrieve_pages_for_intent → _run_intent_drafter
+# path so ops can flip the flag if a regression appears in production.
+_RAW_STRUCTURE_AWARE_FLAG = (
+    os.getenv("JARVIS_STRUCTURE_AWARE_DRAFTER_ENABLED") or "1"
+).strip().lower()
+JARVIS_STRUCTURE_AWARE_DRAFTER_ENABLED = _RAW_STRUCTURE_AWARE_FLAG not in {
+    "0", "false", "no", "off",
+}
+
+# Plan 10-07: deterministic GroundingGate fit minimum for PageQualifier.
+# Per D-05, only pages with page_fit_score ≥ this floor proceed past
+# the qualifier into the drafter. Defaults to 6 (same value 08-02
+# established) but the env var lets ops tune it without code change.
+JARVIS_QUALIFIER_FIT_MIN = int(os.getenv("JARVIS_QUALIFIER_FIT_MIN", "6"))
 
 
 def _utc_now() -> datetime:
@@ -3532,6 +3565,83 @@ async def _verify_and_persist(
                     verified.get("page_title"), exc,
                 )
 
+        # ── Plan 10-07: GroundingGate (D-04 / PROP-V2-01) ────────────
+        # Deterministic, zero-LLM gate that runs after the verifier and
+        # before persist. Two checks:
+        #   (1) page_id exists in the user's confluence_page_graph OR is
+        #       reachable via live REST GET /content/{id};
+        #   (2) tokens in after_content (or before_content for delete /
+        #       replace.old) are present in {transcript ∪ page}.
+        # Cards failing either check are DROPPED — not downgraded — per
+        # D-04. The drop is logged + an SSE proposal_dropped event is
+        # emitted so the UI can surface the reason.
+        #
+        # graph_user_id is passed explicitly (Pitfall 4 — never a
+        # ContextVar inside the async pipeline). user_id IS the graph
+        # user id for the pipeline flow (set by _confluence_graph_user_id
+        # upstream); we forward it as the gate's user_id parameter.
+        _page_id_for_gate = verified.get("page_id")
+        if _page_id_for_gate and user_id:
+            try:
+                _page_ok = await check_page_existence(
+                    _page_id_for_gate,
+                    user_id=user_id,
+                    connector=_get_connector(),
+                )
+            except Exception as exc:
+                logger.debug(
+                    "GroundingGate check_page_existence raised (non-fatal) "
+                    "for page %s: %s",
+                    _page_id_for_gate, exc,
+                )
+                _page_ok = True  # don't block persist on internal errors
+            if not _page_ok:
+                logger.warning(
+                    "GroundingGate dropped proposal for page_id=%s — "
+                    "not in user graph AND live REST GET did not return 200",
+                    _page_id_for_gate,
+                )
+                _emit(job_id, {
+                    "type": "proposal_dropped",
+                    "page_id": _page_id_for_gate,
+                    "page_title": verified.get("page_title"),
+                    "reason": "page_id not found in graph or via REST",
+                })
+                return  # do NOT persist
+
+        # Gate 2 — token grounding. Skip for create_page (no current page
+        # to ground tokens against); the verifier still gates content_type.
+        if verified.get("page_id") or verified.get("change_type") != "create":
+            try:
+                _gate_result = await check_grounding(
+                    verified,
+                    transcript_text=transcript_text or "",
+                    current_page_content=(live_html or "") if isinstance(live_html, str) else "",
+                )
+            except Exception as exc:
+                logger.debug(
+                    "GroundingGate check_grounding raised (non-fatal) "
+                    "for page %s: %s",
+                    verified.get("page_id"), exc,
+                )
+                _gate_result = {"ok": True, "failures": [], "reason": ""}
+            if not _gate_result.get("ok", True):
+                _failures = _gate_result.get("failures", []) or []
+                _reason = _gate_result.get("reason", "")
+                verified["grounding_failures"] = list(_failures)
+                logger.warning(
+                    "GroundingGate dropped proposal for page %s — reason=%s tokens=%s",
+                    verified.get("page_id"), _reason, _failures,
+                )
+                _emit(job_id, {
+                    "type": "proposal_dropped",
+                    "page_id": verified.get("page_id"),
+                    "page_title": verified.get("page_title"),
+                    "reason": _reason,
+                    "grounding_failures": list(_failures),
+                })
+                return  # do NOT persist
+
         # Build the persisted row. Strip internal-only keys that should NOT be sent to Supabase
         # (the table schema doesn't have columns for them) but keep them on the SSE event payload
         # so the UI can show audit info to the user.
@@ -4040,6 +4150,22 @@ async def _enrich_page_for_drafter(
       - available_headings: list of section heading names
       - section_content_map: heading -> short preview, so the drafter picks the
         section that already discusses the subject, not just one with a matching name
+
+    Plan 10-07 (Phase 10) extension: when the structure-aware path is enabled
+    AND we have live HTML, also attach:
+      - ``ast`` — the parsed ASTRoot from PageParser, so the
+        StructureAwareDrafter can emit node-level operations without
+        re-parsing.
+      - ``page_url`` — direct Confluence URL for the ProposalCard header
+        link (D-07).
+      - ``breadcrumb`` — [space_name, ...ancestor titles, page_title] for
+        the ProposalCard breadcrumb (D-07). Falls back gracefully to
+        [page_title] when space/ancestors metadata is unavailable.
+      - ``ancestors`` — raw ancestor list (kept for downstream callers).
+
+    All Phase 10 enrichment is best-effort: any failure logs at DEBUG and
+    leaves the existing keys untouched so the legacy drafter path keeps
+    working unchanged when the killswitch is off.
     """
     if page.get("_drafter_ready"):
         return page
@@ -4071,6 +4197,68 @@ async def _enrich_page_for_drafter(
     page["full_content"] = full_content[:max_chars]
     page["available_headings"] = available_headings
     page["section_content_map"] = section_content_map
+
+    # ── Plan 10-07: Phase 10 enrichment (AST + URL + breadcrumb) ─────────
+    # Only enrich when the killswitch is on AND we have live HTML to parse.
+    # The legacy path is unaffected because it never reads page['ast'] etc.
+    if JARVIS_STRUCTURE_AWARE_DRAFTER_ENABLED and live_html and page_id:
+        # 1) AST — PageParser.parse is pure & sync; run inline (it's cheap).
+        try:
+            page["ast"] = PageParser().parse(live_html)
+        except Exception as exc:
+            logger.debug(
+                "PageParser failed for page %s (non-fatal): %s",
+                page_id, exc,
+            )
+
+        # 2) Breadcrumb + page URL via connector.get_page_metadata(expand=...)
+        try:
+            connector = _get_connector()
+            meta = await asyncio.to_thread(
+                connector.get_page_metadata,
+                page_id,
+                "ancestors,space",
+            ) or {}
+            page["ancestors"] = meta.get("ancestors") or []
+            # Construct page_url from the Confluence base URL + the page's
+            # _links.webui if available; otherwise leave None and let the UI
+            # synthesize one from the page title.
+            base_domain = getattr(connector, "domain", "") or ""
+            webui_path = ((meta.get("_links") or {}).get("webui") or "").strip()
+            if base_domain and webui_path:
+                page["page_url"] = f"https://{base_domain}/wiki{webui_path}"
+            elif base_domain and page_id:
+                # Fallback: stable deep link by id (Confluence supports this).
+                page["page_url"] = (
+                    f"https://{base_domain}/wiki/spaces/-/pages/{page_id}"
+                )
+
+            # Breadcrumb = [space_name, *[a['title'] for a in ancestors], page_title]
+            space = meta.get("space") or {}
+            page_title = (
+                page.get("title") or page.get("page_title")
+                or meta.get("title") or ""
+            )
+            crumbs: List[str] = []
+            if space.get("name"):
+                crumbs.append(space["name"])
+            for a in (meta.get("ancestors") or []):
+                title = (a.get("title") or "").strip()
+                if title:
+                    crumbs.append(title)
+            if page_title:
+                crumbs.append(page_title)
+            page["breadcrumb"] = crumbs or [page_title or ""]
+        except Exception as exc:
+            logger.debug(
+                "Phase 10 metadata enrichment failed for page %s (non-fatal): %s",
+                page_id, exc,
+            )
+            # Defensive fallback so the StructureAwareDrafter input dict is
+            # never missing keys.
+            page.setdefault("ancestors", [])
+            page.setdefault("breadcrumb", [page.get("title") or page.get("page_title") or ""])
+
     page["_drafter_ready"] = True
     return page
 
@@ -4125,6 +4313,165 @@ async def _llm_locate_text_on_page(
     except Exception as exc:
         logger.debug("LLM-assisted text location failed: %s", exc)
         return None
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Plan 10-07: Phase 10 helpers for the structure-aware path
+# ───────────────────────────────────────────────────────────────────────
+
+_PHASE10_OP_TO_CHANGE_TYPE = {
+    "replace": "edit",
+    "insert_after": "edit",
+    "reorder": "edit",
+    "delete_section": "delete",
+    "create_section": "edit",
+    "create_page": "create",
+}
+
+
+def _structured_op_to_draft(
+    op: Any,
+    intent: Any,
+    page: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Convert a Phase 10 StructuredOperation into a draft dict for _verify_and_persist.
+
+    Returns None when op.action == "skip" (caller logs + drops).
+    Returns a dict shaped like the legacy drafter output, plus the new
+    Phase 10 fields (operation_type, ast_path, reorder_indices, breadcrumb,
+    page_url, section_heading_anchor, change_summary).
+
+    The dict is intentionally a thin shim — _verify_and_persist still owns
+    the verifier call, the synthesized change_summary fallback, and the
+    persist gate. This helper only translates the StructuredOperation
+    schema into the legacy-shaped dict the downstream pipeline expects.
+    """
+    action = (getattr(op, "action", None) or "").lower()
+    if action == "skip":
+        return None
+
+    change_type = _PHASE10_OP_TO_CHANGE_TYPE.get(action, "edit")
+
+    # Pull the before/after content from the StructuredOperation, mapping
+    # each D-02 shape to the legacy before_content / after_content fields
+    # the verifier + UI consume today.
+    before_content: Optional[str] = None
+    after_content: Optional[str] = None
+    section_heading: Optional[str] = getattr(op, "section_heading", None)
+    edit_mode: Optional[str] = None
+
+    if action == "replace":
+        before_content = getattr(op, "old_text", None)
+        after_content = getattr(op, "new_text", None)
+        edit_mode = "replace"
+    elif action == "insert_after":
+        before_content = getattr(op, "anchor_text", None)
+        after_content = getattr(op, "new_text", None)
+        edit_mode = "append"
+    elif action == "reorder":
+        # Reorder has no LLM after_content per Plan 04 Pitfall 5; the
+        # editor_dispatcher reconstructs the after-section from live HTML.
+        # We still surface from/to indices to the UI for the reorder viz.
+        edit_mode = "reorder"
+    elif action == "delete_section":
+        before_content = None
+        after_content = None
+        edit_mode = "delete"
+    elif action == "create_section":
+        section_heading = getattr(op, "new_heading", None) or section_heading
+        after_content = getattr(op, "new_content", None)
+        edit_mode = "create_section"
+    elif action == "create_page":
+        after_content = getattr(op, "content", None)
+
+    page_title = (
+        page.get("page_title") or page.get("title")
+        or getattr(op, "title", None) or ""
+    )
+
+    reorder_indices: Optional[Dict[str, int]] = None
+    if action == "reorder":
+        f = getattr(op, "from_index", None)
+        t = getattr(op, "to_index", None)
+        if f is not None and t is not None:
+            reorder_indices = {"from_index": int(f), "to_index": int(t)}
+
+    draft: Dict[str, Any] = {
+        # Legacy/UI fields
+        "change_type": change_type,
+        "page_id": getattr(op, "page_id", None) or page.get("page_id"),
+        "page_title": page_title,
+        "section_heading": section_heading,
+        "before_content": before_content,
+        "after_content": after_content,
+        "edit_mode": edit_mode,
+        "rationale": (
+            getattr(intent, "rationale", None)
+            or getattr(intent, "instruction", None)
+            or ""
+        ),
+        "change_summary": getattr(op, "change_summary", None),
+        # Phase 10 additive fields (carried through verifier into Supabase)
+        "operation_type": action,
+        "ast_path": getattr(op, "ast_path", None),
+        "reorder_indices": reorder_indices,
+        "breadcrumb": page.get("breadcrumb") or [],
+        "page_url": page.get("page_url"),
+        # Section anchor: Confluence renders heading anchors as
+        # #heading-text-slug, but the canonical link uses the heading
+        # itself prefixed with the page URL. Defer to UI to slugify.
+        "section_heading_anchor": section_heading,
+    }
+    return draft
+
+
+async def _draft_qualified_phase10(
+    intent_obj: Any,
+    page: Dict[str, Any],
+    transcript_window: str,
+) -> Optional[Dict[str, Any]]:
+    """Run the Phase 10 StructureAwareDrafter for one (intent, qualified_page) pair.
+
+    Returns a draft dict ready for _verify_and_persist, or None when the
+    drafter said skip (and the orchestrator logs + emits SSE).
+
+    Page must already be enriched (page['ast'] populated by
+    _enrich_page_for_drafter). If the AST is missing (enrichment failed),
+    we fall back to None — the orchestrator's create-fallback path then
+    handles the unhandled intent.
+    """
+    page_ast = page.get("ast")
+    if page_ast is None:
+        logger.warning(
+            "Phase 10 drafter skipped page %s — no AST attached "
+            "(enrichment failure)",
+            page.get("page_id"),
+        )
+        return None
+
+    inp = StructureAwareDrafterInput(
+        intent=intent_obj,
+        page_ast=page_ast,
+        page_meta={
+            "page_id": page.get("page_id"),
+            "page_title": page.get("page_title") or page.get("title") or "",
+            "space_key": page.get("space_key"),
+            "page_url": page.get("page_url"),
+            "ancestors": page.get("ancestors") or [],
+            "breadcrumb": page.get("breadcrumb") or [],
+        },
+        transcript_window=transcript_window or "",
+    )
+    try:
+        op = await draft_operation(inp)
+    except Exception as exc:
+        logger.warning(
+            "draft_operation raised for page %s (non-fatal): %s",
+            page.get("page_id"), exc,
+        )
+        return None
+
+    return _structured_op_to_draft(op, intent_obj, page)
 
 
 async def _run_pipeline(
@@ -4219,17 +4566,56 @@ async def _run_pipeline(
             # to use across all per-intent retrieval calls. This avoids re-fetching for every intent.
             workspace_titles = await _get_workspace_pages_for_filter(graph_user_id)
 
-            intent_retrieval_results = await asyncio.gather(
-                *[
-                    _retrieve_pages_for_intent(
-                        intent, graph_user_id,
-                        page_cache=page_cache,
-                        workspace_titles=workspace_titles,
-                    )
-                    for intent in change_intents
-                ],
-                return_exceptions=True,
-            )
+            # ── Plan 10-07: PageRouter stage (D-05) ───────────────────
+            # Phase 10 routes each ChangeIntent through the deterministic
+            # three-signal merge (semantic + graph + explicit-token gate)
+            # BEFORE PageQualifier. Killswitch
+            # JARVIS_STRUCTURE_AWARE_DRAFTER_ENABLED=0 falls back to the
+            # legacy _retrieve_pages_for_intent flow.
+            if JARVIS_STRUCTURE_AWARE_DRAFTER_ENABLED:
+                async def _route_one(intent_obj):
+                    try:
+                        candidates = await route_intent(
+                            intent_obj, graph_user_id=graph_user_id, top_n=5,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "PageRouter failed for intent '%s': %s",
+                            getattr(intent_obj, "subject", "?"), exc,
+                        )
+                        return []
+                    # Emit per-intent candidate count so the SSE consumer
+                    # can show progress + detect silent zero-result intents.
+                    _emit(job_id, {
+                        "type": "stage_progress",
+                        "stage": "page_router",
+                        "intent": getattr(intent_obj, "subject", "") or "",
+                        "candidates": len(candidates),
+                    })
+                    # Hydrate the page_cache for downstream re-use, exactly
+                    # like _retrieve_pages_for_intent does.
+                    for p in candidates:
+                        pid = p.get("page_id")
+                        if pid and pid not in page_cache:
+                            page_cache[pid] = p
+                    return candidates
+
+                intent_retrieval_results = await asyncio.gather(
+                    *[_route_one(intent) for intent in change_intents],
+                    return_exceptions=True,
+                )
+            else:
+                intent_retrieval_results = await asyncio.gather(
+                    *[
+                        _retrieve_pages_for_intent(
+                            intent, graph_user_id,
+                            page_cache=page_cache,
+                            workspace_titles=workspace_titles,
+                        )
+                        for intent in change_intents
+                    ],
+                    return_exceptions=True,
+                )
 
             # Build (intent, pages) pairs while filtering exceptions
             intent_pages: List[tuple] = []
@@ -4335,9 +4721,26 @@ async def _run_pipeline(
 
             # ───────────────────────────────────────────────────────────
             # STAGE 3b — DRAFTING (only on qualified pairs)
+            # Plan 10-07: when JARVIS_STRUCTURE_AWARE_DRAFTER_ENABLED, use
+            # the Phase 10 StructureAwareDrafter (constrained JSON output,
+            # one of six D-02 shapes). Otherwise fall back to the legacy
+            # free-form _run_intent_drafter.
             # ───────────────────────────────────────────────────────────
             async def _draft_qualified(intent_obj, enriched_page):
                 async with draft_sem:
+                    if JARVIS_STRUCTURE_AWARE_DRAFTER_ENABLED:
+                        # Phase 10 path. transcript_window is the full
+                        # transcript text; the drafter has an internal cap.
+                        d = await _draft_qualified_phase10(
+                            intent_obj, enriched_page, transcript_text,
+                        )
+                        if d is not None:
+                            return d
+                        # If the structure-aware path returned None (skip),
+                        # do NOT silently fall through to the legacy drafter
+                        # — that defeats the point of the constrained-JSON
+                        # gate. Return None and let the orchestrator log.
+                        return None
                     return await _run_intent_drafter(
                         intent_obj, enriched_page, transcript_text,
                         facts=facts, summary_json=summary_json,
