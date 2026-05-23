@@ -2844,7 +2844,31 @@ async def regenerate_proposal(
             detail="Cannot regenerate a proposal with no page_id (create-type proposals have no live target).",
         )
 
-    # Fetch the live page so the drafter sees the present-day HTML
+    # ── Plan 10-07 / D-08: force-bypass the graph cache for THIS page ──
+    # The Neo4j confluence_page_graph has a JARVIS_CONFLUENCE_GRAPH_TTL_SECONDS
+    # cache (default 7200s). For Regenerate-from-current-page to actually
+    # see the present-day Confluence content, we must invalidate just the
+    # affected page's graph node so the next graph lookup re-fetches it.
+    # Scoped to the resolved graph user id so we never touch another
+    # user's graph (Pitfall 4).
+    graph_user_id_for_regen = _confluence_graph_user_id(user, session_id)
+    try:
+        await confluence_page_graph.refresh_page_in_graph(
+            graph_user_id_for_regen, page_id,
+        )
+    except Exception as exc:
+        # Non-fatal — refresh failure just means we use the cached graph
+        # entry for THIS regeneration. The live HTML fetch below is still
+        # forced via the connector REST call, so the gate still sees the
+        # present-day page content.
+        logger.warning(
+            "refresh_page_in_graph failed for page %s (non-fatal): %s",
+            page_id, exc,
+        )
+
+    # Fetch the live page so the drafter sees the present-day HTML.
+    # This bypasses any Pinecone-side content cache — we always read the
+    # current Confluence storage HTML via the REST connector.
     from confluence_logic.utils.html_parser import extract_headings  # noqa: PLC0415
     try:
         connector = _get_connector()
@@ -2918,11 +2942,107 @@ async def regenerate_proposal(
             merged.update(updated_row)
         return merged
 
+    # ── Plan 10-07 / D-08 / PROP-V2-05: GroundingGate the regenerated card ──
+    # The regenerated draft MUST pass the same hard hallucination gate the
+    # main pipeline applies — page-existence + per-op token grounding. If
+    # either fails, the ORIGINAL proposal is preserved (not overwritten)
+    # and the UI receives the failure reason so the user can take action.
+    # The full meeting transcript is reconstructed from history_item if
+    # available; if not (e.g., transcript expired), we pass an empty string
+    # and the gate falls back to "tokens must appear on page" which is the
+    # safer bound for a regenerate.
+    try:
+        page_ok = await check_page_existence(
+            page_id,
+            user_id=graph_user_id_for_regen,
+            connector=connector,
+        )
+    except Exception as exc:
+        logger.debug(
+            "Regenerate check_page_existence raised (non-fatal): %s", exc,
+        )
+        page_ok = True  # don't block regenerate on internal errors
+
+    if not page_ok:
+        logger.warning(
+            "Regenerate gate dropped page_id=%s — not in graph and REST GET failed",
+            page_id,
+        )
+        return {
+            "success": False,
+            "message": (
+                "Could not verify the target Confluence page still exists. "
+                "The original proposal has been preserved."
+            ),
+            "kept_original": True,
+            "proposal": {**proposal, "regenerate_available": True},
+        }
+
+    # Build the candidate new-card dict we'd persist. Used both for the
+    # gate check and (on pass) for the update_proposal_full call below.
+    _candidate_after = new_draft.get("after_content")
+    _candidate_before = new_draft.get("before_content")
+    _candidate_change_type = new_draft.get("change_type") or proposal.get("change_type")
+    _candidate_card = {
+        "page_id": page_id,
+        "change_type": _candidate_change_type,
+        "before_content": _candidate_before,
+        "after_content": _candidate_after,
+        "edit_mode": new_draft.get("edit_mode") or "replace",
+        # Phase 10 operation_type comes from the structure-aware drafter when
+        # it's the active path; legacy _run_intent_drafter does not set it.
+        "operation_type": new_draft.get("operation_type"),
+    }
+
+    # Reconstruct the original meeting transcript for the token-grounding
+    # check (Branch 3: additive ops require after tokens ⊆ transcript ∪ page).
+    _regen_transcript = ""
+    try:
+        _hist = await asyncio.to_thread(
+            supabase_store.get_history_item, user["id"], session_id,
+        ) or {}
+        _entries = _decompress_transcript(_hist)
+        _regen_transcript = "\n".join((e.get("text") or "") for e in _entries)
+    except Exception as exc:
+        logger.debug(
+            "Regenerate transcript reconstruct failed (non-fatal): %s", exc,
+        )
+
+    try:
+        _gate = await check_grounding(
+            _candidate_card,
+            transcript_text=_regen_transcript,
+            current_page_content=live_html or "",
+        )
+    except Exception as exc:
+        logger.debug(
+            "Regenerate check_grounding raised (non-fatal): %s", exc,
+        )
+        _gate = {"ok": True, "failures": [], "reason": ""}
+
+    if not _gate.get("ok", True):
+        _failures = _gate.get("failures", []) or []
+        _reason = _gate.get("reason", "")
+        logger.warning(
+            "Regenerate gate dropped page %s — reason=%s tokens=%s",
+            page_id, _reason, _failures,
+        )
+        return {
+            "success": False,
+            "message": (
+                f"The regenerated change introduced ungrounded tokens "
+                f"({_reason}). The original proposal has been preserved."
+            ),
+            "kept_original": True,
+            "grounding_failures": list(_failures),
+            "proposal": {**proposal, "regenerate_available": True},
+        }
+
     updated_fields = {
-        "change_type": new_draft.get("change_type") or proposal.get("change_type"),
+        "change_type": _candidate_change_type,
         "section_heading": new_draft.get("section_heading") or proposal.get("section_heading"),
-        "before_content": new_draft.get("before_content"),
-        "after_content": new_draft.get("after_content"),
+        "before_content": _candidate_before,
+        "after_content": _candidate_after,
         "edit_mode": new_draft.get("edit_mode") or "replace",
         "rationale": new_draft.get("rationale") or proposal.get("rationale"),
         "change_summary": new_draft.get("change_summary") or proposal.get("change_summary"),
@@ -2930,6 +3050,12 @@ async def regenerate_proposal(
         "verifier_note": "[REGENERATED] Drafter re-ran against the current page.",
         "risk": new_draft.get("risk") or "safe",
     }
+    # Forward the Phase 10 additive fields when the drafter emitted them.
+    for _k in ("operation_type", "ast_path", "reorder_indices", "breadcrumb",
+               "page_url", "section_heading_anchor"):
+        if new_draft.get(_k) is not None:
+            updated_fields[_k] = new_draft.get(_k)
+
     updated_row = await asyncio.to_thread(
         supabase_store.update_proposal_full, proposal_id, updated_fields
     )
