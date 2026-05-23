@@ -343,12 +343,28 @@ def _post_validate(op: StructuredOperation, inp: StructureAwareDrafterInput) -> 
     if page_id and not op.page_id and op.action != "create_page":
         op.page_id = str(page_id)
 
+    # ── Reorder defense-in-depth (Failure Mode 2, Pitfall 5) ─────────────
+    # The StructuredOperation Literal already prevents the LLM from returning
+    # an action like "rewrite_section" — but a malicious / drifted LLM can
+    # still ride along ``new_text`` or ``new_content`` carrying a freshly-
+    # regenerated ``<ol>`` (the exact 'login -> username -> click mouse
+    # button' failure the user reported). We strip both fields at the drafter
+    # exit so:
+    #   1. The dispatcher's reorder path (Plan 10-04) sees no LLM prose.
+    #   2. The GroundingGate token-subset check (Plan 10-XX) cannot fail
+    #      on hallucinated tokens because there's nothing to tokenize.
+    #   3. Downstream UI rendering for the reorder card uses only the
+    #      from_index/to_index swap visualisation — never an LLM-authored
+    #      list.
+    # This is independent of the dispatcher's own "ignore after_content for
+    # reorder" rule; both layers must hold for the contract to be tight.
     if op.action == "reorder":
         if op.new_text is not None or op.new_content is not None:
-            logger.debug(
-                "StructureAwareDrafter: stripping LLM-supplied new_text/new_content "
-                "for reorder op (Pitfall 5 defense-in-depth) page_id=%s",
-                op.page_id,
+            logger.warning(
+                "StructureAwareDrafter: reorder op carried LLM-supplied "
+                "new_text/new_content — stripping (Pitfall 5 defense-in-depth) "
+                "page_id=%s section_heading=%r from_index=%s to_index=%s",
+                op.page_id, op.section_heading, op.from_index, op.to_index,
             )
             op.new_text = None
             op.new_content = None
