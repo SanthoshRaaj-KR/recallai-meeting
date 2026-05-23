@@ -19,12 +19,40 @@ class ConfluenceConnector(DocumentFetcher, DocumentPusher):
         self.auth = HTTPBasicAuth(self.email, self.api_token)
         self.base_url = f"https://{self.domain}/wiki/rest/api"
 
-    def get_page_metadata(self, page_id: str) -> Dict[str, Any]:
-        """Fetch metadata including current version of the given page."""
+    def get_page_metadata(self, page_id: str, expand: Optional[str] = None) -> Dict[str, Any]:
+        """Fetch metadata including current version of the given page.
+
+        Phase 10 (PROP-V2-05): the optional ``expand`` kwarg is forwarded as
+        the ``?expand=`` query param so callers can request additional fields
+        like ``ancestors`` and ``space`` for breadcrumb construction in
+        the proposal-card UI. When ``expand`` is None (legacy callers), the
+        returned dict shape is byte-identical to the pre-Phase-10 contract:
+        no ``ancestors`` / ``space`` keys are added.
+        """
         url = f"{self.base_url}/content/{page_id}"
-        response = requests.get(url, auth=self.auth, headers={"Accept": "application/json"}, timeout=15)
+        params: Dict[str, Any] = {}
+        if expand:
+            params["expand"] = expand
+        response = requests.get(
+            url,
+            auth=self.auth,
+            headers={"Accept": "application/json"},
+            params=params or None,
+            timeout=15,
+        )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        # Additive only — when expand was requested, surface the expanded
+        # fields under their canonical keys so callers do not have to dig
+        # into the raw payload shape. Legacy callers (no expand) get the
+        # untouched JSON exactly as before.
+        if expand:
+            wanted = {tok.strip() for tok in expand.split(",") if tok.strip()}
+            if "ancestors" in wanted and "ancestors" not in data:
+                data["ancestors"] = []
+            if "space" in wanted and "space" not in data:
+                data["space"] = {}
+        return data
 
     def fetch_page_html(self, page_id: str) -> str:
         """Get the HTML/Storage format of the associated page."""
