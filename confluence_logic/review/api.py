@@ -3360,12 +3360,15 @@ async def _verify_and_persist(
             return
 
         # Stamp defaults so the UI/row have the expected fields without an LLM call.
+        # Plan 10-07: page_relevance is no longer surfaced by the verifier
+        # (GroundingGate owns page-existence + relevance). Default it here
+        # only as a backward-compat shim for any consumer that still reads
+        # the field; new code MUST NOT rely on it.
         verified = draft
         verified.setdefault("confidence", "medium")
         verified.setdefault("risk", "safe")
         verified.setdefault("verifier_note", "")
         verified.setdefault("transcript_evidence", [])
-        verified.setdefault("page_relevance", 7)
         verified.setdefault("content_type", "final_content")
         verified.setdefault("should_drop", False)
 

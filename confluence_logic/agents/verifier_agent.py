@@ -34,10 +34,14 @@ VERIFIER_SYSTEM_PROMPT = (
     '  "risk": "safe" | "review" | "risky",\n'
     '  "verifier_note": string (1-2 sentences explaining your assessment),\n'
     '  "transcript_evidence": [string, ...] (1-3 verbatim quotes from the transcript that support this proposal),\n'
-    '  "page_relevance": integer 0-10,\n'
     '  "content_type": "final_content" | "meta_instruction",\n'
-    '  "should_drop": true | false\n'
+    '  "change_summary": string (≤120 characters; plain-English headline of the change)\n'
     "}\n\n"
+    "Phase 10 note: page-existence and token-level grounding are enforced by a "
+    "downstream deterministic gate (grounding_gate.check_grounding + "
+    "check_page_existence). Do NOT attempt those checks here. This prompt "
+    "focuses on LLM judgments only: confidence, risk, evidence quotes, "
+    "content type, and a plain-English change_summary for the ProposalCard.\n\n"
     "Confidence guidelines:\n"
     "- 'high': TWO conditions must BOTH be true: (1) the change is directly and explicitly supported "
     "by clear transcript statements, AND (2) after_content contains ONLY what was explicitly stated — "
@@ -57,13 +61,6 @@ VERIFIER_SYSTEM_PROMPT = (
     "- The transcript evidence is ambiguous or could support multiple interpretations\n\n"
     "Mark as 'review' if only partially supported by the transcript. "
     "Mark as 'safe' if clearly supported by direct, unambiguous transcript quotes.\n\n"
-    "page_relevance (0-10): How appropriate is this target page for this change?\n"
-    "- 10: The page is EXACTLY about this subject — title and content match the proposed change perfectly\n"
-    "- 7-9: The page clearly covers this topic; the change clearly belongs here\n"
-    "- 4-6: The page is loosely related; the change might belong here but it is uncertain\n"
-    "- 1-3: The page is about a different subject; the change is a poor fit\n"
-    "- 0: Completely wrong page — the change has nothing to do with this page's subject\n"
-    "Compare draft.page_title and the proposed change subject against current_page_content to score this.\n\n"
     "content_type: Is draft.after_content actual page documentation or instructions to a writer?\n"
     "- 'final_content': publishable facts, descriptions, specs, bullet lists of real information\n"
     "  Examples: 'The team uses React for the frontend and FastAPI for the backend', "
@@ -73,12 +70,10 @@ VERIFIER_SYSTEM_PROMPT = (
     "'Maintain a professional and neutral tone throughout', 'This page should focus on...', "
     "'Ensure the content covers all migration steps', 'Use a structured format with clear headings'\n"
     "If after_content is null (delete/title change), set content_type to 'final_content'.\n\n"
-    "should_drop (true/false): Set to true if this proposal should be discarded entirely.\n"
-    "Set should_drop=true when ANY of:\n"
-    "- content_type is 'meta_instruction' (instruction text must never be written to Confluence)\n"
-    "- page_relevance < 4 (wrong page — the change does not belong here)\n"
-    "- confidence is 'low' AND page_relevance < 5 (weak transcript support AND weak page fit)\n"
-    "Otherwise set should_drop=false.\n\n"
+    "change_summary: a single ≤120-character plain-English headline for the ProposalCard. "
+    "Examples: 'Reorder onboarding so Login (step 2) runs before Payment (step 3)', "
+    "'Replace deprecated React reference with Vue on the Frameworks page'. "
+    "Never include markdown, quotes around the whole string, or trailing periods.\n\n"
     "transcript_evidence: 1-3 DISTINCT verbatim quotes copied exactly from the transcript_excerpt. "
     "Never repeat the same quote. If the same statement appears multiple times in the transcript, "
     "include it only once. De-duplicate before returning.\n"
@@ -95,9 +90,19 @@ async def _run_verifier(
     transcript_text: str,
     page_content: str,
 ) -> Dict[str, Any]:
-    """Enrich a draft card with confidence, risk, verifier_note, transcript_evidence.
+    """Enrich a draft card with confidence, risk, verifier_note, transcript_evidence, change_summary.
 
-    Never drops the card. On failure, sets safe defaults and returns (PIPE-03).
+    Phase 10 (Plan 10-07): page-existence and token-grounding checks have been
+    MOVED to grounding_gate.check_page_existence + check_grounding (PROP-V2-01).
+    The verifier no longer drops cards for low page_relevance; that
+    responsibility lives in the deterministic gate run by _verify_and_persist
+    just before persist. The verifier now focuses exclusively on LLM
+    judgments (confidence / risk / evidence / content_type / change_summary).
+    The ONE legacy drop preserved here is for content_type=="meta_instruction"
+    — these are clearly-not-a-real-change cards (editorial directives like
+    "make this clearer") that have nothing to do with grounding.
+
+    Never raises. On failure, sets safe defaults and returns (PIPE-03).
     """
     try:
         user_input = json.dumps(
@@ -126,37 +131,44 @@ async def _run_verifier(
         if content_type not in ("final_content", "meta_instruction"):
             content_type = "final_content"
 
-        page_relevance = raw.get("page_relevance")
-        try:
-            page_relevance = int(page_relevance)
-            page_relevance = max(0, min(10, page_relevance))
-        except (TypeError, ValueError):
-            page_relevance = 5
-
         confidence = raw.get("confidence") or "low"
         risk = raw.get("risk") or "safe"
         verifier_note = raw.get("verifier_note") or ""
 
-        # Downgrade confidence/risk based on content quality and page fit
+        # Downgrade for meta-instruction cards. Per Plan 10-07 the
+        # wrong-page downgrade (page_relevance < 4) is REMOVED because the
+        # GroundingGate's page-existence check and per-op token-grounding
+        # check together cover both "page does not exist" and "tokens
+        # never spoken" cases more strictly than this LLM score did.
         if content_type == "meta_instruction":
             confidence = "low"
             risk = "risky"
-            verifier_note = f"[INSTRUCTION TEXT] after_content contains editorial directives, not documentation. {verifier_note}".strip()
-        elif page_relevance < 4:
-            confidence = "low"
-            risk = "risky"
-            verifier_note = f"[WRONG PAGE: relevance {page_relevance}/10] Change does not belong on this page. {verifier_note}".strip()
+            verifier_note = (
+                "[INSTRUCTION TEXT] after_content contains editorial directives, "
+                f"not documentation. {verifier_note}"
+            ).strip()
 
+        # Only meta_instruction triggers a verifier-side drop now —
+        # everything else is left for GroundingGate to evaluate.
         should_drop = bool(raw.get("should_drop", False))
-        # Enforce drop when critical conditions are met regardless of LLM output
-        if content_type == "meta_instruction" or page_relevance < 4:
+        if content_type == "meta_instruction":
             should_drop = True
+
+        # Plan 10-07 (D-07 ProposalCard): the verifier emits a ≤120-char
+        # change_summary. If the upstream drafter already populated one
+        # (StructureAwareDrafter does), keep that and only fill from the
+        # verifier when the slot is empty. The downstream
+        # _verify_and_persist synthesis stays as a final fallback.
+        llm_summary = (raw.get("change_summary") or "").strip()
+        if llm_summary:
+            llm_summary = llm_summary[:120]
+        if not draft.get("change_summary") and llm_summary:
+            draft["change_summary"] = llm_summary
 
         draft["confidence"] = confidence
         draft["risk"] = risk
         draft["verifier_note"] = verifier_note
         draft["transcript_evidence"] = raw.get("transcript_evidence") or []
-        draft["page_relevance"] = page_relevance
         draft["content_type"] = content_type
         draft["should_drop"] = should_drop
         return draft
@@ -166,7 +178,6 @@ async def _run_verifier(
         draft.setdefault("risk", "safe")
         draft.setdefault("verifier_note", "")
         draft.setdefault("transcript_evidence", [])
-        draft.setdefault("page_relevance", 5)
         draft.setdefault("content_type", "final_content")
         draft.setdefault("should_drop", False)
         return draft
