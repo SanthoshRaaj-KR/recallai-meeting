@@ -82,6 +82,14 @@ class Assistant(Agent):
         # so on_user_turn_completed doesn't double-play it.
         self._partial_wake_fired: bool = False
 
+    async def on_enter(self) -> None:
+        # Do NOT call session.generate_reply() here.
+        # The default Agent.on_enter() calls generate_reply(), which bypasses
+        # on_user_turn_completed and goes straight to the LLM. After an interruption
+        # LiveKit re-enters the agent, triggering on_enter() again — causing the agent
+        # to answer without a wake word. Overriding with a no-op disables this.
+        pass
+
     async def stt_node(
         self,
         audio: AsyncIterable[rtc.AudioFrame],
