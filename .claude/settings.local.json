@@ -16,7 +16,28 @@
       "Bash(npm run *)",
       "Bash(npm test *)",
       "Bash(git -C sync-sage-bot log --oneline -3)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "PowerShell($env:CONDA_PREFIX_ml = \"C:\\\\ProgramData\\\\miniconda3\\\\envs\\\\ml\"; & \"C:\\\\ProgramData\\\\miniconda3\\\\envs\\\\ml\\\\python.exe\" -c \"import sys; print\\('python:', sys.version.split\\(\\)[0]\\); print\\('env:', sys.prefix\\)\")",
+      "PowerShell(Get-ChildItem *)",
+      "Bash(conda env *)",
+      "Bash(/c/Users/vishwajith/.conda/envs/ml/python.exe -c \"import sys; print\\('python:', sys.version.split\\(\\)[0]\\); print\\('env:', sys.prefix\\)\")",
+      "Bash(/c/Users/vishwajith/.conda/envs/ml/python.exe -c \"from confluence_logic import agent_worker; print\\('agent_worker OK -', len\\(agent_worker._JARVIS_TOOLS_WITH_ACK\\), 'tools'\\)\")",
+      "Bash(/c/Users/vishwajith/.conda/envs/ml/python.exe -c 'import confluence_logic; print\\('\\\\''package OK'\\\\''\\)')",
+      "Bash(/c/Users/vishwajith/.conda/envs/ml/python.exe -m pytest --collect-only -q)",
+      "Bash(/c/Users/vishwajith/.conda/envs/ml/python.exe -m pytest tests/ -q --no-header --ignore=tests/test_agent_session.py)",
+      "Bash(sed -n '79,90p' confluence_logic/agent_worker.py)",
+      "Bash(sed -n '203,225p' confluence_logic/agent_worker.py)",
+      "Bash(git push *)",
+      "Bash(/c/Users/vishwajith/.conda/envs/ml/python.exe -m pytest confluence_logic/tests/test_page_parser.py -q --no-header)",
+      "Bash(/c/Users/vishwajith/.conda/envs/ml/python.exe *)",
+      "Bash(git hash-object *)",
+      "Bash(python -c \"from agents import AgentOutputSchema; print\\('ok'\\)\")",
+      "Bash(git stash *)",
+      "Bash(npm install *)",
+      "Bash(npx vitest *)",
+      "Bash(git ls-tree *)",
+      "Bash(git checkout *)",
+      "Bash(git check-ignore *)"
     ]
   }
 }

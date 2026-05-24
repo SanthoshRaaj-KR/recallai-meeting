@@ -14,6 +14,7 @@ This milestone builds the full end-to-end pipeline from "meeting ends" to "accep
 - [x] **Phase 7: Confluence Document Q&A Agent** - ConfluenceQAAgent (OpenAI Agents SDK) with Pinecone-first retrieval, live REST fallback, and gpt-5-mini/gpt-4o-mini model split for fast accurate spoken answers (completed 2026-05-17)
 - [ ] **Phase 8: Auto-Generated Confluence Proposals — Quality, Accept Reliability, UI Clarity, Tests** - Honor user-spoken verbatim_content in the post-meeting create-fallback; sharpen explicit-create detection; tighten page qualifier + verifier; make Accept resilient with real error messages and a regenerate-from-current-page recovery; redesign the proposal card to show page + one-line change_summary + default-visible diff; ship a 3-layer test plan (unit + e2e quality eval + manual UAT). In-meeting "Hey Jarvis" voice path and the editor agent are LOCKED out of scope.
 - [ ] **Phase 9: Merge LiveKit Voice Path + Confluence Q&A Pipeline into Master** - Consolidate the `master` branch (LiveKit-based fast voice answering via `agent_worker.py` / `agent_bridge.py` / `static/bot.html` / AssemblyAI + sonic-turbo) with the `confluence` branch (ConfluenceQAAgent, auto-proposal pipeline, Phase 7 + 8 work, Phase 8 UI redesign in `sync-sage-bot`) on a new `omg_merged` branch off master. No underlying logic in either feature set is rewritten — both are preserved and integrated.
+- [ ] **Phase 10: Auto-Propose Pipeline Quality Redesign v2** - Redesign the post-meeting Confluence proposal pipeline end-to-end to eliminate four observed failure modes: (1) hallucinated changes referencing pages or words that don't exist, (2) flow-destroying edits that scramble ordered procedures, (3) ProposalCards that don't communicate what's changing, (4) missed obvious edits and edits routed to wrong pages. EditorAgent is LOCKED as the apply layer — it works correctly when given `do X in Y page`. The redesign builds the upstream pipeline that produces those well-formed `(X, Y)` pairs: a stricter page-router with verbatim grounding, a structure-aware editor that operates on a parsed page tree (heading/list/step nodes) instead of regenerating prose, a hard token-grounding gate, and a redesigned ProposalCard with inline word-level diff, plain-English change summary, page-context header, and one-click Confluence preview.
 
 ## Phase Details
 
@@ -97,7 +98,7 @@ Plans:
 
 ## Progress
 
-**Execution Order:** 1 → 2 → 3 → 4 → 5 → 7 → 8 → 9
+**Execution Order:** 1 → 2 → 3 → 4 → 5 → 7 → 8 → 9 → 10
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -107,8 +108,9 @@ Plans:
 | 4. Pipeline Proposal Quality Fixes | 2/2 | Complete | 2026-05-15 |
 | 5. Safe Apply Hardening + Re-indexing | 2/2 | Complete | 2026-05-16 |
 | 7. Confluence Document Q&A Agent | 2/2 | Complete | 2026-05-17 |
-| 8. Auto-Generated Proposals — Quality, Accept, UI, Tests | 0/5 | Ready to execute | - |
+| 8. Auto-Generated Proposals — Quality, Accept, UI, Tests | 0/5 | Superseded by Phase 10 | - |
 | 9. Merge LiveKit + Confluence Branches | 0/0 | Awaiting plans | - |
+| 10. Auto-Propose Pipeline Quality Redesign v2 | 1/9 | Executing (Wave 0 RED scaffolds landed) | - |
 
 ### Phase 7: Confluence Document Q&A Agent
 **Goal**: A voice query like "hey Jarvis, when is SOC2 coming?" is correctly classified as a Confluence read question, routed to a new `ConfluenceQAAgent` (OpenAI Agents SDK), answered via Pinecone-first semantic retrieval with live Confluence REST fallback, and spoken back — without touching the edit/proposal pipeline
@@ -173,4 +175,40 @@ Plans:
   5. `sync-sage-bot` submodule pointer is `be285fc`; the UI builds (`npm run build`) and Phase 8 ProposalCard renders with headline + diff + accept-error toast
   6. The LiveKit voice path answers a Confluence read query in under 3s (Phase 7 latency target), with the LiveKit agent now routing read queries to `ConfluenceQAAgent` as a tool (the only intentional integration point — not a rewrite of either side)
 **Plans**: TBD (created by /gsd:plan-phase after discuss-phase locks the integration-point decisions)
+
+### Phase 10: Auto-Propose Pipeline Quality Redesign v2
+**Goal**: After any meeting, the auto-propose-changes pipeline produces a small set of proposal cards that the user can read in seconds and accept with confidence. Every card targets a real Confluence page with content the meeting actually said, places the edit in the structurally correct location on that page, preserves the page's existing flow (ordered procedures, headings, cross-references), and shows the user — at a glance, without expanding anything — which page is affected, where in the page, exactly what text is being added/removed/replaced, and why. EditorAgent remains the apply layer (it works correctly given a clean `do X in Y page` instruction); the redesign produces those clean instructions and the UI that lets the user trust them.
+**Depends on**: Phase 5 (safe apply), Phase 9 (merged branch — code being modified lives here)
+**Requirements**: PROP-V2-01, PROP-V2-02, PROP-V2-03, PROP-V2-04, PROP-V2-05, PROP-V2-06, PROP-V2-07
+**Scope Lock** (MUST NOT be modified):
+  - `confluence_logic/agents/editor_agent.py` — the apply layer. Works correctly given a structured instruction; Phase 10 produces better instructions, it does not rewrite the editor.
+  - `confluence_logic/agents/confluence_qa_agent.py` — Phase 7 read-query agent, unrelated.
+  - `agent_worker.py` / `agent_bridge.py` / `static/bot.html` — LiveKit voice path from Phase 9.
+  - In-meeting "Hey Jarvis" voice path in `jarvis_agentic.py`.
+**Failure Modes Being Eliminated** (observed in production, 2026-05-22):
+  1. **Hallucinated page or content** — pipeline proposes edits to pages that don't exist in the workspace, or `after_content` contains words/phrases that were never in the transcript and never in the current page.
+  2. **Flow disruption** — meeting says "login should come before payment in the onboarding flow"; pipeline writes after_content that destroys the existing prose ("enter username password click mouse button") instead of swapping ordered steps 2 and 3.
+  3. **Card is illegible** — user opens the review UI and cannot tell what's being changed: no page-level context, no inline word-level diff, no plain-English summary; reads like a raw LLM dump.
+  4. **Targeting failure** — meeting says "we're moving to Docker for deployment"; pipeline ignores the page that has the deployment section and instead writes "use Docker for deployment" into the Introduction of an unrelated page.
+**Success Criteria** (what must be TRUE):
+  1. Hard hallucination gate — zero cards persisted whose `page_id` is not a node in the user's confluence_page_graph (Neo4j) AND whose page title does not match a Confluence page returned by REST. No card whose `after_content` contains a token (after lowercasing + stopword removal) that appears in neither `{transcript ∪ current page content}` for additive operations, or that does not appear in `current page content` for replace-target text.
+  2. Structure-aware editing — when meeting discusses reordering ordered-list steps, the proposal operates at node level (move step[i] before step[j]) and the rendered after_content preserves all other steps verbatim. The drafter never returns prose like "click mouse button" for an ordered procedure when the original used "Click 'Sign in'".
+  3. Card UX clarity — every card, before any user interaction, displays: (a) page title + URL + breadcrumb (Space › Parent › Page), (b) section heading where the edit lands, (c) change-type pill (Replace/Insert/Reorder/Delete/Create), (d) a ≤120-char plain-English `change_summary`, (e) inline word-level red/green diff for replace/insert/delete, (f) for reorders, an explicit ordered-list before/after with moved items highlighted. No essential information is hidden behind a "Show more".
+  4. Targeting recall — for the e2e scorecard's golden transcript set (≥20 fixtures), retrieval+routing surfaces the structurally correct target page for ≥90% of explicit subject mentions (frameworks discussion → frameworks page; deployment-arch discussion → deployment page). Wrong-page proposals (qualifier `page_relevance < 6`) never reach the UI.
+  5. Targeting precision — for the same fixture set, no proposal is routed to a page whose title is unrelated to the change subject (zero false positives where the qualifier scores ≥6 for a page that has no semantic relationship to the change).
+  6. Regenerate-from-current-page works — if a card was generated against a stale page version, clicking "Regenerate" re-runs the drafter against the live page content; the new card respects every Phase 10 grounding rule.
+  7. EditorAgent boundary preserved — given any Phase 10 proposal card that passes the verifier, EditorAgent applies it without modification to its own code; all instructions to EditorAgent take the form "in section S of page P, replace exact text X with Y" or "in section S of page P, append node N", and EditorAgent's existing precise-edit semantics handle the rest.
+**Plans**: 9 plans across 5 waves
+
+Plans:
+- [x] 10-01-PLAN.md — Wave 0 RED: 8 test scaffolds + 20-fixture stub + manual UAT doc (PROP-V2-01..07) — completed 2026-05-22
+- [ ] 10-02-PLAN.md — PageParser: Confluence storage HTML → typed AST (Wave 1, PROP-V2-02)
+- [ ] 10-03-PLAN.md — GroundingGate: hard hallucination + token-grounding gate (Wave 1, PROP-V2-01)
+- [ ] 10-04-PLAN.md — EditorDispatcher: maps 6 D-02 op shapes onto tools.py primitives without touching editor_agent.py (Wave 1, PROP-V2-06)
+- [ ] 10-05-PLAN.md — PageRouter: three-signal merge (Pinecone + Neo4j heading-aware + explicit-token gate) (Wave 1, PROP-V2-03)
+- [ ] 10-06-PLAN.md — StructureAwareDrafter: emits structured ops, not prose; replaces drafter for Phase 10 path (Wave 2, PROP-V2-02 + 06)
+- [ ] 10-07-PLAN.md — Orchestrator rewire in _run_pipeline + Regenerate endpoint + verifier slimming + connector ancestors/space expand (Wave 3, PROP-V2-01..03, 05, 06)
+- [ ] 10-08-PLAN.md — ProposalCardV2 + wordDiff util + Regenerate UI wire (Wave 4, PROP-V2-04 + 05)
+- [ ] 10-09-PLAN.md — e2e quality scorecard + 20 golden transcript fixtures (Wave 4, PROP-V2-07)
+
 

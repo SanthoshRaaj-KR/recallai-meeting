@@ -67,6 +67,16 @@
 - **UI-V2-02**: Page-level accept/reject (accept all cards for a page in one click)
 - **UI-V2-03**: Card feedback — user can annotate why they rejected a proposal (for model improvement)
 
+### Auto-Propose Pipeline Quality Redesign v2 (Phase 10)
+
+- **PROP-V2-01**: Hard hallucination gate — every card persisted to Supabase must (a) carry a `page_id` that is a node in the user's `confluence_page_graph` (Neo4j) OR a verified-existing Confluence REST hit, AND (b) have `after_content` whose tokens, after lowercasing + stopword stripping, are all present in `{transcript ∪ current page content}` for additive ops, or in `current page content` for the old-value portion of replace ops.
+- **PROP-V2-02**: Structure-aware editing — the drafter operates on a parsed page tree (heading / paragraph / ordered-list / unordered-list / step nodes). Reordering or inserting steps in an ordered procedure produces node-level operations (`move`, `insert_after`, `replace_inline`), never a regenerated prose block. All sibling nodes that the meeting didn't reference are emitted byte-identical in the after-content.
+- **PROP-V2-03**: Page targeting — a new PageRouter stage selects the structurally correct target page for each ChangeIntent BEFORE the drafter runs. Routing must combine (a) semantic search (Pinecone), (b) heading-aware graph lookup (Neo4j confluence_page_graph), (c) explicit subject-token presence in page title or headings. Page routing accuracy on the golden fixture set ≥90%; wrong-page proposals (qualifier `page_relevance < 6`) never reach the UI.
+- **PROP-V2-04**: Card UX clarity — every ProposalCard renders, before any user click: page title + URL + breadcrumb (Space › Parent › Page), section heading where the edit lands, change-type pill, ≤120-char plain-English change_summary, inline word-level red/green diff for replace/insert/delete, ordered-list before/after with moved-item highlighting for reorders. No essential info hidden behind expanders.
+- **PROP-V2-05**: Regenerate-from-current-page — when a card was generated against a stale page version (e.g., page was edited between draft and accept), a "Regenerate" action re-runs the drafter against the live page; the regenerated card respects every Phase 10 grounding rule.
+- **PROP-V2-06**: EditorAgent boundary preserved — Phase 10 must NOT modify `editor_agent.py`. Every proposal card passes EditorAgent a structured instruction of the form `{action, page_id, section_heading, old_text, new_text}` (or `{action: "reorder", page_id, section_heading, from_index, to_index}` for moves), and EditorAgent's existing apply semantics handle the rest.
+- **PROP-V2-07**: Quality scorecard — a `tests/e2e_proposal_quality_v2_eval.py` runs the 20+ golden transcript fixtures through the full pipeline and scores hallucination rate, targeting recall/precision, structure preservation, and card-clarity heuristics. Scorecard must hit hallucination = 0%, targeting recall ≥ 90%, structure preservation = 100% on ordered procedures.
+
 ## Out of Scope
 
 | Feature | Reason |
