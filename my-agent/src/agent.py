@@ -14,6 +14,7 @@ from livekit.agents import (
     JobContext,
     JobProcess,
     ModelSettings,
+    StopResponse,
     cli,
     inference,
     llm,
@@ -142,8 +143,7 @@ class Assistant(Agent):
             self._listening = False
             if elapsed > _LISTENING_TIMEOUT_S or not raw.strip():
                 logger.info("Wake listening timed out — suppressing LLM")
-                new_message.content = []
-                return
+                raise StopResponse()
             logger.info("Listening mode query: %.80r", raw.strip())
             new_message.content = [self._with_context(raw.strip())]
             return
@@ -153,19 +153,17 @@ class Assistant(Agent):
         # ── No wake word — regular meeting speech, suppress the LLM ──────────
         if query is None:
             logger.debug("No wake word — suppressing: %.60r", raw)
-            new_message.content = []
-            return
+            raise StopResponse()
 
         # ── Bare wake word — acknowledge and wait for the follow-up ──────────
         if not query:
             logger.info("Wake word — entering listening mode (partial_fired=%s)", partial_fired)
             self._listening = True
             self._listening_since = time.perf_counter()
-            new_message.content = []
             if not partial_fired:
                 # Partial detection already played the ack; skip to avoid double-play.
                 await self.session.say("Yes?", add_to_chat_ctx=False)
-            return
+            raise StopResponse()
 
         # ── Wake word + inline query — dispatch to LLM with meeting context ──
         logger.info("Wake query dispatched: %.80r", query)
