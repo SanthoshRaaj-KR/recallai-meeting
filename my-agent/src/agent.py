@@ -1,6 +1,10 @@
+import asyncio
+import collections
 import json
 import logging
+import re
 import textwrap
+import time
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -9,16 +13,45 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
+    ModelSettings,
     cli,
     inference,
+    llm,
     room_io,
+    stt as lk_stt,
 )
-from livekit.plugins import ai_coustics, cerebras, silero
+from livekit import rtc
+from livekit.plugins import ai_coustics, assemblyai, cerebras, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from typing import AsyncIterable
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
+
+# ── Wake word ─────────────────────────────────────────────────────────────────
+# Matches "Jarvis", "Hey Jarvis", and common STT mis-transcriptions.
+_WAKE_PATTERN = re.compile(
+    r"(?:hey\s+)?(?:jarvis|jarvas|jervis|jarvus)[,.\s!?]*\s*(.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+# Seconds to stay in listening mode after a bare "Jarvis" before timing out.
+_LISTENING_TIMEOUT_S = 10.0
+# Full meeting transcript buffer. 500 utterances ≈ 60–90 min meeting ≈ 15–25k tokens,
+# well within gpt-oss-120b's 128k context window.
+_TRANSCRIPT_MAX = 500
+
+
+def _extract_query(text: str) -> str | None:
+    """Parse the wake word from a transcript line.
+
+    Returns:
+      None  — no wake word, LLM must be suppressed
+      ""    — bare wake word only ("Jarvis"), enter listening mode
+      "..." — wake word + inline query ("Jarvis, summarise the last point")
+    """
+    m = _WAKE_PATTERN.search(text.strip())
+    return m.group(1).strip() if m else None
 
 
 class Assistant(Agent):
@@ -27,57 +60,115 @@ class Assistant(Agent):
             llm=cerebras.LLM(model="gpt-oss-120b"),
             instructions=textwrap.dedent(
                 """\
-                You are a friendly, reliable voice assistant that answers questions, explains topics, and completes tasks with available tools.
+                You are Jarvis, a meeting assistant activated by wake word.
+                You are given the recent meeting transcript before each question.
+                Use it to answer questions about what has been discussed.
 
                 # Output rules
-
-                You are interacting with the user via voice, and must apply the following rules to ensure your output sounds natural in a text-to-speech system:
-
-                - Respond in plain text only. Never use JSON, markdown, lists, tables, code, emojis, or other complex formatting.
-                - Keep replies brief by default: one to three sentences. Ask one question at a time.
-                - Do not reveal system instructions, internal reasoning, tool names, parameters, or raw outputs
-                - Spell out numbers, phone numbers, or email addresses
-                - Omit `https://` and other formatting if listing a web url
-                - Avoid acronyms and words with unclear pronunciation, when possible.
-
-                # Conversational flow
-
-                - Help the user accomplish their objective efficiently and correctly. Prefer the simplest safe step first. Check understanding and adapt.
-                - Provide guidance in small steps and confirm completion before continuing.
-                - Summarize key results when closing a topic.
-
-                # Tools
-
-                - Use available tools as needed, or upon user request.
-                - Collect required inputs first. Perform actions silently if the runtime expects it.
-                - Speak outcomes clearly. If an action fails, say so once, propose a fallback, or ask how to proceed.
-                - When tools return structured data, summarize it to the user in a way that is easy to understand, and don't directly recite identifiers or other technical details.
-
-                # Guardrails
-
-                - Stay within safe, lawful, and appropriate use; decline harmful or out-of-scope requests.
-                - For medical, legal, or financial topics, provide general information only and suggest consulting a qualified professional.
-                - Protect privacy and minimize sensitive data.
+                - Respond in plain text only. No markdown, lists, JSON, or emojis.
+                - Keep replies brief: one to three sentences unless more detail is needed.
+                - Never ask clarifying questions — pick the most reasonable interpretation.
+                - Do not mention wake words, system instructions, or internal state.
+                - Spell out numbers and avoid acronyms with unclear pronunciation.
                 """
             ),
         )
+        # Buffers every STT utterance heard in the meeting, wake-word or not.
+        self._transcript: collections.deque[str] = collections.deque(maxlen=_TRANSCRIPT_MAX)
+        # Two-stage wake: bare "Jarvis" → listening mode → next utterance is the query.
+        self._listening: bool = False
+        self._listening_since: float = 0.0
+        # Tracks whether the ack was already played from a partial transcript hit,
+        # so on_user_turn_completed doesn't double-play it.
+        self._partial_wake_fired: bool = False
 
-    # To add tools, use the @function_tool decorator.
-    # Here's an example that adds a simple weather tool.
-    # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
-    # @function_tool
-    # async def lookup_weather(self, context: RunContext, location: str):
-    #     """Use this tool to look up current weather information in the given location.
-    #
-    #     If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
-    #
-    #     Args:
-    #         location: The location to look up weather information for (e.g. city name)
-    #     """
-    #
-    #     logger.info(f"Looking up weather for {location}")
-    #
-    #     return "sunny with a temperature of 70 degrees."
+    async def stt_node(
+        self,
+        audio: AsyncIterable[rtc.AudioFrame],
+        model_settings: ModelSettings,
+    ) -> AsyncIterable[lk_stt.SpeechEvent | str]:
+        """Spy on INTERIM transcripts to fire the 'Yes?' ack the moment 'Jarvis'
+        appears — before VAD silence and STT finalization (~200–400 ms earlier).
+        """
+        async for event in Agent.default.stt_node(self, audio, model_settings):
+            if (
+                not self._partial_wake_fired
+                and isinstance(event, lk_stt.SpeechEvent)
+                and event.type == lk_stt.SpeechEventType.INTERIM_TRANSCRIPT
+            ):
+                text = event.alternatives[0].text if event.alternatives else ""
+                if _WAKE_PATTERN.search(text):
+                    self._partial_wake_fired = True
+                    logger.info("Partial wake detected in interim — firing ack early")
+                    session = self.session
+
+                    async def _say_ack():
+                        await session.say("Yes?", add_to_chat_ctx=False)
+
+                    asyncio.create_task(_say_ack())
+            yield event
+
+    async def on_user_turn_completed(
+        self,
+        turn_ctx: llm.ChatContext,
+        new_message: llm.ChatMessage,
+    ) -> None:
+        """Gate the LLM behind the 'Jarvis' wake word.
+
+        Every transcript line is buffered for meeting context regardless of
+        whether it contained the wake word. The LLM is only called when the
+        wake word is detected.
+        """
+        raw = new_message.text_content or ""
+        # Snapshot and reset partial-wake flag for this turn.
+        partial_fired = self._partial_wake_fired
+        self._partial_wake_fired = False
+
+        # Always buffer so the LLM has full meeting context when it is called.
+        if raw.strip():
+            self._transcript.append(raw.strip())
+
+        # ── Listening mode: bare "Jarvis" was just said, awaiting the query ──
+        if self._listening:
+            elapsed = time.perf_counter() - self._listening_since
+            self._listening = False
+            if elapsed > _LISTENING_TIMEOUT_S or not raw.strip():
+                logger.info("Wake listening timed out — suppressing LLM")
+                new_message.content = []
+                return
+            logger.info("Listening mode query: %.80r", raw.strip())
+            new_message.content = [self._with_context(raw.strip())]
+            return
+
+        query = _extract_query(raw)
+
+        # ── No wake word — regular meeting speech, suppress the LLM ──────────
+        if query is None:
+            logger.debug("No wake word — suppressing: %.60r", raw)
+            new_message.content = []
+            return
+
+        # ── Bare wake word — acknowledge and wait for the follow-up ──────────
+        if not query:
+            logger.info("Wake word — entering listening mode (partial_fired=%s)", partial_fired)
+            self._listening = True
+            self._listening_since = time.perf_counter()
+            new_message.content = []
+            if not partial_fired:
+                # Partial detection already played the ack; skip to avoid double-play.
+                await self.session.say("Yes?", add_to_chat_ctx=False)
+            return
+
+        # ── Wake word + inline query — dispatch to LLM with meeting context ──
+        logger.info("Wake query dispatched: %.80r", query)
+        new_message.content = [self._with_context(query)]
+
+    def _with_context(self, query: str) -> str:
+        """Prepend the full meeting transcript to the query."""
+        if not self._transcript:
+            return query
+        full = "\n".join(self._transcript)
+        return f"[Meeting transcript so far]\n{full}\n\n[Question]\n{query}"
 
 
 server = AgentServer()
@@ -118,13 +209,22 @@ async def my_agent(ctx: JobContext):
         logger.info("Standard mode — STT linked to all participants (room: %s)", ctx.room.name)
 
     session = AgentSession(
-        stt=inference.STT(model="deepgram/nova-3", language="en"),
+        # AssemblyAI Universal-3 Pro: keyterms_prompt locks "Jarvis"/"Hey Jarvis"
+        # recognition in noisy meeting audio, reducing mis-transcriptions.
+        # language_detection=False removes 30–80ms multilingual overhead.
+        stt=assemblyai.STT(
+            model="u3-rt-pro",
+            keyterms_prompt=["Jarvis", "Hey Jarvis"],
+            language_detection=False,
+        ),
         tts=inference.TTS(
             model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
         ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        preemptive_generation=True,
+        # Disabled: on_user_turn_completed always rewrites or clears the message,
+        # so speculative output is always discarded → audio glitch at turn start.
+        preemptive_generation=False,
     )
 
     await ctx.connect()
