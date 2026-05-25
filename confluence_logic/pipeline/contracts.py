@@ -114,10 +114,16 @@ class SectionCandidate(BaseModel):
 
     ``dense_rank`` / ``lexical_rank`` / ``rrf_score`` support the RRF fusion
     (RETR-V3-01); ``rerank_score`` is filled by the rerank stage (RETR-V3-03).
+
+    ``score`` is the raw retrieval score from the originating signal (dense
+    cosine similarity or BM25 score); ``source`` identifies which signal
+    produced this candidate (``"dense"``, ``"lexical"``, or ``"fused"``).
+    These additive fields allow tests to inject pre-scored candidates and let
+    the retrieve stage attribute each candidate to its signal source.
     """
 
     page_id: str
-    page_title: str
+    page_title: str = ""
     space_key: str = ""
     section_heading: Optional[str] = None
     section_text: str = ""
@@ -125,6 +131,9 @@ class SectionCandidate(BaseModel):
     lexical_rank: Optional[int] = None
     rrf_score: float = 0.0
     rerank_score: Optional[float] = None
+    # Additive fields for signal attribution and raw score tracking
+    score: float = 0.0       # raw retrieval score from the originating signal
+    source: str = ""         # "dense" | "lexical" | "fused"
 
 
 # ---------------------------------------------------------------------------
@@ -139,12 +148,18 @@ class RetrievalResult(BaseModel):
     orchestrator routes this intent to ``create_page`` in plan_ops.
     ``iterations`` counts how many agentic-loop retries were needed (0 = no
     loop triggered).
+
+    ``fusion_log`` is a structured record of the RRF fusion step emitted for
+    observability (RETR-V3-01: fusion must be logged/traced).  It carries the
+    fused order (list of ``(doc_id, rrf_score)`` tuples) and signal metadata.
+    None only when no candidates were found (empty corpus + no dense hits).
     """
 
     intent: ChangeIntentV3
     candidates: List[SectionCandidate]
     no_existing_target: bool = False
     iterations: int = 0
+    fusion_log: Optional[dict] = None  # RETR-V3-01: fused order + signal counts
 
 
 # ---------------------------------------------------------------------------
