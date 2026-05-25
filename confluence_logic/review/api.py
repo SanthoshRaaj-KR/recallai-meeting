@@ -171,6 +171,16 @@ JARVIS_STRUCTURE_AWARE_DRAFTER_ENABLED = _RAW_STRUCTURE_AWARE_FLAG not in {
 # established) but the env var lets ops tune it without code change.
 JARVIS_QUALIFIER_FIT_MIN = int(os.getenv("JARVIS_QUALIFIER_FIT_MIN", "6"))
 
+# ---------------------------------------------------------------------------
+# Phase 11 v3 pipeline killswitch (ARCH-V3-01)
+# Imported from pipeline.context which centralizes all v3 flags.
+# WR-07 robust off-parse: empty env var does NOT flip the default.
+# When False, the Phase 10 _run_pipeline path runs as a fallback.
+# ---------------------------------------------------------------------------
+from confluence_logic.pipeline.context import (  # noqa: E402
+    JARVIS_PIPELINE_V3_ENABLED as _JARVIS_PIPELINE_V3_ENABLED,
+)
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -4634,6 +4644,121 @@ async def _draft_qualified_phase10(
     return _structured_op_to_draft(op, intent_obj, page)
 
 
+# ---------------------------------------------------------------------------
+# Phase 11 v3 pipeline background-task wrapper (ARCH-V3-01)
+# ---------------------------------------------------------------------------
+
+async def _run_pipeline_v3(
+    session_id: str,
+    job_id: str,
+    user_id: str,
+    graph_user_id: str,
+    transcript_log: Optional[List[Any]] = None,
+    bot_id: Optional[str] = None,
+) -> None:
+    """Phase 11 v3 pipeline background task.
+
+    Builds a PipelineContext (with TraceBus registered for the job), spawns
+    pipeline.run(ctx), and persists each resulting ProposalCardV3 to Supabase
+    incrementally by (session_id, dedup_key) for idempotency (T-11-21).
+
+    graph_user_id is passed explicitly and embedded in PipelineContext — stages
+    NEVER read the ContextVar (T-11-19 / Pitfall 1/4).
+    bot_id is from the active meeting state — Stage 0 uses it to fetch the
+    Recall diarized transcript.  ctx.transcript_text starts as "" — Stage 0
+    populates it (NOT pre-normalized here so the Recall fetch is never bypassed).
+    transcript_log is the raw LiveKit/Supabase fallback entries — Stage 0
+    consumes them when Recall is unavailable.
+
+    Exceptions are caught and recorded in pipeline_jobs; never propagated to
+    the event loop (T-11-20).
+    """
+    from confluence_logic.pipeline.context import PipelineContext  # noqa: PLC0415
+    from confluence_logic.pipeline.trace import TraceBus  # noqa: PLC0415
+    import confluence_logic.pipeline.run as _pipeline_run  # noqa: PLC0415
+
+    try:
+        await asyncio.to_thread(
+            supabase_store.update_pipeline_job,
+            job_id, "transcript_source", "running", None, None,
+        )
+        _emit(job_id, {"type": "stage_start", "stage": "transcript_source"})
+
+        # Build TraceBus and register the SSE queue for this job.
+        trace_bus = TraceBus()
+        q = asyncio.Queue()
+        _job_queues[job_id] = q
+        # Wire TraceBus so it emits directly to the job queue.
+        trace_bus._queues[job_id] = q  # type: ignore[attr-defined]
+
+        ctx = PipelineContext(
+            session_id=session_id,
+            user_id=user_id,
+            graph_user_id=graph_user_id,
+            bot_id=bot_id,
+            transcript_text="",  # Stage 0 fills this — do NOT pre-normalize here
+            transcript_log=transcript_log,
+            trace_bus=trace_bus,
+        )
+
+        proposals = await _pipeline_run.run(ctx)
+
+        # Persist proposals incrementally, idempotent by (session_id, dedup_key)
+        for card in proposals:
+            try:
+                await asyncio.to_thread(
+                    supabase_store.upsert_proposal,
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "dedup_key": card.group_id or f"{card.page_id}:{card.section_heading}",
+                        "change_type": card.change_type or "edit",
+                        "page_id": card.page_id,
+                        "page_title": card.page_title,
+                        "section_heading": card.section_heading,
+                        "before_content": card.before_content,
+                        "after_content": card.after_content,
+                        "status": "pending",
+                        "rationale": card.rationale,
+                        "change_summary": card.change_summary,
+                        "operation_action": card.operation_action,
+                        "group_id": card.group_id,
+                        "confidence_score": card.confidence_score,
+                        "confidence_bin": card.confidence_bin,
+                        "transcript_evidence": card.transcript_evidence or [],
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "_run_pipeline_v3: proposal persist failed (non-fatal): %s", exc
+                )
+
+        await asyncio.to_thread(
+            supabase_store.update_pipeline_job,
+            job_id, None, "completed", None, _utc_now_iso(),
+        )
+        _emit(job_id, {"type": "pipeline_complete", "proposals": len(proposals)})
+
+    except Exception as exc:
+        logger.error(
+            "_run_pipeline_v3: unhandled error for session=%s job=%s: %s",
+            session_id, job_id, exc,
+        )
+        try:
+            await asyncio.to_thread(
+                supabase_store.update_pipeline_job,
+                job_id, None, "failed", str(exc), _utc_now_iso(),
+            )
+        except Exception:
+            pass
+        _emit(job_id, {"type": "pipeline_error", "detail": str(exc)})
+    finally:
+        # Signal SSE consumer to close (SENTINEL)
+        _emit(job_id, _SENTINEL)
+        # Cleanup orphaned queues after 300s
+        asyncio.get_event_loop().call_later(300, _job_queues.pop, job_id, None)
+
+
 async def _run_pipeline(
     session_id: str,
     job_id: str,
@@ -5221,9 +5346,28 @@ async def start_pipeline(
     # job_id is always a non-null string — falls back to an in-process UUID when Supabase is
     # unavailable so the client can still poll (pipeline runs untracked but response is valid)
     graph_user_id = _confluence_graph_user_id(user, body.session_id)
-    asyncio.create_task(
-        _run_pipeline(body.session_id, job_id, user["id"], graph_user_id)
-    )
+
+    if _JARVIS_PIPELINE_V3_ENABLED:
+        # Phase 11 v3 path (ARCH-V3-01): delegate to pipeline.run via PipelineContext.
+        # transcript_text starts as "" — Stage 0 (transcript_source) populates it
+        # from the Recall diarized transcript or the LiveKit fallback log.
+        # transcript_log is the raw LiveKit entries; bot_id enables Stage 0 Recall fetch.
+        state = _get_meeting_state(body.session_id)
+        transcript_log = state.get("transcript_log") or []
+        bot_id = state.get("bot_id")
+        asyncio.create_task(
+            _run_pipeline_v3(
+                body.session_id, job_id, user["id"], graph_user_id,
+                transcript_log=transcript_log,
+                bot_id=bot_id,
+            )
+        )
+    else:
+        # Phase 10 fallback path — intact for killswitch rollout (ARCH-V3-01).
+        asyncio.create_task(
+            _run_pipeline(body.session_id, job_id, user["id"], graph_user_id)
+        )
+
     return {"job_id": job_id, "status": "accepted"}
 
 
