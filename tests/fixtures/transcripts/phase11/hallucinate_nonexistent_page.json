@@ -1,0 +1,20 @@
+{
+  "name": "hallucinate_nonexistent_page",
+  "failure_mode": "hallucinate",
+  "transcript_text": "Mia: The Quarterly Forecast Tracker needs to be updated with the Q2 numbers.\nNick: Good point. Let's update it.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-launch-plan",
+      "title": "Launch Plan",
+      "headings": ["Timeline"],
+      "content_html": "<h2>Timeline</h2><p>Kickoff in week 1.</p>"
+    },
+    {
+      "page_id": "pg-team-roster",
+      "title": "Team Roster",
+      "headings": ["Members"],
+      "content_html": "<h2>Members</h2><p>Alice, Bob, Carol.</p>"
+    }
+  ],
+  "expected_proposals": []
+}

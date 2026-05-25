@@ -1,0 +1,43 @@
+{
+  "name": "contradiction_soc2_q3_to_q2_two_pages",
+  "failure_mode": "contradiction",
+  "transcript_text": "Alice: We've moved the SOC2 audit from Q3 to Q2. The audit is now scheduled for Q2 2025, not Q3.\nBob: Confirmed. Both the SOC2 Compliance page and the Security Overview page need to be updated to reflect Q2.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-soc2",
+      "title": "SOC2 Compliance",
+      "headings": ["Audit Schedule", "Scope", "Controls"],
+      "content_html": "<h2>Audit Schedule</h2><p>SOC2 Type II audit is scheduled for Q3 2025.</p><h2>Scope</h2><p>Covers all production systems.</p>"
+    },
+    {
+      "page_id": "pg-security-overview",
+      "title": "Security Overview",
+      "headings": ["Audit Schedule", "Posture"],
+      "content_html": "<h2>Audit Schedule</h2><p>Annual SOC2 audit planned for Q3.</p><h2>Posture</h2><p>We follow defense-in-depth principles.</p>"
+    },
+    {
+      "page_id": "pg-infra",
+      "title": "Infrastructure",
+      "headings": ["Regions"],
+      "content_html": "<h2>Regions</h2><p>Production runs in us-east-1 and eu-west-1.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-soc2",
+      "action": "edit_section",
+      "section_heading": "Audit Schedule",
+      "old_text": "Q3 2025",
+      "new_text": "Q2 2025",
+      "group_id": "soc2-audit-q3-to-q2"
+    },
+    {
+      "page_id": "pg-security-overview",
+      "action": "edit_section",
+      "section_heading": "Audit Schedule",
+      "old_text": "Q3",
+      "new_text": "Q2",
+      "group_id": "soc2-audit-q3-to-q2"
+    }
+  ]
+}

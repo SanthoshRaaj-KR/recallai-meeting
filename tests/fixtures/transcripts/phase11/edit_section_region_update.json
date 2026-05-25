@@ -1,0 +1,30 @@
+{
+  "name": "edit_section_region_update",
+  "failure_mode": "wrong_page",
+  "transcript_text": "Anna: We've added ap-southeast-1 as a third production region. The Infrastructure page Regions section needs to reflect that.\nBen: Yes, add Singapore to the regions list.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-infra",
+      "title": "Infrastructure",
+      "headings": ["Regions", "Monitoring"],
+      "content_html": "<h2>Regions</h2><p>Production runs in us-east-1 and eu-west-1.</p><h2>Monitoring</h2><p>Grafana dashboards per region.</p>"
+    },
+    {
+      "page_id": "pg-network",
+      "title": "Networking",
+      "headings": ["CDN"],
+      "content_html": "<h2>CDN</h2><p>CloudFront serves edge traffic globally.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-infra",
+      "action": "edit_section",
+      "section_heading": "Regions",
+      "old_text": "us-east-1 and eu-west-1",
+      "new_text": "us-east-1, eu-west-1, and ap-southeast-1",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

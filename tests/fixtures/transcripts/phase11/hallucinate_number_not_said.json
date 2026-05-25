@@ -1,0 +1,14 @@
+{
+  "name": "hallucinate_number_not_said",
+  "failure_mode": "hallucinate",
+  "transcript_text": "Quinn: We talked about rate limits last week. Nothing has changed — the limits are still fine where they are.\nRita: Yes, no action needed on rate limits.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-api-docs",
+      "title": "API Documentation",
+      "headings": ["Rate Limits"],
+      "content_html": "<h2>Rate Limits</h2><p>The API allows 100 requests per minute per client.</p>"
+    }
+  ],
+  "expected_proposals": []
+}

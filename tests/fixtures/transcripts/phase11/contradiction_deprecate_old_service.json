@@ -1,0 +1,43 @@
+{
+  "name": "contradiction_deprecate_old_service",
+  "failure_mode": "contradiction",
+  "transcript_text": "Grace: The legacy billing service is fully deprecated as of this month. Any page that mentions the legacy billing service should be flagged for archiving or updated to reference the new payments platform.\nHank: Yes, the Billing Architecture and the Integration Guide both still reference the old service.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-billing-arch",
+      "title": "Billing Architecture",
+      "headings": ["Components", "Data Flow"],
+      "content_html": "<h2>Components</h2><p>The legacy billing service handles subscription renewals.</p>"
+    },
+    {
+      "page_id": "pg-integration-guide",
+      "title": "Integration Guide",
+      "headings": ["Billing Integration", "Webhooks"],
+      "content_html": "<h2>Billing Integration</h2><p>Connect to the legacy billing service via REST API at /legacy/billing/v1.</p>"
+    },
+    {
+      "page_id": "pg-payments-new",
+      "title": "Payments Platform",
+      "headings": ["Overview"],
+      "content_html": "<h2>Overview</h2><p>The new payments platform handles all billing as of 2025.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-billing-arch",
+      "action": "archive_deprecate",
+      "section_heading": "Components",
+      "old_text": "legacy billing service",
+      "new_text": null,
+      "group_id": "legacy-billing-deprecation"
+    },
+    {
+      "page_id": "pg-integration-guide",
+      "action": "edit_section",
+      "section_heading": "Billing Integration",
+      "old_text": "legacy billing service",
+      "new_text": "payments platform",
+      "group_id": "legacy-billing-deprecation"
+    }
+  ]
+}

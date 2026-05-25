@@ -1,0 +1,24 @@
+{
+  "name": "append_new_team_member",
+  "failure_mode": "mixed",
+  "transcript_text": "Ivy: We have a new hire starting Monday — Jordan. Jordan will be joining the backend team. Add Jordan to the team roster.\nJack: Done, I'll add Jordan to the Members section.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-team-roster",
+      "title": "Team Roster",
+      "headings": ["Members", "Roles"],
+      "content_html": "<h2>Members</h2><p>Alice, Bob, Carol.</p><h2>Roles</h2><p>Alice: Lead. Bob: Backend. Carol: Frontend.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-team-roster",
+      "action": "append",
+      "section_heading": "Members",
+      "old_text": null,
+      "new_text": "Jordan (Backend)",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

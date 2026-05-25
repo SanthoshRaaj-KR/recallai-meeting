@@ -1,0 +1,24 @@
+{
+  "name": "reorder_incident_priority",
+  "failure_mode": "reorder",
+  "transcript_text": "Wendy: In the on-call runbook the escalation steps are out of order. Notifying the team lead should come before paging the on-call, not after.\nXavier: Agreed, lead notification first.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-oncall-runbook",
+      "title": "On-call Runbook",
+      "headings": ["Escalation Steps"],
+      "content_html": "<h2>Escalation Steps</h2><ol><li>Acknowledge the alert</li><li>Page on-call engineer</li><li>Notify team lead</li><li>Create incident ticket</li></ol>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-oncall-runbook",
+      "action": "edit_section",
+      "section_heading": "Escalation Steps",
+      "from_index": 2,
+      "to_index": 1,
+      "old_text": null,
+      "new_text": null
+    }
+  ]
+}

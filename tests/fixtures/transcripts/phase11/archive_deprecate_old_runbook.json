@@ -1,0 +1,30 @@
+{
+  "name": "archive_deprecate_old_runbook",
+  "failure_mode": "mixed",
+  "transcript_text": "Olivia: The v1 API Runbook is completely obsolete now that we've published the v2 docs. Can we archive the old v1 runbook page?\nPeter: Yes, archive it — mark it as deprecated.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-api-runbook-v1",
+      "title": "API Runbook v1 (Legacy)",
+      "headings": ["Overview", "Endpoints"],
+      "content_html": "<h2>Overview</h2><p>This is the v1 API runbook. See v2 for current docs.</p>"
+    },
+    {
+      "page_id": "pg-api-docs",
+      "title": "API Documentation v2",
+      "headings": ["Auth Header", "Rate Limits"],
+      "content_html": "<h2>Auth Header</h2><p>Use Bearer token.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-api-runbook-v1",
+      "action": "archive_deprecate",
+      "section_heading": null,
+      "old_text": null,
+      "new_text": null,
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

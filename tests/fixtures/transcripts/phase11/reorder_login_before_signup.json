@@ -1,0 +1,24 @@
+{
+  "name": "reorder_login_before_signup",
+  "failure_mode": "reorder",
+  "transcript_text": "Sam: The user flow docs have signup and login in the wrong order. Login should come before signup in the User Flow page since returning users outnumber new ones.\nTara: Yes, swap them — login first, then signup.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-user-flow",
+      "title": "User Flow",
+      "headings": ["Steps"],
+      "content_html": "<h2>Steps</h2><ol><li>Signup</li><li>Login</li><li>Dashboard</li></ol>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-user-flow",
+      "action": "edit_section",
+      "section_heading": "Steps",
+      "from_index": 1,
+      "to_index": 0,
+      "old_text": null,
+      "new_text": null
+    }
+  ]
+}

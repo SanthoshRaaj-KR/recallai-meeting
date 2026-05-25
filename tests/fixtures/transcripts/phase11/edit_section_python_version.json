@@ -1,0 +1,30 @@
+{
+  "name": "edit_section_python_version",
+  "failure_mode": "wrong_page",
+  "transcript_text": "Yvonne: The engineering runbook still says Python 2.7. We've been on Python 3.11 for two years. Update the Python version reference in the Setup section.\nZach: Yes, Python 3.11 throughout.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-runbook",
+      "title": "Engineering Runbook",
+      "headings": ["Setup", "Testing"],
+      "content_html": "<h2>Setup</h2><p>Install Python 2.7 and pip.</p><h2>Testing</h2><p>Run pytest.</p>"
+    },
+    {
+      "page_id": "pg-language-guide",
+      "title": "Language Guide",
+      "headings": ["Supported Languages"],
+      "content_html": "<h2>Supported Languages</h2><p>Go, TypeScript, and Python.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-runbook",
+      "action": "edit_section",
+      "section_heading": "Setup",
+      "old_text": "Python 2.7",
+      "new_text": "Python 3.11",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

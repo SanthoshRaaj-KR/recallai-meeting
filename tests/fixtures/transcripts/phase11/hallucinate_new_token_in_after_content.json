@@ -1,0 +1,14 @@
+{
+  "name": "hallucinate_new_token_in_after_content",
+  "failure_mode": "hallucinate",
+  "transcript_text": "Oscar: The setup section is fine. Just make it feel more professional.\nPaige: Agreed, let's not change any specifics.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-runbook",
+      "title": "Engineering Runbook",
+      "headings": ["Setup"],
+      "content_html": "<h2>Setup</h2><p>Install dependencies via pip.</p>"
+    }
+  ],
+  "expected_proposals": []
+}

@@ -1,0 +1,30 @@
+{
+  "name": "archive_deprecate_stale_soc2_page",
+  "failure_mode": "mixed",
+  "transcript_text": "Rachel: The SOC2 2023 summary page is completely stale and nobody references it anymore. We have the 2024 version published. Let's archive the 2023 page.\nSteve: Agreed, archive it.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-soc2-2023",
+      "title": "SOC2 2023 Summary",
+      "headings": ["Scope", "Results"],
+      "content_html": "<h2>Scope</h2><p>2023 SOC2 Type II audit results.</p>"
+    },
+    {
+      "page_id": "pg-soc2-2024",
+      "title": "SOC2 2024 Summary",
+      "headings": ["Scope", "Results"],
+      "content_html": "<h2>Scope</h2><p>2024 SOC2 Type II audit results.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-soc2-2023",
+      "action": "archive_deprecate",
+      "section_heading": null,
+      "old_text": null,
+      "new_text": null,
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

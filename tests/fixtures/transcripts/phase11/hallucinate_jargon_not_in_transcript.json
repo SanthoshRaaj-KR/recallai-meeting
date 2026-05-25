@@ -1,0 +1,14 @@
+{
+  "name": "hallucinate_jargon_not_in_transcript",
+  "failure_mode": "hallucinate",
+  "transcript_text": "Karen: Let's make the docs a bit more polished overall. Maybe spruce up the onboarding section.\nLeo: Sure, sounds good.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-onboarding",
+      "title": "Onboarding Guide",
+      "headings": ["Welcome", "Setup"],
+      "content_html": "<h2>Welcome</h2><p>Welcome to the team.</p><h2>Setup</h2><p>Install your dev environment.</p>"
+    }
+  ],
+  "expected_proposals": []
+}

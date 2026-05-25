@@ -1,0 +1,43 @@
+{
+  "name": "contradiction_auth_provider_two_pages",
+  "failure_mode": "contradiction",
+  "transcript_text": "Eve: We are switching from OAuth to SAML enterprise-wide. The Authentication page and the Security Policy page both reference OAuth and need updating.\nFrank: Correct, SAML is now the standard for all enterprise sign-ins.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-auth",
+      "title": "Authentication",
+      "headings": ["Provider", "Session"],
+      "content_html": "<h2>Provider</h2><p>We use OAuth 2.0 for all sign-ins.</p>"
+    },
+    {
+      "page_id": "pg-security-policy",
+      "title": "Security Policy",
+      "headings": ["Authentication Standard", "Encryption"],
+      "content_html": "<h2>Authentication Standard</h2><p>OAuth is mandated for all internal systems.</p>"
+    },
+    {
+      "page_id": "pg-developer-guide",
+      "title": "Developer Guide",
+      "headings": ["Getting Started"],
+      "content_html": "<h2>Getting Started</h2><p>Use the developer token to authenticate against the API.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-auth",
+      "action": "edit_section",
+      "section_heading": "Provider",
+      "old_text": "OAuth 2.0",
+      "new_text": "SAML",
+      "group_id": "auth-oauth-to-saml"
+    },
+    {
+      "page_id": "pg-security-policy",
+      "action": "edit_section",
+      "section_heading": "Authentication Standard",
+      "old_text": "OAuth",
+      "new_text": "SAML",
+      "group_id": "auth-oauth-to-saml"
+    }
+  ]
+}

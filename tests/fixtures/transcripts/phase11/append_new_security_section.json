@@ -1,0 +1,24 @@
+{
+  "name": "append_new_security_section",
+  "failure_mode": "mixed",
+  "transcript_text": "Ella: We need to add a Secrets Management section to the Security Policy page. We're adopting HashiCorp Vault and it's not documented anywhere yet.\nFinn: Yes, let's add a Vault section after Encryption.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-security-policy",
+      "title": "Security Policy",
+      "headings": ["Authentication Standard", "Encryption"],
+      "content_html": "<h2>Authentication Standard</h2><p>SAML for enterprise sign-ins.</p><h2>Encryption</h2><p>AES-256 at rest and TLS 1.3 in transit.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-security-policy",
+      "action": "append",
+      "section_heading": "Secrets Management",
+      "old_text": null,
+      "new_text": "HashiCorp Vault is used for secrets management. All service credentials must be stored in Vault.",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

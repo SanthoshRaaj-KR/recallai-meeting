@@ -1,0 +1,30 @@
+{
+  "name": "create_page_disaster_recovery",
+  "failure_mode": "mixed",
+  "transcript_text": "Kim: We don't have a disaster recovery runbook at all. After the outage last week it's clear we need one. We need a new page covering RTO, RPO, and failover steps.\nLiam: I agree. Create a Disaster Recovery Runbook page with those sections.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-runbook",
+      "title": "Engineering Runbook",
+      "headings": ["Setup", "On-call"],
+      "content_html": "<h2>Setup</h2><p>Install dependencies.</p>"
+    },
+    {
+      "page_id": "pg-incident",
+      "title": "Incident Management",
+      "headings": ["Severity Levels"],
+      "content_html": "<h2>Severity Levels</h2><p>P0: site down. P1: degraded.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": null,
+      "action": "create_page",
+      "section_heading": null,
+      "page_title": "Disaster Recovery Runbook",
+      "new_text": "# Disaster Recovery Runbook\n\n## RTO and RPO\nRTO: 4 hours. RPO: 1 hour.\n\n## Failover Steps\n1. Identify the failure scope.\n2. Activate standby region.\n3. Redirect traffic via DNS failover.\n4. Validate service health.\n5. Notify stakeholders.",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

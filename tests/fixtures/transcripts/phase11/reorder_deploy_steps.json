@@ -1,0 +1,24 @@
+{
+  "name": "reorder_deploy_steps",
+  "failure_mode": "reorder",
+  "transcript_text": "Uma: The deploy runbook has the steps in the wrong order. The smoke test should happen before the traffic shift, not after.\nVince: Right, smoke tests first to catch issues before we shift load.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-deploy-runbook",
+      "title": "Deployment Runbook",
+      "headings": ["Deploy Steps"],
+      "content_html": "<h2>Deploy Steps</h2><ol><li>Build artifact</li><li>Shift traffic</li><li>Run smoke tests</li><li>Monitor alerts</li></ol>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-deploy-runbook",
+      "action": "edit_section",
+      "section_heading": "Deploy Steps",
+      "from_index": 2,
+      "to_index": 1,
+      "old_text": null,
+      "new_text": null
+    }
+  ]
+}

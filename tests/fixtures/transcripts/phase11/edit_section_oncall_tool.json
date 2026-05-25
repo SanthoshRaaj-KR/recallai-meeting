@@ -1,0 +1,30 @@
+{
+  "name": "edit_section_oncall_tool",
+  "failure_mode": "wrong_page",
+  "transcript_text": "Chris: We switched from PagerDuty to OpsGenie for on-call alerting last month. The on-call runbook still says PagerDuty.\nDana: Update On-call section to reflect OpsGenie.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-runbook",
+      "title": "Engineering Runbook",
+      "headings": ["On-call", "Deploy Steps"],
+      "content_html": "<h2>On-call</h2><p>On-call rotation uses PagerDuty. Escalation: L1 to L2 to Lead.</p><h2>Deploy Steps</h2><p>Run the deploy script.</p>"
+    },
+    {
+      "page_id": "pg-monitoring",
+      "title": "Monitoring",
+      "headings": ["Alerts"],
+      "content_html": "<h2>Alerts</h2><p>Grafana sends alerts via email.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-runbook",
+      "action": "edit_section",
+      "section_heading": "On-call",
+      "old_text": "PagerDuty",
+      "new_text": "OpsGenie",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

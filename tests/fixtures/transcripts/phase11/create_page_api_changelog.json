@@ -1,0 +1,24 @@
+{
+  "name": "create_page_api_changelog",
+  "failure_mode": "mixed",
+  "transcript_text": "Maya: We've been making API breaking changes with no changelog page. We need to create an API Changelog page documenting all the breaking changes since v1.\nNate: Yes, create it and add the v2 breaking changes we discussed: the auth header rename and the pagination cursor change.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-api-docs",
+      "title": "API Documentation",
+      "headings": ["Auth Header", "Rate Limits"],
+      "content_html": "<h2>Auth Header</h2><p>Pass the Bearer token in Authorization header.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": null,
+      "action": "create_page",
+      "section_heading": null,
+      "page_title": "API Changelog",
+      "new_text": "# API Changelog\n\n## v2.0 Breaking Changes\n- Auth header renamed from X-Auth-Token to Authorization: Bearer\n- Pagination switched from offset-based to cursor-based",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

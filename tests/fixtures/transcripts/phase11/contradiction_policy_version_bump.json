@@ -1,0 +1,43 @@
+{
+  "name": "contradiction_policy_version_bump",
+  "failure_mode": "contradiction",
+  "transcript_text": "Irene: The data retention policy has been updated from 90 days to 180 days. The Privacy Policy page and the Compliance Checklist both state 90 days — both need updating.\nJames: Correct, 180 days is the new standard per legal review.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-privacy",
+      "title": "Privacy Policy",
+      "headings": ["Data Retention", "User Rights"],
+      "content_html": "<h2>Data Retention</h2><p>User data is retained for 90 days after account closure.</p>"
+    },
+    {
+      "page_id": "pg-compliance-checklist",
+      "title": "Compliance Checklist",
+      "headings": ["Data Retention", "Access Controls"],
+      "content_html": "<h2>Data Retention</h2><p>Confirm 90-day retention window is enforced in all storage tiers.</p>"
+    },
+    {
+      "page_id": "pg-dpa",
+      "title": "Data Processing Agreement",
+      "headings": ["Scope"],
+      "content_html": "<h2>Scope</h2><p>This agreement covers all personal data processed on behalf of customers.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-privacy",
+      "action": "edit_section",
+      "section_heading": "Data Retention",
+      "old_text": "90 days",
+      "new_text": "180 days",
+      "group_id": "data-retention-90-to-180"
+    },
+    {
+      "page_id": "pg-compliance-checklist",
+      "action": "edit_section",
+      "section_heading": "Data Retention",
+      "old_text": "90-day",
+      "new_text": "180-day",
+      "group_id": "data-retention-90-to-180"
+    }
+  ]
+}

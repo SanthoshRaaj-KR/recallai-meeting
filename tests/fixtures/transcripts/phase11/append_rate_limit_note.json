@@ -1,0 +1,24 @@
+{
+  "name": "append_rate_limit_note",
+  "failure_mode": "mixed",
+  "transcript_text": "George: We need to document the new burst allowance in the API docs. The rate limit is 100 per minute normally, but we now allow a burst of up to 200 for the first 10 seconds.\nHelen: Add that note to the Rate Limits section in the API docs.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-api-docs",
+      "title": "API Documentation",
+      "headings": ["Auth Header", "Rate Limits", "Errors"],
+      "content_html": "<h2>Rate Limits</h2><p>The API allows 100 requests per minute per client.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-api-docs",
+      "action": "append",
+      "section_heading": "Rate Limits",
+      "old_text": null,
+      "new_text": "A burst allowance of up to 200 requests is permitted for the first 10 seconds of each minute.",
+      "from_index": null,
+      "to_index": null
+    }
+  ]
+}

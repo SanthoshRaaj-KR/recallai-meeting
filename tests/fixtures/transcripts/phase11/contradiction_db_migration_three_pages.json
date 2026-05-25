@@ -1,0 +1,51 @@
+{
+  "name": "contradiction_db_migration_three_pages",
+  "failure_mode": "contradiction",
+  "transcript_text": "Carol: We've completed the migration from MySQL to Postgres. The database runbook, the architecture doc, and the onboarding guide all still say MySQL — all three need to be updated.\nDave: Yes, Postgres is now canonical across all three pages.",
+  "confluence_workspace_pages": [
+    {
+      "page_id": "pg-db-runbook",
+      "title": "Database Runbook",
+      "headings": ["Engine", "Connection"],
+      "content_html": "<h2>Engine</h2><p>We use MySQL 8.0 as our primary database.</p>"
+    },
+    {
+      "page_id": "pg-arch",
+      "title": "Architecture Overview",
+      "headings": ["Data Layer", "Services"],
+      "content_html": "<h2>Data Layer</h2><p>MySQL handles all transactional storage.</p>"
+    },
+    {
+      "page_id": "pg-onboarding",
+      "title": "Engineer Onboarding",
+      "headings": ["Tools", "Database Access"],
+      "content_html": "<h2>Database Access</h2><p>Connect to MySQL using the credentials in 1Password.</p>"
+    }
+  ],
+  "expected_proposals": [
+    {
+      "page_id": "pg-db-runbook",
+      "action": "edit_section",
+      "section_heading": "Engine",
+      "old_text": "MySQL",
+      "new_text": "Postgres",
+      "group_id": "db-mysql-to-postgres"
+    },
+    {
+      "page_id": "pg-arch",
+      "action": "edit_section",
+      "section_heading": "Data Layer",
+      "old_text": "MySQL",
+      "new_text": "Postgres",
+      "group_id": "db-mysql-to-postgres"
+    },
+    {
+      "page_id": "pg-onboarding",
+      "action": "edit_section",
+      "section_heading": "Database Access",
+      "old_text": "MySQL",
+      "new_text": "Postgres",
+      "group_id": "db-mysql-to-postgres"
+    }
+  ]
+}
