@@ -122,7 +122,7 @@ class SectionCandidate(BaseModel):
     the retrieve stage attribute each candidate to its signal source.
     """
 
-    page_id: str
+    page_id: Optional[str] = None
     page_title: str = ""
     space_key: str = ""
     section_heading: Optional[str] = None
@@ -134,6 +134,9 @@ class SectionCandidate(BaseModel):
     # Additive fields for signal attribution and raw score tracking
     score: float = 0.0       # raw retrieval score from the originating signal
     source: str = ""         # "dense" | "lexical" | "fused"
+    # Set to True by the bounded iterate stage when no viable target was found.
+    # plan_ops routes this to create_page (RETR-V3-04 / OPS-V3-01).
+    no_existing_target: bool = False
 
 
 # ---------------------------------------------------------------------------
