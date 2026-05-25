@@ -91,7 +91,7 @@ class ChangeIntentV3(BaseModel):
     kind: ChangeIntentKind
     subject: str
     old_value: str = ""
-    new_value: str = ""
+    new_value: Optional[str] = ""
     instruction: str = ""
     target_hint: str = ""
     verbatim_content: str = ""  # for add/create (Phase 4/8 rule preserved)
@@ -168,6 +168,28 @@ class RetrievalResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# AffectedPage — one affected page/section in a ContradictionGroup
+# ---------------------------------------------------------------------------
+
+class AffectedPage(BaseModel):
+    """One workspace page/section flagged by the contradiction sweep (CON-V3-01).
+
+    ``page_id`` and ``group_id`` are always set.  ``recommended_op`` is the
+    op shape the contradiction sweep suggests (``edit_section`` by default,
+    ``archive_deprecate`` when the page is fully superseded).
+    ``low_confidence`` is True when the entailment classifier errored and the
+    page was kept with degraded certainty (recall-biased fallback).
+    """
+
+    page_id: str
+    page_title: str = ""
+    section_heading: Optional[str] = None
+    group_id: str = ""
+    recommended_op: str = "edit_section"  # "edit_section" | "archive_deprecate"
+    low_confidence: bool = False
+
+
+# ---------------------------------------------------------------------------
 # ContradictionGroup — cross-page contradiction set (CON-V3-01)
 # ---------------------------------------------------------------------------
 
@@ -178,12 +200,18 @@ class ContradictionGroup(BaseModel):
     Confluence pages, the contradiction sweep emits ONE ContradictionGroup
     carrying one ``PlannedOperation`` per affected page/section, all sharing
     the same ``group_id`` so the UI renders them as one decision (UI-V3-01).
+
+    ``affected_pages`` is the stage-5 output list (AffectedPage items with
+    page_id, group_id, recommended_op) — populated by contradict.py.
+    ``operations`` is the stage-6 output list (PlannedOperation items with
+    full content) — populated by plan_ops.py.
     """
 
     subject: str
     old_value: str
-    new_value: str
-    operations: List["PlannedOperation"]  # forward ref resolved below
+    new_value: Optional[str] = None
+    operations: List["PlannedOperation"] = Field(default_factory=list)  # forward ref
+    affected_pages: List[AffectedPage] = Field(default_factory=list)  # stage-5 output
 
 
 # ---------------------------------------------------------------------------
