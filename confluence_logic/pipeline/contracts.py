@@ -31,7 +31,7 @@ correctness requirement (EXT-V3-01: no intent without evidence span).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Literal, Optional
+from typing import TYPE_CHECKING, Any, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -153,13 +153,18 @@ class RetrievalResult(BaseModel):
     observability (RETR-V3-01: fusion must be logged/traced).  It carries the
     fused order (list of ``(doc_id, rrf_score)`` tuples) and signal metadata.
     None only when no candidates were found (empty corpus + no dense hits).
+
+    ``intent`` is Optional so test fixtures can construct ``RetrievalResult``
+    without a full intent (test isolation — unit tests for rerank/iterate only
+    need candidate data, not the driving intent).
     """
 
-    intent: ChangeIntentV3
+    intent: Optional[ChangeIntentV3] = None
     candidates: List[SectionCandidate]
     no_existing_target: bool = False
     iterations: int = 0
-    fusion_log: Optional[dict] = None  # RETR-V3-01: fused order + signal counts
+    # fusion_log accepts dict (production) or a descriptive string (test fixtures)
+    fusion_log: Optional[Any] = None  # RETR-V3-01: fused order + signal counts
 
 
 # ---------------------------------------------------------------------------
