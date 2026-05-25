@@ -15,6 +15,7 @@ pydantic
 beautifulsoup4
 pytest
 neo4j>=5.14,<6
+rank-bm25==0.2.2
 pytest-asyncio
 python-docx
 openpyxl
