@@ -103,6 +103,15 @@ _RECALL_BROWSER_IDENTITY_PREFIX = "recall-browser-"
 
 JARVIS_DEBOUNCE_SECONDS = float(os.getenv("JARVIS_DEBOUNCE_SECONDS", "0.6"))
 JARVIS_SPEECH_REWRITE_ENABLED = os.getenv("JARVIS_SPEECH_REWRITE_ENABLED", "false").strip().lower() == "true"
+
+# SPK-V3-01: opt-in Recall async diarized transcription for the post-meeting
+# pipeline (Plan 11-11).  Default OFF preserves the Phase-7 cost posture
+# (Recall transcription charges are opt-in).  Enabling re-introduces a Recall
+# async-transcription cost; agent_worker.py remains the live STT source.
+# NOTE: cost implication documented in jarvis_agentic.py user_setup block.
+JARVIS_RECALL_TRANSCRIPT_ENABLED: bool = os.getenv(
+    "JARVIS_RECALL_TRANSCRIPT_ENABLED", "0"
+) in {"1", "true", "True"}
 JARVIS_MICRO_ACK_ENABLED = os.getenv("JARVIS_MICRO_ACK_ENABLED", "true").strip().lower() == "true"
 JARVIS_MICRO_ACK_TEXT = os.getenv("JARVIS_MICRO_ACK_TEXT", "Mhm.").strip()
 JARVIS_YIELD_PHRASE = os.getenv("JARVIS_YIELD_PHRASE", "Of course \u2014 ").strip()
@@ -1130,7 +1139,7 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
         f"&room={room_name}"
     )
 
-    return {
+    payload: dict = {
         "meeting_url": meeting_url,
         "bot_name": BOT_NAME,
         "metadata": {
@@ -1147,6 +1156,23 @@ def build_create_bot_payload(meeting_url: str, session_id: Optional[str] = None)
             },
         },
     }
+
+    # SPK-V3-01 (Plan 11-11): when JARVIS_RECALL_TRANSCRIPT_ENABLED=1 the bot
+    # is provisioned with Recall's async diarized transcription so that the
+    # post-meeting pipeline can fetch a speaker-attributed transcript.  This
+    # re-introduces a Recall transcription cost (off by default — Phase-7 cost
+    # posture preserved).  The live in-meeting STT path (agent_worker.py) is
+    # NOT modified — it continues to transcribe live audio independently.
+    if JARVIS_RECALL_TRANSCRIPT_ENABLED:
+        payload["recording_config"] = {
+            "transcript": {
+                "provider": {
+                    "recallai_async": {},
+                },
+            },
+        }
+
+    return payload
 
 def create_bot(meeting_url: str, session_id: Optional[str] = None) -> Optional[str]:
     payload = build_create_bot_payload(meeting_url, session_id=session_id)
