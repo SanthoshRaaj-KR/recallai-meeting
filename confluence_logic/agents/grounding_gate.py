@@ -62,6 +62,7 @@ JARVIS_GROUNDING_GATE_ENABLED: bool = (
 STOPWORDS = _BASE_STOP | {
     "the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "with",
     "is", "are", "was", "were", "be", "been", "being",
+    "we", "our", "us", "they", "their", "he", "she", "you", "i",
     "have", "has", "had", "do", "does", "did",
     "will", "would", "should", "could", "may", "might",
     "this", "that", "these", "those", "it", "its",
