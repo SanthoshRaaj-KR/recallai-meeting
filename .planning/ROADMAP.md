@@ -15,6 +15,7 @@ This milestone builds the full end-to-end pipeline from "meeting ends" to "accep
 - [ ] **Phase 8: Auto-Generated Confluence Proposals — Quality, Accept Reliability, UI Clarity, Tests** - Honor user-spoken verbatim_content in the post-meeting create-fallback; sharpen explicit-create detection; tighten page qualifier + verifier; make Accept resilient with real error messages and a regenerate-from-current-page recovery; redesign the proposal card to show page + one-line change_summary + default-visible diff; ship a 3-layer test plan (unit + e2e quality eval + manual UAT). In-meeting "Hey Jarvis" voice path and the editor agent are LOCKED out of scope.
 - [ ] **Phase 9: Merge LiveKit Voice Path + Confluence Q&A Pipeline into Master** - Consolidate the `master` branch (LiveKit-based fast voice answering via `agent_worker.py` / `agent_bridge.py` / `static/bot.html` / AssemblyAI + sonic-turbo) with the `confluence` branch (ConfluenceQAAgent, auto-proposal pipeline, Phase 7 + 8 work, Phase 8 UI redesign in `sync-sage-bot`) on a new `omg_merged` branch off master. No underlying logic in either feature set is rewritten — both are preserved and integrated.
 - [ ] **Phase 10: Auto-Propose Pipeline Quality Redesign v2** - Redesign the post-meeting Confluence proposal pipeline end-to-end to eliminate four observed failure modes: (1) hallucinated changes referencing pages or words that don't exist, (2) flow-destroying edits that scramble ordered procedures, (3) ProposalCards that don't communicate what's changing, (4) missed obvious edits and edits routed to wrong pages. EditorAgent is LOCKED as the apply layer — it works correctly when given `do X in Y page`. The redesign builds the upstream pipeline that produces those well-formed `(X, Y)` pairs: a stricter page-router with verbatim grounding, a structure-aware editor that operates on a parsed page tree (heading/list/step nodes) instead of regenerating prose, a hard token-grounding gate, and a redesigned ProposalCard with inline word-level diff, plain-English change summary, page-context header, and one-click Confluence preview.
+- [ ] **Phase 11: Meeting → Confluence Maintenance Pipeline — Production Redesign v3** - A first-principles, production-grade rebuild of the transcript→Confluence pipeline that replaces Phase 10's per-`(intent,page)` fan-out and the 5,327-line `review/api.py` orchestration monolith. Decompose into a typed, observable `confluence_logic/pipeline/` package: structured fact/decision extraction → hybrid (dense+lexical) retrieval with reranking and section-level hierarchical targeting → bounded agentic iterative retrieval for hard intents → contradiction/stale detection across pages → hard grounding + calibrated confidence gate → operation planning that emits an *exact* instruction (`edit-section | append | create-page | archive`) → handoff to the existing **EditorAgent (reused, unchanged)** which executes the mechanical change. Plus apply-time safety (HITL, version/anchor preflight, regenerate-against-live, archive-not-hard-delete), an evolved review UI, and an offline eval + per-stage observability harness. Phase 10 components (page_router, page_qualifier, structure_aware_drafter, grounding_gate, editor_dispatcher, drafter, fact_extraction) are **free to be replaced** where a better architecture exists; `editor_agent.py` is the locked apply layer.
 
 ## Phase Details
 
@@ -98,7 +99,7 @@ Plans:
 
 ## Progress
 
-**Execution Order:** 1 → 2 → 3 → 4 → 5 → 7 → 8 → 9 → 10
+**Execution Order:** 1 → 2 → 3 → 4 → 5 → 7 → 8 → 9 → 10 → 11
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -110,7 +111,8 @@ Plans:
 | 7. Confluence Document Q&A Agent | 2/2 | Complete | 2026-05-17 |
 | 8. Auto-Generated Proposals — Quality, Accept, UI, Tests | 0/5 | Superseded by Phase 10 | - |
 | 9. Merge LiveKit + Confluence Branches | 0/0 | Awaiting plans | - |
-| 10. Auto-Propose Pipeline Quality Redesign v2 | 1/9 | Executing (Wave 0 RED scaffolds landed) | - |
+| 10. Auto-Propose Pipeline Quality Redesign v2 | 9/9 | Complete | 2026-05-23 |
+| 11. Meeting → Confluence Pipeline Production Redesign v3 | 8/11 | In Progress|  |
 
 ### Phase 7: Confluence Document Q&A Agent
 **Goal**: A voice query like "hey Jarvis, when is SOC2 coming?" is correctly classified as a Confluence read question, routed to a new `ConfluenceQAAgent` (OpenAI Agents SDK), answered via Pinecone-first semantic retrieval with live Confluence REST fallback, and spoken back — without touching the edit/proposal pipeline
@@ -210,5 +212,49 @@ Plans:
 - [ ] 10-07-PLAN.md — Orchestrator rewire in _run_pipeline + Regenerate endpoint + verifier slimming + connector ancestors/space expand (Wave 3, PROP-V2-01..03, 05, 06)
 - [ ] 10-08-PLAN.md — ProposalCardV2 + wordDiff util + Regenerate UI wire (Wave 4, PROP-V2-04 + 05)
 - [ ] 10-09-PLAN.md — e2e quality scorecard + 20 golden transcript fixtures (Wave 4, PROP-V2-07)
+
+### Phase 11: Meeting → Confluence Maintenance Pipeline — Production Redesign v3
+**Goal**: After any meeting, the system produces a small, trustworthy set of Confluence proposal cards by running a typed, observable, multi-stage agentic pipeline — and every accepted card becomes an *exact* instruction handed to the existing EditorAgent, which performs the mechanical change. The pipeline reliably (1) extracts final-state decisions/facts/actions from the transcript with verbatim evidence, (2) retrieves the structurally-correct target page *and section* via hybrid (dense + lexical) retrieval, reranking, and bounded agentic iterative search, (3) detects contradictions and stale information across the workspace (the canonical "SOC2 is Q3 on two pages but the meeting said Q2" case surfaces a proposal for *every* affected location), (4) passes a hard grounding gate so zero cards reference a non-existent page or an unsupported token, with a calibrated confidence score, (5) plans the exact operation — edit-section / append / create-page / archive-deprecate — and hands EditorAgent an unambiguous `(operation, page, content)` instruction, (6) applies changes safely (per-card HITL approval, version + section-anchor preflight, regenerate-against-live, archive-not-hard-delete, post-apply reindex), (7) presents a clean review UI, and (8) is measured by an offline eval harness + per-stage observability. The redesign replaces Phase 10's per-`(intent,page)` fan-out and lifts pipeline orchestration out of the 5,327-line `review/api.py` into a dedicated, unit-testable `confluence_logic/pipeline/` package.
+**Depends on**: Phase 5 (safe apply primitives), Phase 10 (the code being replaced lives here; EditorAgent + tools.py + ProposalCardV2 are reused/evolved)
+**Requirements**: EXT-V3-01, RETR-V3-01, RETR-V3-02, RETR-V3-03, RETR-V3-04, CON-V3-01, GND-V3-01, OPS-V3-01, EDIT-V3-01, SAFE-V3-01, UI-V3-01, OBS-V3-01, ARCH-V3-01, SPK-V3-01
+**Model ceiling** (LOCKED, per user 2026-05-24): no model larger than **GPT-5-mini**. Workers/extraction/drafting → `gpt-5-mini`; routing/classification → `gpt-5.4-nano`; orchestration/verification → `gpt-5-mini` (do NOT exceed it — overrides the prior `gpt-5.4-mini` orchestrator/verifier assignment for this phase).
+**Scope Lock** (MUST NOT be modified):
+  - `confluence_logic/agents/editor_agent.py` — the apply layer. It is *reused unchanged*; Phase 11's job is to hand it an exact instruction (correct page + exact operation + exact content). Do not rewrite the editor.
+  - `confluence_logic/agents/confluence_qa_agent.py` — Phase 7 read-query agent, unrelated.
+  - `agent_worker.py` / `agent_bridge.py` / `static/bot.html` — LiveKit voice path.
+  - In-meeting "Hey Jarvis" voice path in `jarvis_agentic.py`.
+  - `local_office_logic/` — out of scope.
+**Free to Replace** (per user decision 2026-05-24 — "new phase, free to replace"): `agents/page_router.py`, `agents/page_qualifier.py`, `agents/structure_aware_drafter.py`, `agents/grounding_gate.py`, `agents/page_parser.py`, `agents/editor_dispatcher.py`, `agents/drafter_agent.py`, `agents/fact_extraction_agent.py`, and the pipeline-orchestration code inside `review/api.py`. Reuse what is genuinely good; redesign or delete the rest. Retrieval infrastructure (Pinecone + Neo4j) is open to augmentation (e.g., a lexical/BM25 index, a reranker) if research shows a material recall/precision gain.
+**Failure Modes Being Eliminated** (Phase 10 shipped a redesign that still fails sometimes, per user 2026-05-24):
+  1. Residual hallucination / wrong-page targeting under harder or multi-topic transcripts.
+  2. Missed contradictions — a fact changed in the meeting is updated on one page but the same stale fact is left on other pages.
+  3. Brittle, hard-to-maintain orchestration — a 5,327-line `review/api.py` with stage logic inline makes regressions easy and testing hard.
+  4. Apply-time fragility and unclear cards under edge operations (reorder, create, archive).
+**Success Criteria** (what must be TRUE):
+  1. **Grounding** — On the golden eval set, 0% of persisted cards reference a `page_id` absent from the user's `confluence_page_graph`/REST, and 0% contain an additive token absent from `{transcript ∪ current page content}` (replace-target text must exist in current page content). Each card carries a calibrated confidence; sub-threshold cards are suppressed or explicitly flagged, never silently shipped.
+  2. **Contradiction recall** — The canonical scenario (a fact stated one way in the meeting, written the old way on N pages) produces a proposal for **every** affected page/section (recall = 100% on the contradiction fixtures), grouped as one logical decision in the UI rather than N disconnected cards.
+  3. **Targeting** — Retrieval+routing surfaces the structurally-correct target page AND section for ≥90% of explicit subject mentions across ≥20 golden fixtures; zero wrong-page proposals reach the UI (precision: no card routed to a page with no semantic relationship to the change subject).
+  4. **Retrieval quality** — The hybrid (dense+lexical) + rerank + hierarchical retrieval stage measurably beats the Phase 10 vector+graph router on the eval harness (recall@k and precision reported side-by-side); no regression versus Phase 10 on any fixture class.
+  5. **Operation exactness + editor handoff** — Every accepted card resolves to exactly one EditorAgent instruction of an exact shape (edit-section / append / create-page / archive), specifying the resolved page and the exact content; EditorAgent applies it with **zero changes to its own code**, and reports success only when the underlying commit/create/delete tool returns `success=true`. All four operation classes are exercised on the fixture set.
+  6. **Apply safety** — A card generated against a now-stale page regenerates against the live page on demand and still passes every grounding rule; deprecation defaults to archive/label (never hard-delete) unless the user explicitly confirms a hard delete; after a successful apply the page is reindexed in Pinecone + Neo4j within the same session.
+  7. **Maintainability** — Pipeline stages live in `confluence_logic/pipeline/` with typed, individually unit-tested stage contracts (input/output Pydantic models); `review/api.py` no longer contains stage logic (it wires HTTP/SSE to the pipeline package). Each stage is testable in isolation without standing up the whole pipeline.
+  8. **Observability + evaluation** — Every run emits per-stage structured traces (latency, candidate counts, drop reasons + which gate dropped them, confidence) consumable by the SSE stream and the logs; an offline eval harness over the golden transcripts runs in CI and prints a scorecard for extraction quality, targeting recall/precision, hallucination rate, contradiction recall, and end-to-end card clarity.
+  9. **Speaker attribution** — When Recall.ai diarized transcription is enabled, the pipeline sources a transcript whose utterances carry real participant names (`JohnDoe:`), and extracted decisions/action-items attribute owners to the correct speaker; when disabled/unavailable it falls back cleanly to the current `Meeting:`-labelled log without crashing. The live LiveKit voice path (`agent_worker.py`) is unchanged.
+**Plans**: 11 plans across 7 waves (see plan list below)
+
+Plans:
+- [x] 11-01-PLAN.md — Wave 0 RED test scaffolds + ≥20 golden fixtures (incl. ≥5 contradiction) + FIX-01 neo4j pin (Wave 1)
+- [x] 11-02-PLAN.md — `confluence_logic/pipeline/` package: typed contracts + context + StageTrace + orchestrator skeleton (Wave 2, ARCH-V3-01, OBS-V3-01)
+- [x] 11-03-PLAN.md — Retrieval stage: dense ⊕ BM25 → RRF → (page_id, section) resolution (Wave 3, RETR-V3-01/02)
+- [x] 11-04-PLAN.md — Extraction stage: transcript → typed final-state ChangeIntentV3 with verbatim evidence offsets (Wave 3, EXT-V3-01)
+- [x] 11-05-PLAN.md — Rerank + bounded agentic iterative retrieval (Wave 4, RETR-V3-03/04)
+- [x] 11-06-PLAN.md — Contradiction stage + operation planning + hard grounding/confidence gate (Wave 4, CON-V3-01, OPS-V3-01, GND-V3-01)
+- [ ] 11-07-PLAN.md — EditorInstruction builder + apply safety (preflight/regenerate/archive/reindex) (Wave 5, EDIT-V3-01, SAFE-V3-01)
+- [ ] 11-08-PLAN.md — Orchestrator wire-up in `pipeline/` + `review/api.py` reduced to HTTP/SSE (Wave 6, ARCH-V3-01, OBS-V3-01)
+- [x] 11-09-PLAN.md — ProposalCardV3 UI: contradiction grouping + confidence + diff (Wave 3, UI-V3-01)
+- [ ] 11-10-PLAN.md — e2e v3 quality scorecard + contradiction-recall metrics (Wave 7, OBS-V3-01)
+- [x] 11-11-PLAN.md — Speaker-attributed transcript source stage (Recall diarized fetch, killswitch, fallback) (Wave 2, SPK-V3-01)
+
+
 
 
