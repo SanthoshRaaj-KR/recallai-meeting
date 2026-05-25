@@ -77,6 +77,25 @@
 - **PROP-V2-06**: EditorAgent boundary preserved — Phase 10 must NOT modify `editor_agent.py`. Every proposal card passes EditorAgent a structured instruction of the form `{action, page_id, section_heading, old_text, new_text}` (or `{action: "reorder", page_id, section_heading, from_index, to_index}` for moves), and EditorAgent's existing apply semantics handle the rest.
 - **PROP-V2-07**: Quality scorecard — a `tests/e2e_proposal_quality_v2_eval.py` runs the 20+ golden transcript fixtures through the full pipeline and scores hallucination rate, targeting recall/precision, structure preservation, and card-clarity heuristics. Scorecard must hit hallucination = 0%, targeting recall ≥ 90%, structure preservation = 100% on ordered procedures.
 
+### Meeting → Confluence Maintenance Pipeline — Production Redesign v3 (Phase 11)
+
+First-principles rebuild. Phase 10 components are free to be replaced; `editor_agent.py` is reused unchanged as the apply layer. Model ceiling for this phase is **GPT-5-mini** (no larger), per user 2026-05-24.
+
+- **EXT-V3-01**: Structured extraction — the transcript is parsed into typed `ChangeIntent` records (decision / fact-update / action-item / new-workstream / deprecation), each carrying the **final resolved state** (reversals and re-decisions collapse to the last-agreed value), a normalized dedup key, and **verbatim evidence spans with character offsets** into the transcript. No intent is emitted without at least one evidence span.
+- **RETR-V3-01**: Hybrid retrieval — per intent, candidate pages/sections are retrieved by **both** dense semantic search (embeddings) **and** lexical/keyword search (BM25 or equivalent), then fused (e.g., Reciprocal Rank Fusion). Neither signal is silently skipped; the fusion is deterministic and logged.
+- **RETR-V3-02**: Hierarchical / section-level targeting — retrieval resolves to page→section nodes, not whole pages. The pipeline knows *which heading/section* an edit lands in before drafting, and can target the correct section on a multi-section page.
+- **RETR-V3-03**: Reranking — fused candidates pass through a reranking stage (cross-encoder or LLM-based relevance scoring) that reorders by true relevance to the intent before any drafting/operation planning; only top-k reranked candidates proceed.
+- **RETR-V3-04**: Agentic iterative retrieval — for low-confidence intents (no strong candidate after fusion+rerank), a **bounded** retrieval loop reformulates the query and retries up to a capped number of iterations, and can conclude "no existing target" (→ create-page path) rather than forcing a wrong-page edit. The loop is bounded to protect latency/cost.
+- **CON-V3-01**: Contradiction & stale-information detection — the pipeline detects, for each factual decision, **every** location in the workspace that states the fact the old way (transcript↔page and page↔page), and groups them as one logical decision. The canonical "SOC2 Q3 on two pages, meeting says Q2" case yields a proposal for both pages, surfaced together. Stale/outdated pages no longer referenced by current work are flagged for archive/deprecate review.
+- **GND-V3-01**: Hard grounding gate + calibrated confidence — zero cards persist whose `page_id` is unverifiable (absent from `confluence_page_graph` and REST) or whose content contains tokens unsupported by `{transcript ∪ current page content}` (additive) / `current page content` (replace target). Every card carries a calibrated confidence; sub-threshold cards are suppressed or flagged with the reason, never silently shipped.
+- **OPS-V3-01**: Operation planning — each surviving (intent, target) resolves to exactly one exact operation: `edit_section` (replace exact old text with new), `append` (add node to a section), `create_page` (structured new page for a new project/framework/workstream), or `archive_deprecate` (label/archive, default over hard-delete). The operation specifies the resolved page, section, and exact content. Ambiguous operations are not emitted.
+- **EDIT-V3-01**: Editor handoff — `EditorAgent` is the **sole apply mechanism** and is **not modified**. On accept, the pipeline hands EditorAgent an unambiguous instruction encoding `{operation, page (title + id), section, exact content}` such that EditorAgent's existing search→fetch→preview→commit specialists execute the change without asking questions. Success is reported only when the underlying commit/create/delete tool returns `success=true`.
+- **SAFE-V3-01**: Apply-time safety — per-card HITL approval (no edit without explicit accept); section-anchor + page-version preflight before commit; **regenerate-against-live** when the page changed since drafting; deprecation defaults to archive/label (hard-delete requires an explicit second confirmation); accepted pages are reindexed in Pinecone + Neo4j within the same session.
+- **UI-V3-01**: Review experience — proposal cards (evolving `ProposalCardV2`) render, before any click: page title + URL + breadcrumb, target section, change-type pill, ≤120-char plain-English summary, word-level or structure-level diff, confidence + evidence, and **contradiction grouping** (related cards for the same decision shown together). No essential info hidden behind expanders.
+- **OBS-V3-01**: Observability + evaluation — every pipeline run emits per-stage structured traces (latency, candidate counts in/out, drop reason + which gate dropped each, confidence) over the SSE stream and logs; an offline eval harness over ≥20 golden transcript fixtures runs in CI and prints a scorecard: extraction quality, targeting recall/precision, hallucination rate, contradiction recall, end-to-end card clarity. Phase 10's e2e scorecard is the baseline to beat (no regression).
+- **ARCH-V3-01**: Modularization — pipeline-orchestration logic moves out of `review/api.py` into a dedicated `confluence_logic/pipeline/` package with typed stage contracts (Pydantic input/output models per stage). `review/api.py` is reduced to HTTP/SSE wiring. Each stage is unit-testable in isolation; killswitch env flags allow falling back to the Phase 10 path during rollout.
+- **SPK-V3-01**: Speaker-attributed transcript source — the post-meeting pipeline sources a transcript whose utterances carry **real participant names** (e.g., `JohnDoe: …`), not the generic `Meeting:` label produced by the Phase-7 LiveKit mixed-audio STT path. A new pipeline transcript-source stage fetches Recall.ai's own diarized transcript (`participant.name` per utterance) when enabled (killswitch `JARVIS_RECALL_TRANSCRIPT_ENABLED`, default off to preserve the Phase-7 cost posture), normalizes it into `participant`-attributed entries, and **falls back** to the existing `transcript_log` (speaker=`Meeting`) when the Recall transcript is unavailable or the killswitch is off. Extracted decisions/action-items attribute owners to the real speaker when attribution is present. **Scope:** does NOT modify `agent_worker.py` / the live LiveKit voice path; only bot-provisioning config (`recording_config`, killswitch-gated) and the new in-scope pipeline stage. *(Added 2026-05-25 from a user-reported bug: the agent receives "Meeting: <dialogue>" instead of per-person attribution.)*
+
 ## Out of Scope
 
 | Feature | Reason |
@@ -129,11 +148,26 @@
 | APPLY-01 | Phase 5 | Pending |
 | APPLY-02 | Phase 5 | Pending |
 | APPLY-03 | Phase 5 | Pending |
+| EXT-V3-01 | Phase 11 | Planning |
+| RETR-V3-01 | Phase 11 | Planning |
+| RETR-V3-02 | Phase 11 | Planning |
+| RETR-V3-03 | Phase 11 | Planning |
+| RETR-V3-04 | Phase 11 | Planning |
+| CON-V3-01 | Phase 11 | Planning |
+| GND-V3-01 | Phase 11 | Planning |
+| OPS-V3-01 | Phase 11 | Planning |
+| EDIT-V3-01 | Phase 11 | Planning |
+| SAFE-V3-01 | Phase 11 | Planning |
+| UI-V3-01 | Phase 11 | Planning |
+| OBS-V3-01 | Phase 11 | TraceBus shell complete (Plan 11-02); full stage wiring Wave 3 |
+| ARCH-V3-01 | Phase 11 | Pipeline shell complete (Plan 11-02); stages Wave 3, orchestrator Wave 4 |
+| SPK-V3-01 | Phase 11 | Planning |
 
 **Coverage:**
 - v1 requirements: 24 total
 - Mapped to phases: 24
 - Unmapped: 0 ✓
+- v3 (Phase 11) requirements: 14 total — all mapped to Phase 11
 
 ---
 *Requirements defined: 2026-05-11*

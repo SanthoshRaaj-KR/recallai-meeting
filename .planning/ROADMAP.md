@@ -112,7 +112,7 @@ Plans:
 | 8. Auto-Generated Proposals — Quality, Accept, UI, Tests | 0/5 | Superseded by Phase 10 | - |
 | 9. Merge LiveKit + Confluence Branches | 0/0 | Awaiting plans | - |
 | 10. Auto-Propose Pipeline Quality Redesign v2 | 9/9 | Complete | 2026-05-23 |
-| 11. Meeting → Confluence Pipeline Production Redesign v3 | 8/11 | In Progress|  |
+| 11. Meeting → Confluence Pipeline Production Redesign v3 | 9/11 | In Progress|  |
 
 ### Phase 7: Confluence Document Q&A Agent
 **Goal**: A voice query like "hey Jarvis, when is SOC2 coming?" is correctly classified as a Confluence read question, routed to a new `ConfluenceQAAgent` (OpenAI Agents SDK), answered via Pinecone-first semantic retrieval with live Confluence REST fallback, and spoken back — without touching the edit/proposal pipeline
@@ -249,7 +249,7 @@ Plans:
 - [x] 11-04-PLAN.md — Extraction stage: transcript → typed final-state ChangeIntentV3 with verbatim evidence offsets (Wave 3, EXT-V3-01)
 - [x] 11-05-PLAN.md — Rerank + bounded agentic iterative retrieval (Wave 4, RETR-V3-03/04)
 - [x] 11-06-PLAN.md — Contradiction stage + operation planning + hard grounding/confidence gate (Wave 4, CON-V3-01, OPS-V3-01, GND-V3-01)
-- [ ] 11-07-PLAN.md — EditorInstruction builder + apply safety (preflight/regenerate/archive/reindex) (Wave 5, EDIT-V3-01, SAFE-V3-01)
+- [x] 11-07-PLAN.md — EditorInstruction builder + apply safety (preflight/regenerate/archive/reindex) (Wave 5, EDIT-V3-01, SAFE-V3-01)
 - [ ] 11-08-PLAN.md — Orchestrator wire-up in `pipeline/` + `review/api.py` reduced to HTTP/SSE (Wave 6, ARCH-V3-01, OBS-V3-01)
 - [x] 11-09-PLAN.md — ProposalCardV3 UI: contradiction grouping + confidence + diff (Wave 3, UI-V3-01)
 - [ ] 11-10-PLAN.md — e2e v3 quality scorecard + contradiction-recall metrics (Wave 7, OBS-V3-01)
