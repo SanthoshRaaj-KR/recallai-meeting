@@ -778,76 +778,14 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
 
                 proposals.append(_op_to_proposal_card(op, intent, gate_result))
 
-        # The block above has handled all non-contradiction per-candidate work.
-        # Mark every intent as handled so the old top-candidate loop below stays
-        # inert while contradiction card conversion still runs afterwards.
-        intents_handled_by_contradiction.update(id(intent) for intent, _ in intent_candidate_pairs)
-
-        for intent, candidates in intent_candidate_pairs:
-            if id(intent) in intents_handled_by_contradiction:
-                continue
-            if not candidates:
-                logger.info(
-                    "run: no candidates for intent=%r — skipping plan_ops",
-                    getattr(intent, "subject", "?"),
-                )
-                continue
-
-            # Use the top candidate (after rerank)
-            top_candidate = candidates[0]
-
-            try:
-                op = await plan_operation(intent, top_candidate)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "run: plan_operation failed for intent=%r: %s — skipping",
-                    getattr(intent, "subject", "?"), exc,
-                )
-                op = None
-
-            if op is None:
-                logger.info(
-                    "run: plan_operation returned None for intent=%r — no card emitted",
-                    getattr(intent, "subject", "?"),
-                )
-                continue
-
-            planned_count += 1
-
-            # Stage 7: grounding gate
-            try:
-                gate_result = await apply_grounding_gate_v3(
-                    op,
-                    transcript_text=transcript_text,
-                    current_page_content="",
-                    user_id=ctx.graph_user_id,
-                    retrieval_score=top_candidate.rerank_score or top_candidate.rrf_score or 0.0,
-                    is_fact_update=(intent.kind in ("fact_update", "deprecation")),
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "run: apply_grounding_gate_v3 failed for intent=%r: %s — treating as dropped",
-                    getattr(intent, "subject", "?"), exc,
-                )
-                dropped_count += 1
-                continue
-
-            if gate_result.is_dropped and not gate_result.is_flagged:
-                dropped_count += 1
-                logger.info(
-                    "run: gate dropped card for intent=%r gate=%s reasons=%s",
-                    getattr(intent, "subject", "?"),
-                    gate_result.gate,
-                    gate_result.drop_reasons,
-                )
-                continue
-
-            # Build and collect ProposalCardV3
-            card = _op_to_proposal_card(op, intent, gate_result)
-            proposals.append(card)
-
         # Also convert contradiction_ops to cards (gate applied separately)
-        for op, _source_intent in contradiction_ops:
+        for op, c_intent in contradiction_ops:
+            op_key = _op_key(c_intent, op)
+            if op_key in emitted_op_keys:
+                dropped_count += 1
+                continue
+            emitted_op_keys.add(op_key)
+
             planned_count += 1
             page_html = _page_html_for_id(op.page_id, workspace_pages)
             try:
@@ -856,7 +794,9 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
                     transcript_text=transcript_text,
                     current_page_content=page_html,
                     user_id=ctx.graph_user_id,
-                    retrieval_score=0.5,
+                    # Contradiction detection is a verbatim old_value match — stronger
+                    # signal than semantic retrieval, so score above the 0.5 midpoint.
+                    retrieval_score=0.75,
                     is_fact_update=True,  # contradiction ops are always fact_update-grade
                 )
             except Exception as exc:  # noqa: BLE001
@@ -871,25 +811,7 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
                 dropped_count += 1
                 continue
 
-            # Find the closest intent for evidence spans (use first fact_update)
-            best_intent = next(
-                (
-                    intent
-                    for intent, _ in intent_candidate_pairs
-                    if intent.kind in ("fact_update", "deprecation")
-                ),
-                None,
-            )
-            if best_intent is None:
-                # Construct a minimal proxy intent for the card builder
-                from confluence_logic.pipeline.contracts import EvidenceSpan
-                best_intent = ChangeIntentV3(
-                    kind="fact_update",
-                    subject=op.page_title,
-                    evidence=[EvidenceSpan(text=op.rationale or "")],
-                )
-
-            card = _op_to_proposal_card(op, best_intent, gate_result)
+            card = _op_to_proposal_card(op, c_intent, gate_result)
             proposals.append(card)
 
         _stage_end(
