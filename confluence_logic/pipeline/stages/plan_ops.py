@@ -164,6 +164,13 @@ async def _fill_content(
     if not fallback or not fallback.strip():
         fallback = f"Updated: {intent.subject}"
 
+    # Detect deletion intents (remove/delete with no replacement value) and return
+    # empty content immediately — no LLM call, no risk of duplicating surrounding content.
+    instruction_lower = (intent.instruction or "").lower()
+    is_removal = any(kw in instruction_lower for kw in ("remove", "delete", "eliminate", "discard", "take out"))
+    if is_removal and not (intent.new_value or "").strip() and not (intent.verbatim_content or "").strip():
+        return ""
+
     try:
         import openai  # lazy import
         from confluence_logic.pipeline.model_config import MODEL_WORKER
@@ -175,12 +182,25 @@ async def _fill_content(
         )
         prompt = (
             f"Operation: {operation}\n"
+            f"Page: {candidate.page_title or 'unknown'}\n"
+            f"Section: {section_heading or '(whole page)'}\n"
             f"Subject: {intent.subject}\n"
             f"Old value: {intent.old_value or '(none)'}\n"
             f"New value: {intent.new_value or intent.verbatim_content or '(none)'}\n"
             f"Rationale: {intent.instruction}\n"
-            f"Current section text: {section_ctx[:600]}\n\n"
-            f"Write the updated content for the section. Be concise and factual."
+            f"Current section content:\n{section_ctx[:600]}\n\n"
+            "CRITICAL FORMAT RULE: Match the FORMAT STYLE of the existing content (short phrase, "
+            "list, or paragraph) but include ALL new facts from 'New value' and 'Rationale'.\n"
+            "- If new_value and rationale together mention multiple pieces of info (e.g. a quarter "
+            "AND a date), combine them naturally: e.g. old='Q3', new='Q4', rationale mentions "
+            "'December 26' → output 'Q4 (December 26)', NOT just 'Q4' and NOT just 'December 26'.\n"
+            "- Match the style: short phrase stays short phrase, list stays list, paragraph stays paragraph.\n"
+            "- NEVER write an explanatory sentence like 'X has been moved to Y' or 'The deadline is now Z'.\n"
+            "- NEVER omit any fact from New value or Rationale that the existing content was capturing.\n"
+            "- NEVER copy or repeat content from outside the current section shown above.\n"
+            "Write ONLY the updated section content using ONLY facts, names, numbers, and terminology "
+            "from New value, Rationale, or Current section content above. "
+            "Do NOT introduce concepts, details, or claims not stated above."
         )
         response = await client.chat.completions.create(
             model=MODEL_WORKER,

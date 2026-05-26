@@ -274,6 +274,12 @@ class ChangeItem(BaseModel):
     page_url: Optional[str] = None
     # Stable HTML anchor for the section heading (D-07 "In section: «X»").
     section_heading_anchor: Optional[str] = None
+    # --- Phase 11 v3 proposal fields (additive; safe defaults) ---
+    operation_action: Optional[str] = None
+    group_id: Optional[str] = None
+    confidence_score: Optional[float] = None
+    confidence_bin: Optional[Literal["high", "medium", "low"]] = None
+    dedup_key: Optional[str] = None
 
 
 def _bearer_token(authorization: Optional[str]) -> str:
@@ -2394,6 +2400,48 @@ async def _execute_pipeline_proposal(proposal_id: str, session_id: str) -> Dict[
     page_title_for_lock = proposal.get("page_title") or ""
     lock = _page_lock(page_id, page_title_for_lock)
 
+    v3_op = _planned_operation_from_v3_proposal(proposal)
+    if v3_op is not None:
+        supabase_store.update_proposal_status(proposal_id, "executing")
+        try:
+            user_id = proposal.get("user_id")
+            graph_user_id = _confluence_graph_user_id(
+                {"id": user_id} if user_id else None,
+                session_id,
+            )
+            from confluence_logic.pipeline.apply import apply_proposal  # noqa: PLC0415
+
+            async with lock:
+                apply_result = await apply_proposal(
+                    v3_op,
+                    session_id=session_id,
+                    user_id=graph_user_id,
+                    confirm_hard_delete=False,
+                )
+            supabase_store.update_proposal_status(
+                proposal_id, "executed" if apply_result.success else "failed"
+            )
+            return {
+                "success": apply_result.success,
+                "message": apply_result.message or (
+                    "Change applied to Confluence."
+                    if apply_result.success
+                    else "Change could not be applied."
+                ),
+            }
+        except BaseException as exc:
+            logger.exception(
+                "Unhandled error executing v3 proposal '%s' — marking as failed",
+                proposal_id,
+            )
+            try:
+                supabase_store.update_proposal_status(proposal_id, "failed")
+            except Exception:
+                pass
+            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                raise
+            return {"success": False, "message": f"Execution error: {exc}"}
+
     editor_answer: Optional[str] = None
     editor_failed = False
     # CR-01: track the success/failure terminal state so the try/except below
@@ -2749,6 +2797,14 @@ async def get_review_changes_for_session(
     state = _get_meeting_state(session_id)
     history_item, user = _history_item_for_request(session_id, authorization)
     _hydrate_state_from_history_item(state, history_item, user)
+    if user:
+        persisted = await asyncio.to_thread(
+            supabase_store.list_proposals_for_session,
+            user["id"],
+            session_id,
+        )
+        if persisted:
+            return [_proposal_row_to_change_item(row) for row in persisted]
     pending: List[Dict[str, Any]] = state.get("pending_changes", [])
     return pending
 
@@ -4648,6 +4704,50 @@ async def _draft_qualified_phase10(
 # Phase 11 v3 pipeline background-task wrapper (ARCH-V3-01)
 # ---------------------------------------------------------------------------
 
+_V3_TO_LEGACY_OPERATION = {
+    "edit_section": "replace",
+    "append": "insert_after",
+    "create_page": "create_page",
+    "archive_deprecate": "delete_section",
+}
+
+
+def _legacy_operation_for_v3(operation: Optional[str]) -> Optional[str]:
+    return _V3_TO_LEGACY_OPERATION.get((operation or "").strip())
+
+
+def _proposal_row_to_change_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a persisted proposals row to the frontend ChangeItem shape."""
+    out = dict(row)
+    out["id"] = str(row.get("id") or "")
+    out["timestamp"] = row.get("created_at") or row.get("timestamp") or _utc_now_iso()
+    if not out.get("operation_action") and out.get("operation_type"):
+        out["operation_action"] = out.get("operation_type")
+    if not out.get("confidence_bin") and out.get("confidence"):
+        out["confidence_bin"] = out.get("confidence")
+    return out
+
+
+def _planned_operation_from_v3_proposal(row: Dict[str, Any]):
+    """Reconstruct a v3 PlannedOperation, or return None for legacy rows."""
+    raw_action = (row.get("operation_action") or "").strip()
+    if raw_action not in _V3_TO_LEGACY_OPERATION:
+        return None
+    from confluence_logic.pipeline.contracts import PlannedOperation  # noqa: PLC0415
+
+    return PlannedOperation(
+        operation=raw_action,  # type: ignore[arg-type]
+        page_id=row.get("page_id"),
+        page_title=row.get("page_title") or "",
+        space_key=row.get("space_key"),
+        section_heading=row.get("section_heading"),
+        before_content=row.get("before_content"),
+        after_content=row.get("after_content"),
+        rationale=row.get("rationale") or row.get("verifier_note") or "",
+        group_id=row.get("group_id"),
+    )
+
+
 async def _run_pipeline_v3(
     session_id: str,
     job_id: str,
@@ -4678,18 +4778,17 @@ async def _run_pipeline_v3(
     import confluence_logic.pipeline.run as _pipeline_run  # noqa: PLC0415
 
     try:
+        # Create TraceBus and wire it to the SSE queue BEFORE any _emit call.
+        # Use setdefault so an SSE consumer that connected first isn't overwritten.
+        trace_bus = TraceBus()
+        q = _job_queues.setdefault(job_id, asyncio.Queue())
+        trace_bus._queues[job_id] = q  # type: ignore[attr-defined]
+
         await asyncio.to_thread(
             supabase_store.update_pipeline_job,
             job_id, "transcript_source", "running", None, None,
         )
         _emit(job_id, {"type": "stage_start", "stage": "transcript_source"})
-
-        # Build TraceBus and register the SSE queue for this job.
-        trace_bus = TraceBus()
-        q = asyncio.Queue()
-        _job_queues[job_id] = q
-        # Wire TraceBus so it emits directly to the job queue.
-        trace_bus._queues[job_id] = q  # type: ignore[attr-defined]
 
         ctx = PipelineContext(
             session_id=session_id,
@@ -4704,30 +4803,59 @@ async def _run_pipeline_v3(
         proposals = await _pipeline_run.run(ctx)
 
         # Persist proposals incrementally, idempotent by (session_id, dedup_key)
+        persisted_count = 0
         for card in proposals:
             try:
-                await asyncio.to_thread(
-                    supabase_store.upsert_proposal,
-                    {
-                        "session_id": session_id,
-                        "user_id": user_id,
-                        "dedup_key": card.group_id or f"{card.page_id}:{card.section_heading}",
-                        "change_type": card.change_type or "edit",
-                        "page_id": card.page_id,
-                        "page_title": card.page_title,
-                        "section_heading": card.section_heading,
-                        "before_content": card.before_content,
-                        "after_content": card.after_content,
-                        "status": "pending",
-                        "rationale": card.rationale,
-                        "change_summary": card.change_summary,
-                        "operation_action": card.operation_action,
-                        "group_id": card.group_id,
-                        "confidence_score": card.confidence_score,
-                        "confidence_bin": card.confidence_bin,
-                        "transcript_evidence": card.transcript_evidence or [],
-                    },
+                operation_action = card.operation_action
+                confidence_bin = card.confidence_bin or "low"
+                dedup_key = (
+                    card.group_id
+                    or f"{operation_action}:{card.page_id or card.page_title}:{card.section_heading or ''}:{card.change_summary or ''}"
                 )
+                row = {
+                    "job_id": job_id,
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "dedup_key": dedup_key,
+                    "change_type": card.change_type or "edit",
+                    "page_id": card.page_id,
+                    "page_title": card.page_title or "",
+                    "section_heading": card.section_heading,
+                    "before_content": card.before_content,
+                    "after_content": card.after_content,
+                    "status": "pending",
+                    "source": "pipeline_v3",
+                    "rationale": card.rationale,
+                    "verifier_note": card.verifier_note,
+                    "change_summary": card.change_summary,
+                    "operation_action": operation_action,
+                    "operation_type": _legacy_operation_for_v3(operation_action),
+                    "group_id": card.group_id,
+                    "confidence": confidence_bin,
+                    "risk": "review" if confidence_bin == "low" else "safe",
+                    "confidence_score": card.confidence_score,
+                    "confidence_bin": confidence_bin,
+                    "transcript_evidence": card.transcript_evidence or [],
+                    "breadcrumb": card.breadcrumb or [],
+                    "page_url": card.page_url,
+                }
+                row_id = await asyncio.to_thread(
+                    supabase_store.upsert_proposal,
+                    row,
+                )
+                if not row_id:
+                    logger.warning(
+                        "_run_pipeline_v3: proposal persist returned no id for page=%s",
+                        card.page_id or card.page_title,
+                    )
+                    continue
+                _emit(job_id, {
+                    "type": "proposal_ready",
+                    "id": row_id,
+                    "timestamp": _utc_now_iso(),
+                    **row,
+                })
+                persisted_count += 1
             except Exception as exc:
                 logger.warning(
                     "_run_pipeline_v3: proposal persist failed (non-fatal): %s", exc
@@ -4737,7 +4865,7 @@ async def _run_pipeline_v3(
             supabase_store.update_pipeline_job,
             job_id, None, "completed", None, _utc_now_iso(),
         )
-        _emit(job_id, {"type": "pipeline_complete", "proposals": len(proposals)})
+        _emit(job_id, {"type": "pipeline_complete", "proposal_count": persisted_count})
 
     except Exception as exc:
         logger.error(
@@ -5353,6 +5481,12 @@ async def start_pipeline(
         # from the Recall diarized transcript or the LiveKit fallback log.
         # transcript_log is the raw LiveKit entries; bot_id enables Stage 0 Recall fetch.
         state = _get_meeting_state(body.session_id)
+        # Hydrate transcript from Supabase if the server was restarted and
+        # in-memory state is empty (transcript_log gone after restart).
+        if not state.get("transcript_log"):
+            history_item = supabase_store.get_history_item(user["id"], body.session_id)
+            if history_item:
+                _hydrate_state_from_history_item(state, history_item, user)
         transcript_log = state.get("transcript_log") or []
         bot_id = state.get("bot_id")
         asyncio.create_task(

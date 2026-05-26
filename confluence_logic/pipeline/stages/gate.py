@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 _THRESHOLD_HIGH: float = float(os.getenv("JARVIS_GATE_THRESHOLD_HIGH", "0.80"))
 _THRESHOLD_MEDIUM: float = float(os.getenv("JARVIS_GATE_THRESHOLD_MEDIUM", "0.60"))
-_THRESHOLD_EMIT: float = float(os.getenv("JARVIS_GATE_THRESHOLD_EMIT", "0.40"))
+_THRESHOLD_EMIT: float = float(os.getenv("JARVIS_GATE_THRESHOLD_EMIT", "0.30"))
 
 
 # ---------------------------------------------------------------------------
@@ -147,10 +147,10 @@ def calibrate_confidence(
 ) -> tuple:
     """Combine signals into a calibrated 0–1 confidence with a bin label.
 
-    Weighted combination:
-      0.50 × grounding_score    (most reliable: deterministic token overlap)
-      0.35 × retrieval_score    (reranker relevance)
-      0.15 × verbalized_confidence × DISCOUNT  (miscalibrated — Pitfall 5)
+    Weighted combination (clamped to [0, 1]):
+      0.60 × grounding_score    (most reliable: deterministic token overlap)
+      0.40 × retrieval_score    (reranker relevance)
+      0.10 × verbalized_confidence × DISCOUNT(0.5)  (miscalibrated — Pitfall 5)
 
     Thresholds (tunable via env):
       ≥ HIGH_THRESHOLD  → "high"
@@ -256,37 +256,48 @@ async def apply_grounding_gate_v3(
 
     # -------------------------------------------------------------------------
     # Hard gate 2: token grounding (check_grounding verbatim)
+    # When current_page_content is empty (Neo4j corpus unavailable) we cannot
+    # verify before_content against the page — skipping the hard gate avoids
+    # false-positive drops on every edit_section card when the corpus is down.
+    # The soft confidence scorer below still penalises low-overlap cards.
     # -------------------------------------------------------------------------
-    # Build a card dict compatible with check_grounding's expected format.
-    card: Dict[str, Any] = {
-        "change_type": "edit",
-        "edit_mode": "replace" if op.operation == "edit_section" else "add",
-        "before_content": op.before_content or "",
-        "after_content": op.after_content or "",
-        "page_id": op.page_id,
-        "operation_type": op.operation,
-    }
-    try:
-        grounding_result = await check_grounding(card, transcript_text, current_page_content)
-    except Exception as exc:
-        logger.warning(
-            "gate: check_grounding raised for page_id=%s: %s — treating as pass",
-            op.page_id, exc,
+    if not current_page_content:
+        grounding_result = {"ok": True, "failures": [], "reason": "no-page-content-soft-only"}
+        logger.debug(
+            "gate: skipping hard grounding (no page content) for page_id=%s — soft scorer applies",
+            op.page_id,
         )
-        grounding_result = {"ok": True, "failures": [], "reason": "error-treated-as-pass"}
+    else:
+        # Build a card dict compatible with check_grounding's expected format.
+        card: Dict[str, Any] = {
+            "change_type": "edit",
+            "edit_mode": "replace" if op.operation == "edit_section" else "add",
+            "before_content": op.before_content or "",
+            "after_content": op.after_content or "",
+            "page_id": op.page_id,
+            "operation_type": op.operation,
+        }
+        try:
+            grounding_result = await check_grounding(card, transcript_text, current_page_content)
+        except Exception as exc:
+            logger.warning(
+                "gate: check_grounding raised for page_id=%s: %s — treating as pass",
+                op.page_id, exc,
+            )
+            grounding_result = {"ok": True, "failures": [], "reason": "error-treated-as-pass"}
 
-    if not grounding_result.get("ok", True):
-        failures = grounding_result.get("failures", [])
-        reason = grounding_result.get("reason", "token grounding failure")
-        logger.warning(
-            "gate: hard drop — grounding gate page_id=%s reason=%s tokens=%s",
-            op.page_id, reason, failures,
-        )
-        return GateResult(
-            is_dropped=True,
-            drop_reasons=[reason],
-            gate="grounding",
-        )
+        if not grounding_result.get("ok", True):
+            failures = grounding_result.get("failures", [])
+            reason = grounding_result.get("reason", "token grounding failure")
+            logger.warning(
+                "gate: hard drop — grounding gate page_id=%s reason=%s tokens=%s",
+                op.page_id, reason, failures,
+            )
+            return GateResult(
+                is_dropped=True,
+                drop_reasons=[reason],
+                gate="grounding",
+            )
 
     # -------------------------------------------------------------------------
     # Soft confidence layer

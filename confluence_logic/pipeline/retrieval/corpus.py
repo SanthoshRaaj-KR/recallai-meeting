@@ -168,7 +168,7 @@ async def fetch_section_corpus(
             ctx.section_corpus = rows
             return rows
 
-        records, _summary, _keys = driver.execute_query(
+        records, _summary, _keys = await driver.execute_query(
             _CORPUS_CYPHER,
             {"user_id": graph_user_id},
             routing_=neo4j.RoutingControl.READ,

@@ -181,18 +181,24 @@ async def _hard_delete_page(page_id: str, page_title: str, rationale: str = "") 
         return False
 
 
-async def _reindex_page(page_id: str, *, session_id: str = "") -> None:
+async def _reindex_page(page_id: str, *, user_id: str = "", session_id: str = "") -> None:
     """Reindex the page in Pinecone+Neo4j in-session after a successful apply.
 
     Fire-and-forget: failures are logged at WARNING level and swallowed so
     the caller's success response is unaffected (graceful-degradation pattern,
     SAFE-V3-01).
+
+    ``user_id`` MUST be the graph-scoping key for this user — ``refresh_page_in_graph``
+    returns False immediately on a falsy user_id, so passing "" silently skips
+    the reindex (the page graph is per-user scoped).
     """
     try:
         import confluence_logic.confluence_page_graph as cpg  # noqa: PLC0415
         # refresh_page_in_graph is async; call it directly.
-        await cpg.refresh_page_in_graph(user_id="", page_id=page_id)
-        logger.debug("In-session reindex completed for page_id=%s", page_id)
+        await cpg.refresh_page_in_graph(user_id=user_id, page_id=page_id)
+        logger.debug(
+            "In-session reindex completed for page_id=%s user_id=%s", page_id, user_id
+        )
     except Exception as exc:
         logger.warning(
             "_reindex_page failed for page_id=%s session=%s (non-fatal): %s",
@@ -392,6 +398,8 @@ async def apply_proposal(
 
     if success and page_id:
         # In-session reindex — fire-and-forget; failure must not affect caller.
-        await _reindex_page(page_id, session_id=session_id)
+        # Pass user_id so the per-user graph scope is honoured (empty user_id
+        # makes refresh_page_in_graph a no-op).
+        await _reindex_page(page_id, user_id=user_id, session_id=session_id)
 
     return apply_result_obj

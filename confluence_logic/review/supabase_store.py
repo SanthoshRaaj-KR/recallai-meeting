@@ -233,13 +233,19 @@ _CHANGE_SUMMARY_COL_WARNED = False
 # mentioning any of these columns, drop the offending column(s) from the
 # payload, emit a single warning per process per column, and retry once.
 _PHASE10_NEW_COLUMNS = (
+    "dedup_key",
     "operation_type",
+    "operation_action",
     "ast_path",
     "reorder_indices",
     "grounding_failures",
     "breadcrumb",
     "page_url",
     "section_heading_anchor",
+    "group_id",
+    "confidence_score",
+    "confidence_bin",
+    "updated_at",
 )
 _PHASE10_COL_WARNED: set = set()
 
@@ -253,51 +259,63 @@ def _drop_missing_columns_and_retry(
     method: str = "POST",
     params: Optional[Dict[str, str]] = None,
 ) -> "requests.Response":
-    """Helper: when PostgREST 4xx mentions a missing column, drop matching keys and retry once.
+    """Helper: when PostgREST 4xx mentions a missing column, drop matching keys and retry.
 
-    Inspects ``response.text`` for any of the Phase 10 additive columns AND the
-    legacy ``change_summary`` column. Any mentioned column is removed from
-    ``payload`` (in place) and the same request is re-issued. Emits one warning
-    per (process, column) pair so repeated calls don't spam the log.
+    Loops until success, no further columns to drop, or a non-schema error.
+    PostgREST reports one missing column per error, so a single retry is not
+    sufficient when multiple additive columns are absent — we loop up to
+    len(_PHASE10_NEW_COLUMNS)+3 times.
 
-    Returns the (possibly new) response. If no missing-column hint is found,
-    returns the original response unchanged.
+    When ``dedup_key`` is dropped from the payload, the corresponding
+    ``on_conflict`` entry is also removed from ``params`` (mutated in-place) so
+    the constraint reference doesn't cause the retry to fail with a missing-index
+    error.
+
+    Emits one warning per (process, column) pair. Returns the final response.
     """
     global _CHANGE_SUMMARY_COL_WARNED
-    if response.status_code < 400:
-        return response
-    body_text = (response.text or "").lower()
-    if "could not find" not in body_text and "schema cache" not in body_text:
-        return response
+    _MISSING_HINTS = ("could not find", "schema cache", "does not exist")
 
-    dropped_any = False
-    for col in (*_PHASE10_NEW_COLUMNS, "change_summary"):
-        if col in payload and col in body_text:
-            if col == "change_summary":
-                if not _CHANGE_SUMMARY_COL_WARNED:
-                    logger.warning(
-                        "Supabase proposals table is missing the 'change_summary' column — "
-                        "run .planning/phases/08-auto-proposal-quality-fix/SUPABASE_MIGRATION.sql. "
-                        "Dropping the field from this request."
-                    )
-                    _CHANGE_SUMMARY_COL_WARNED = True
-            else:
-                if col not in _PHASE10_COL_WARNED:
-                    logger.warning(
-                        "Supabase proposals table is missing the Phase 10 column '%s' — "
-                        "apply the Phase 10 migration. Dropping the field from this request.",
-                        col,
-                    )
-                    _PHASE10_COL_WARNED.add(col)
-            payload.pop(col, None)
-            dropped_any = True
+    for _ in range(len(_PHASE10_NEW_COLUMNS) + 3):
+        if response.status_code < 400:
+            return response
+        body_text = (response.text or "").lower()
+        if not any(hint in body_text for hint in _MISSING_HINTS):
+            return response
 
-    if not dropped_any:
-        return response
+        dropped_any = False
+        for col in (*_PHASE10_NEW_COLUMNS, "change_summary"):
+            if col in payload and col in body_text:
+                if col == "change_summary":
+                    if not _CHANGE_SUMMARY_COL_WARNED:
+                        logger.warning(
+                            "Supabase proposals table is missing the 'change_summary' column — "
+                            "run .planning/phases/08-auto-proposal-quality-fix/SUPABASE_MIGRATION.sql. "
+                            "Dropping the field from this request."
+                        )
+                        _CHANGE_SUMMARY_COL_WARNED = True
+                else:
+                    if col not in _PHASE10_COL_WARNED:
+                        logger.warning(
+                            "Supabase proposals table is missing the Phase 10 column '%s' — "
+                            "apply the Phase 10 migration. Dropping the field from this request.",
+                            col,
+                        )
+                        _PHASE10_COL_WARNED.add(col)
+                payload.pop(col, None)
+                if col == "dedup_key" and params and "on_conflict" in params:
+                    params.pop("on_conflict", None)
+                dropped_any = True
 
-    if method.upper() == "PATCH":
-        return requests.patch(url, headers=headers, params=params or {}, json=payload, timeout=8)
-    return requests.post(url, headers=headers, json=payload, timeout=8)
+        if not dropped_any:
+            return response
+
+        if method.upper() == "PATCH":
+            response = requests.patch(url, headers=headers, params=params or {}, json=payload, timeout=8)
+        else:
+            response = requests.post(url, headers=headers, params=params or {}, json=payload, timeout=8)
+
+    return response
 
 
 def upsert_proposal(row: Dict[str, Any]) -> Optional[str]:
@@ -307,15 +325,35 @@ def upsert_proposal(row: Dict[str, Any]) -> Optional[str]:
         return None
     payload = {k: v for k, v in row.items() if v is not None}
     payload["created_at"] = datetime.now(timezone.utc).isoformat()
+    payload["updated_at"] = payload["created_at"]
     try:
         url = f"{SUPABASE_URL}/rest/v1/proposals"
-        headers = _rest_headers("return=representation")
-        response = requests.post(url, headers=headers, json=payload, timeout=8)
+        use_dedup = bool(payload.get("dedup_key"))
+        params = {"on_conflict": "session_id,dedup_key"} if use_dedup else {}
+        prefer = "return=representation,resolution=merge-duplicates" if use_dedup else "return=representation"
+        headers = _rest_headers(prefer)
+        response = requests.post(
+            url, headers=headers, params=params, json=payload, timeout=8
+        )
         # PostgREST returns 4xx if the schema is missing a column; retry without
         # the offending column(s) so we degrade gracefully until the migration runs.
         response = _drop_missing_columns_and_retry(
-            url, headers, payload, response, method="POST",
+            url, headers, payload, response, method="POST", params=params,
         )
+        if response.status_code >= 400 and use_dedup:
+            logger.warning(
+                "Proposal dedup upsert still failing after column drops — retrying as plain insert. "
+                "Run the v3 proposals migration to make reruns idempotent."
+            )
+            response = requests.post(
+                url,
+                headers=_rest_headers("return=representation"),
+                json=payload,
+                timeout=8,
+            )
+            response = _drop_missing_columns_and_retry(
+                url, _rest_headers("return=representation"), payload, response, method="POST",
+            )
         response.raise_for_status()
         data = response.json()
         if isinstance(data, list) and data:
@@ -323,6 +361,36 @@ def upsert_proposal(row: Dict[str, Any]) -> Optional[str]:
     except Exception as exc:
         logger.warning("Proposal upsert failed: %s", exc)
     return None
+
+
+def list_proposals_for_session(
+    user_id: str,
+    session_id: str,
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """Return persisted proposal rows for a user's session, oldest first."""
+    if not is_configured() or not user_id or not session_id:
+        return []
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/proposals",
+            headers=_rest_headers(),
+            params={
+                "user_id": f"eq.{user_id}",
+                "session_id": f"eq.{session_id}",
+                "select": "*",
+                "order": "created_at.asc",
+                "limit": str(limit),
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list):
+            return data
+    except Exception as exc:
+        logger.warning("list_proposals_for_session failed for %s: %s", session_id, exc)
+    return []
 
 
 def get_proposal_with_intent(proposal_id: str) -> Optional[Dict[str, Any]]:

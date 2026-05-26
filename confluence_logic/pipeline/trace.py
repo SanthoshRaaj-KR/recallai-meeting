@@ -93,7 +93,13 @@ class TraceBus:
         # --- Queue emit (no-op if no consumer registered) ---
         if job_id is not None:
             q = self._queues.get(job_id)
-            if q is not None:
+            if q is None and self._queues:
+                # job_id lookup miss (session_id vs pipeline job UUID mismatch
+                # from _emit_trace in run.py) — broadcast to all registered
+                # queues. Each TraceBus has exactly one queue per pipeline run.
+                for q in self._queues.values():
+                    q.put_nowait(event)
+            elif q is not None:
                 q.put_nowait(event)
 
         # --- Structured log (always) ---

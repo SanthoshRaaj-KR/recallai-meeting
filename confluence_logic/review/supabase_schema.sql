@@ -128,6 +128,25 @@ create table if not exists public.proposals (
 create index if not exists proposals_job_created_idx
   on public.proposals (job_id, created_at desc);
 
+alter table public.proposals
+  add column if not exists dedup_key text,
+  add column if not exists change_summary text,
+  add column if not exists operation_type text,
+  add column if not exists operation_action text,
+  add column if not exists ast_path text,
+  add column if not exists reorder_indices jsonb,
+  add column if not exists grounding_failures jsonb default '[]',
+  add column if not exists breadcrumb jsonb default '[]',
+  add column if not exists page_url text,
+  add column if not exists section_heading_anchor text,
+  add column if not exists group_id text,
+  add column if not exists confidence_score double precision,
+  add column if not exists confidence_bin text,
+  add column if not exists updated_at timestamptz default now();
+
+create unique index if not exists proposals_session_dedup_key_idx
+  on public.proposals (session_id, dedup_key);
+
 alter table public.proposals enable row level security;
 
 drop policy if exists "Users can read their own proposals" on public.proposals;

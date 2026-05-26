@@ -136,7 +136,18 @@ STRUCTURE_AWARE_DRAFTER_PROMPT = (
     " * If intent.verbatim_content is non-empty, use it as the SOLE factual source "
     "for new_text/new_content for add/create operations — same rule as Phase 4.\n"
     " * Prefer SKIP over a low-confidence operation. A missed proposal is "
-    "recoverable; a wrong edit is not.\n\n"
+    "recoverable; a wrong edit is not.\n"
+    " * PAGE SUBJECT GUARD: If the page title indicates a different primary subject "
+    "than intent.subject (e.g. the page is about Person B but intent.subject is Person A, "
+    "or the page covers Topic X but the change is specifically about Topic Y which does not "
+    "appear as the page's main focus), emit action='skip' with reason='page subject mismatch — "
+    "change belongs on a different page'. Do NOT write content about Subject A onto Subject B's page.\n"
+    " * DELETE FIELD RULE: For action='delete_section', set ONLY section_heading. Do NOT "
+    "set new_text, new_content, anchor_text, or old_text — the section is simply removed and "
+    "any content you emit here will cause downstream duplication bugs.\n"
+    " * FORMAT MATCH RULE: For action='replace', new_text must match the FORMAT of old_text. "
+    "If old_text is a single date or short value, new_text must be just the new date or value — "
+    "not a sentence explaining the change. Never expand a short value into a paragraph.\n\n"
     "Return EXACTLY one JSON object matching the StructuredOperation schema. No "
     "markdown wrapper, no explanation outside the JSON."
 )
@@ -368,6 +379,22 @@ def _post_validate(op: StructuredOperation, inp: StructureAwareDrafterInput) -> 
             )
             op.new_text = None
             op.new_content = None
+
+    # ── Delete-section defense-in-depth ──────────────────────────────────────
+    # LLM sometimes emits new_text/new_content for delete_section ops (the
+    # "above content duplicated" bug). Stripping here ensures apply_structured
+    # never sees stray content that would cause commit_document_edit to write
+    # the content back instead of just deleting the section.
+    if op.action == "delete_section":
+        if op.new_text is not None or op.new_content is not None or op.old_text is not None:
+            logger.warning(
+                "StructureAwareDrafter: delete_section op carried LLM-supplied content fields "
+                "— stripping to prevent duplication (page_id=%s section_heading=%r)",
+                op.page_id, op.section_heading,
+            )
+            op.new_text = None
+            op.new_content = None
+            op.old_text = None
 
     return op
 

@@ -35,6 +35,7 @@ See RESEARCH §Orchestration Design and §Pattern 4 for the full rationale.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import time
@@ -94,6 +95,7 @@ from confluence_logic.pipeline.stages.plan_ops import (
 from confluence_logic.pipeline.stages.gate import (
     apply_grounding_gate_v3,
 )
+from confluence_logic.pipeline.retrieval.corpus import fetch_section_corpus
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _DRAFTER_CONCURRENCY: int = int(os.getenv("JARVIS_DRAFTER_CONCURRENCY", "6"))
+_PLAN_OPS_MAX_CANDIDATES_PER_INTENT: int = int(
+    os.getenv("JARVIS_PLAN_OPS_MAX_CANDIDATES_PER_INTENT", "5")
+)
+_PLAN_OPS_EXPAND_MIN_RERANK: float = float(
+    os.getenv("JARVIS_PLAN_OPS_EXPAND_MIN_RERANK", "0.75")
+)
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +207,213 @@ def _op_to_proposal_card(
         # v3 confidence fields from gate result
         confidence_score=getattr(gate_result, "confidence_score", None),
         confidence_bin=getattr(gate_result, "confidence_bin", None),
+        verifier_note=(
+            "Low confidence: " + "; ".join(getattr(gate_result, "drop_reasons", []) or [])
+            if getattr(gate_result, "is_flagged", False)
+            else None
+        ),
         # v3 evidence spans from intent
         evidence=list(intent.evidence) if intent.evidence else None,
         transcript_evidence=[span.text for span in (intent.evidence or [])],
     )
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    """Read a dict key or object attribute from corpus rows/pages."""
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return getattr(row, key, default)
+
+
+def _corpus_to_workspace_pages(corpus: Any) -> List[Dict[str, Any]]:
+    """Return page-shaped dicts with synthesized HTML from the section corpus.
+
+    The contradiction stage and plan/gate steps need page-level content, while
+    the production corpus is section-shaped. This groups sections by page_id and
+    emits a small HTML document per page so existing section extraction helpers
+    can operate without a live Confluence fetch.
+    """
+    if not corpus:
+        return []
+
+    if hasattr(corpus, "pages"):
+        try:
+            return list(corpus.pages)
+        except Exception:
+            return []
+
+    pages: Dict[str, Dict[str, Any]] = {}
+    for row in (corpus if isinstance(corpus, list) else []):
+        page_id = (_row_get(row, "page_id", "") or "").strip()
+        if not page_id:
+            continue
+        title = (
+            _row_get(row, "title", None)
+            or _row_get(row, "page_title", None)
+            or ""
+        )
+        space_key = _row_get(row, "space_key", "") or ""
+        heading = (
+            _row_get(row, "heading", None)
+            or _row_get(row, "section_heading", None)
+            or ""
+        )
+        text = (
+            _row_get(row, "content_html", None)
+            or _row_get(row, "text", None)
+            or _row_get(row, "section_text", None)
+            or ""
+        )
+        page = pages.setdefault(
+            page_id,
+            {
+                "page_id": page_id,
+                "title": title,
+                "page_title": title,
+                "space_key": space_key,
+                "_sections": [],
+            },
+        )
+        if title and not page.get("title"):
+            page["title"] = title
+            page["page_title"] = title
+        if isinstance(row, dict) and row.get("content_html") and not heading:
+            page["_sections"].append(str(row.get("content_html") or ""))
+        else:
+            section_html = (
+                f"<h2>{html.escape(str(heading))}</h2>\n"
+                f"<p>{html.escape(str(text))}</p>"
+            )
+            page["_sections"].append(section_html)
+
+    out: List[Dict[str, Any]] = []
+    for page in pages.values():
+        sections = page.pop("_sections", [])
+        page["content_html"] = "\n".join(sections)
+        out.append(page)
+    return out
+
+
+def _page_html_for_id(page_id: Optional[str], workspace_pages: List[Dict[str, Any]]) -> str:
+    if not page_id:
+        return ""
+    for page in workspace_pages:
+        if str(page.get("page_id") or "") == str(page_id):
+            return page.get("content_html") or page.get("text") or ""
+    return ""
+
+
+def _page_html_for_candidate(
+    candidate: SectionCandidate,
+    workspace_pages: List[Dict[str, Any]],
+) -> str:
+    return _page_html_for_id(candidate.page_id, workspace_pages)
+
+
+def _dedupe_candidates(candidates: List[SectionCandidate]) -> List[SectionCandidate]:
+    """Preserve rank order while removing repeated page/section candidates."""
+    seen: set = set()
+    out: List[SectionCandidate] = []
+    for cand in candidates:
+        key = (cand.page_id, cand.section_heading)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cand)
+    return out
+
+
+def _op_key(intent: ChangeIntentV3, op: PlannedOperation) -> tuple:
+    return (
+        intent.dedup_key or intent.subject,
+        op.page_id or "",
+        op.page_title or "",
+        op.section_heading or "",
+        op.operation,
+        (op.after_content or "")[:160],
+    )
+
+
+def _candidate_retrieval_score(candidate: SectionCandidate) -> float:
+    return candidate.rerank_score or candidate.rrf_score or candidate.score or 0.0
+
+
+def _topic_tokens(text: str) -> set:
+    stop = {
+        "this", "that", "with", "from", "into", "page", "section",
+        "update", "change", "create", "add", "move", "make",
+    }
+    return {
+        token
+        for token in "".join(ch.lower() if ch.isalnum() else " " for ch in text or "").split()
+        if len(token) >= 4 and token not in stop
+    }
+
+
+def _candidate_has_topic_overlap(
+    intent: ChangeIntentV3,
+    candidate: SectionCandidate,
+    page_html: str,
+) -> bool:
+    needles = _topic_tokens(" ".join([intent.subject, intent.target_hint, intent.instruction]))
+    if not needles:
+        return True
+    haystack = " ".join([
+        candidate.page_title or "",
+        candidate.section_heading or "",
+        candidate.section_text or "",
+        page_html or "",
+    ]).lower()
+    return any(token in haystack for token in needles)
+
+
+def _subject_tokens_match_page_title(intent: ChangeIntentV3, candidate: SectionCandidate) -> bool:
+    """Return True iff at least one content-bearing subject token appears in the page title.
+
+    Prevents routing intents about Person A to Person B's page just because Person A is
+    mentioned somewhere in Person B's page content (e.g., 'Virat Kohli' intent → Tilak
+    Varma page that references Virat Kohli in a comparison section).
+    """
+    subject_tokens = _topic_tokens(intent.subject)
+    if not subject_tokens:
+        return True  # no specific subject tokens — no restriction
+    title_tokens = _topic_tokens(candidate.page_title or "")
+    return bool(subject_tokens & title_tokens)
+
+
+def _candidate_qualifies_for_planning(
+    intent: ChangeIntentV3,
+    candidate: SectionCandidate,
+    page_html: str,
+    rank: int,
+) -> bool:
+    """Limit candidate expansion so recall improves without spraying wrong pages."""
+    if intent.kind in ("decision", "action_item") and not _candidate_has_topic_overlap(
+        intent, candidate, page_html
+    ):
+        return False
+
+    if rank == 0:
+        return True
+
+    # Non-rank-0 expansion: require subject tokens to appear in the page TITLE,
+    # not just anywhere in the page content. Without this, a page about Player B
+    # can match an intent about Player A because Player A is mentioned in Player B's
+    # page body — leading to changes being proposed on the wrong page.
+    if not _subject_tokens_match_page_title(intent, candidate):
+        return False
+
+    old_value = (intent.old_value or "").strip().lower()
+    if old_value and old_value in (page_html or "").lower():
+        return True
+
+    # Only expand non-verbatim candidates when the reranker gave a strong score.
+    # RRF-only scores are intentionally not used here because their scale is tiny
+    # and not calibrated for wrong-page risk.
+    if candidate.rerank_score is not None and candidate.rerank_score >= _PLAN_OPS_EXPAND_MIN_RERANK:
+        return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +559,20 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
             )
             return proposals
 
+        # Load the user's full Confluence section corpus once per run. Retrieval
+        # uses it for BM25, contradiction uses it for workspace-wide scans, and
+        # the gate uses synthesized page content for token grounding.
+        try:
+            await fetch_section_corpus(graph_user_id, ctx)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "run: fetch_section_corpus failed for user=%s: %s — continuing with dense-only retrieval",
+                graph_user_id, exc,
+            )
+            ctx.section_corpus = []
+
+        workspace_pages = _corpus_to_workspace_pages(getattr(ctx, "section_corpus", None))
+
         # ----------------------------------------------------------------
         # Stages 2-4: Per-intent retrieve → rerank → iterate (fan-out)
         # ----------------------------------------------------------------
@@ -379,9 +604,13 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
         )
 
         # ----------------------------------------------------------------
-        # Stage 5: Contradiction sweep (fact_update intents)
+        # Stage 5: Contradiction sweep (fact_update / deprecation intents)
         # ----------------------------------------------------------------
-        contradiction_ops: List[PlannedOperation] = []
+        contradiction_ops: List[tuple[PlannedOperation, ChangeIntentV3]] = []
+        # Intents whose cards are produced via a contradiction group are skipped
+        # in the per-candidate plan_ops loop below, so the same change is not
+        # emitted twice (once grouped, once ungrouped). De-dup is intent-scoped.
+        intents_handled_by_contradiction: set = set()
 
         if ctx.contradiction_enabled:
             fact_update_intents = [
@@ -392,19 +621,10 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
 
             if fact_update_intents:
                 t5 = _stage_start(ctx, "contradict", candidates_in=len(fact_update_intents))
-                all_groups: List[ContradictionGroup] = []
 
-                # Build workspace_pages list from the corpus for contradiction
-                corpus = getattr(ctx, "section_corpus", None)
-                workspace_pages: List[Dict[str, Any]] = []
-                if corpus is not None:
-                    try:
-                        if hasattr(corpus, "pages"):
-                            workspace_pages = list(corpus.pages)
-                        elif isinstance(corpus, list):
-                            workspace_pages = corpus
-                    except Exception:
-                        workspace_pages = []
+                page_lookup: Dict[str, Dict[str, Any]] = {
+                    p.get("page_id"): p for p in workspace_pages if p.get("page_id")
+                }
 
                 contradict_tasks = [
                     detect_contradictions(
@@ -418,27 +638,64 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
                 contradict_results = await asyncio.gather(*contradict_tasks, return_exceptions=True)
 
                 for i, cr in enumerate(contradict_results):
+                    intent = fact_update_intents[i][0]
                     if isinstance(cr, Exception):
-                        intent = fact_update_intents[i][0]
                         logger.warning(
                             "run: contradict failed for intent=%r: %s — skipping",
                             getattr(intent, "subject", "?"), cr,
                         )
                         continue
-                    if cr:
-                        all_groups.extend(cr)
+                    if not cr:
+                        continue
 
-                # Flatten ContradictionGroup.operations into the contradiction_ops list
-                for group in all_groups:
-                    for op in group.operations:
-                        # Ensure group_id is set for UI grouping
-                        if not op.group_id:
-                            object.__setattr__(
-                                op,
-                                "group_id",
-                                str(uuid.uuid4()),
-                            ) if hasattr(op, "__dataclass_fields__") else None
-                        contradiction_ops.append(op)
+                    produced_any = False
+                    for group in cr:
+                        # Prefer pre-planned operations when an upstream stage (or
+                        # a test stub) already filled them. The REAL
+                        # detect_contradictions leaves operations=[] and only
+                        # fills affected_pages, so the else-branch is the
+                        # production path that actually turns a contradiction
+                        # into proposal cards (without it, contradiction groups
+                        # never become cards — they would be silently dropped).
+                        group_ops: List[PlannedOperation] = list(group.operations)
+                        if not group_ops:
+                            for affected in group.affected_pages:
+                                page = page_lookup.get(affected.page_id) or {}
+                                candidate = SectionCandidate(
+                                    page_id=affected.page_id,
+                                    page_title=affected.page_title,
+                                    section_heading=affected.section_heading,
+                                    source="contradict",
+                                )
+                                page_html = page.get("content_html") or ""
+                                try:
+                                    planned = await plan_operation(intent, candidate, page_html)
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.warning(
+                                        "run: contradiction plan_operation failed page=%s: %s",
+                                        affected.page_id, exc,
+                                    )
+                                    planned = None
+                                if planned is None:
+                                    continue
+                                planned.group_id = affected.group_id or planned.group_id
+                                group_ops.append(planned)
+
+                        # Every op in the group shares ONE group_id so the UI
+                        # renders them as a single contradiction decision (each
+                        # still individually accept/reject-able — UI-V3-01).
+                        shared_group_id = (
+                            group.affected_pages[0].group_id
+                            if group.affected_pages else None
+                        )
+                        for op in group_ops:
+                            if not op.group_id:
+                                op.group_id = shared_group_id or str(uuid.uuid4())
+                            contradiction_ops.append((op, intent))
+                            produced_any = True
+
+                    if produced_any:
+                        intents_handled_by_contradiction.add(id(intent))
 
                 _stage_end(
                     ctx, "contradict", t5,
@@ -453,8 +710,82 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
 
         planned_count = 0
         dropped_count = 0
+        emitted_op_keys: set = set()
+
+        # Multi-candidate planner. This replaces the legacy top-candidate-only
+        # loop below, but leaves that code in place as an inert fallback path so
+        # this patch stays small around the existing worktree edits.
+        for intent, candidates in list(intent_candidate_pairs):
+            if id(intent) in intents_handled_by_contradiction:
+                continue
+            if not candidates:
+                continue
+
+            qualified_candidates: List[SectionCandidate] = []
+            for rank, candidate in enumerate(_dedupe_candidates(candidates)):
+                if len(qualified_candidates) >= _PLAN_OPS_MAX_CANDIDATES_PER_INTENT:
+                    break
+                page_html = _page_html_for_candidate(candidate, workspace_pages)
+                if _candidate_qualifies_for_planning(intent, candidate, page_html, rank):
+                    qualified_candidates.append(candidate)
+
+            for candidate in qualified_candidates:
+                page_html = _page_html_for_candidate(candidate, workspace_pages)
+                try:
+                    op = await plan_operation(intent, candidate, page_html)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "run: plan_operation failed for intent=%r page=%s: %s — skipping",
+                        getattr(intent, "subject", "?"), candidate.page_id, exc,
+                    )
+                    continue
+                if op is None:
+                    continue
+
+                op_key = _op_key(intent, op)
+                if op_key in emitted_op_keys:
+                    continue
+                emitted_op_keys.add(op_key)
+                planned_count += 1
+
+                try:
+                    gate_result = await apply_grounding_gate_v3(
+                        op,
+                        transcript_text=transcript_text,
+                        current_page_content=page_html,
+                        user_id=ctx.graph_user_id,
+                        retrieval_score=_candidate_retrieval_score(candidate),
+                        is_fact_update=(intent.kind in ("fact_update", "deprecation")),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "run: apply_grounding_gate_v3 failed for intent=%r page=%s: %s — treating as dropped",
+                        getattr(intent, "subject", "?"), candidate.page_id, exc,
+                    )
+                    dropped_count += 1
+                    continue
+
+                if gate_result.is_dropped and not gate_result.is_flagged:
+                    dropped_count += 1
+                    logger.info(
+                        "run: gate dropped card for intent=%r page=%s gate=%s reasons=%s",
+                        getattr(intent, "subject", "?"),
+                        candidate.page_id,
+                        gate_result.gate,
+                        gate_result.drop_reasons,
+                    )
+                    continue
+
+                proposals.append(_op_to_proposal_card(op, intent, gate_result))
+
+        # The block above has handled all non-contradiction per-candidate work.
+        # Mark every intent as handled so the old top-candidate loop below stays
+        # inert while contradiction card conversion still runs afterwards.
+        intents_handled_by_contradiction.update(id(intent) for intent, _ in intent_candidate_pairs)
 
         for intent, candidates in intent_candidate_pairs:
+            if id(intent) in intents_handled_by_contradiction:
+                continue
             if not candidates:
                 logger.info(
                     "run: no candidates for intent=%r — skipping plan_ops",
@@ -489,7 +820,7 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
                     op,
                     transcript_text=transcript_text,
                     current_page_content="",
-                    user_id=ctx.user_id,
+                    user_id=ctx.graph_user_id,
                     retrieval_score=top_candidate.rerank_score or top_candidate.rrf_score or 0.0,
                     is_fact_update=(intent.kind in ("fact_update", "deprecation")),
                 )
@@ -516,14 +847,15 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
             proposals.append(card)
 
         # Also convert contradiction_ops to cards (gate applied separately)
-        for op in contradiction_ops:
+        for op, _source_intent in contradiction_ops:
             planned_count += 1
+            page_html = _page_html_for_id(op.page_id, workspace_pages)
             try:
                 gate_result = await apply_grounding_gate_v3(
                     op,
                     transcript_text=transcript_text,
-                    current_page_content="",
-                    user_id=ctx.user_id,
+                    current_page_content=page_html,
+                    user_id=ctx.graph_user_id,
                     retrieval_score=0.5,
                     is_fact_update=True,  # contradiction ops are always fact_update-grade
                 )
@@ -562,7 +894,7 @@ async def run(ctx: PipelineContext) -> List[ProposalCardV3]:
 
         _stage_end(
             ctx, "plan_ops_gate", t67,
-            candidates_in=planned_count,
+            candidates_in=total_candidates,
             candidates_out=len(proposals),
             dropped=dropped_count,
         )

@@ -57,13 +57,16 @@ def _get_store() -> PineconeStore:
 
 
 # ---------------------------------------------------------------------------
-# Signal weights — explicit-token always outranks graph which always outranks
-# semantic. Tuned so a heading-token hit beats a title-token hit beats a graph
-# hit beats a semantic hit, regardless of raw Pinecone score magnitudes.
+# Signal weights — title match ("this page IS ABOUT the subject") must always
+# beat a heading match ("this page only MENTIONS the subject").
+# Previous values were inverted (_W_TOKEN_HEADING=20, _W_TOKEN_TITLE=10), which
+# caused pages that merely reference a person in a heading (e.g. "Comparison
+# with Suryakumar Yadav" on Tilak Varma's page) to outrank the dedicated
+# Suryakumar Yadav page whose title matches.
 # ---------------------------------------------------------------------------
 
-_W_TOKEN_HEADING = 20.0
-_W_TOKEN_TITLE = 10.0
+_W_TOKEN_TITLE = 20.0    # page IS ABOUT the subject (title match) — strongest
+_W_TOKEN_HEADING = 10.0  # page MENTIONS the subject in a heading — weaker
 _W_GRAPH = 2.0
 _W_SEMANTIC = 1.0
 
@@ -204,7 +207,10 @@ async def _verbatim_token_promote(
         if not (heading_hit or title_hit):
             continue
 
-        weight = _W_TOKEN_HEADING if heading_hit else _W_TOKEN_TITLE
+        # Title match always wins over heading match: a page whose TITLE matches
+        # the subject IS the dedicated page; a heading match means the subject is
+        # only referenced there.
+        weight = _W_TOKEN_TITLE if title_hit else _W_TOKEN_HEADING
         promoted[page_id] = {
             "page_id": page_id,
             "title": title,
@@ -213,7 +219,7 @@ async def _verbatim_token_promote(
             "headings": list(headings),
             "source": "explicit_token_gate",
             "_token_weight": weight,
-            "_token_match_kind": "heading" if heading_hit else "title",
+            "_token_match_kind": "title" if title_hit else "heading",
         }
 
     return promoted
