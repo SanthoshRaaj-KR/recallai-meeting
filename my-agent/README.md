@@ -132,6 +132,28 @@ Get started quickly with our pre-built frontend starter apps, or add telephony s
 
 For advanced customization, see the [complete frontend guide](https://docs.livekit.io/frontends/).
 
+## GitHub MCP Integration
+
+Jarvis can answer voice questions about your GitHub repositories — pull requests, issues, commits, and code — using the [GitHub MCP server](https://github.com/modelcontextprotocol/servers) over stdio. The LLM remains Cerebras `gpt-oss-120b` for speed; GitHub tool results are converted to spoken prose before reaching TTS.
+
+### Setup
+
+1. Create a GitHub [personal access token](https://github.com/settings/tokens) with `repo` scope.
+2. Add it to `.env.local`:
+
+   ```
+   GITHUB_TOKEN=ghp_yourtoken
+   GITHUB_DEFAULT_REPO=myorg/myrepo   # optional default repo for PR/issue queries
+   ```
+
+3. Make sure `npx` is available on your PATH (Node 18+). On first query, `npx` downloads the MCP server package (~5–30 s); subsequent queries use the npm cache.
+
+4. Restart the agent — no other changes needed.
+
+When `GITHUB_TOKEN` is absent, the agent starts normally without GitHub tools (a warning is logged). When set, voice queries like *"Hey Jarvis, what did the last 5 PRs do?"* will dispatch to the GitHub MCP server and respond in plain speech.
+
+**Security note:** `GITHUB_TOKEN` is passed only to the MCP subprocess environment and is never included in any log output.
+
 ## Tests and evals
 
 This project includes a complete suite of evals, based on the LiveKit Agents [testing & evaluation framework](https://docs.livekit.io/agents/start/testing/). To run them, use `pytest`.

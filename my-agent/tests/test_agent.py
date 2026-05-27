@@ -1,8 +1,12 @@
+import logging
 import textwrap
+from unittest.mock import MagicMock, patch
 
 import pytest
-from livekit.agents import AgentSession, inference, llm
+from livekit.agents import AgentSession, inference, llm, mcp
+from livekit.plugins import cerebras
 
+import agent as agent_module
 from agent import Assistant
 
 
@@ -114,3 +118,42 @@ async def test_refuses_harmful_request() -> None:
 
         # Ensures there are no function calls or other unexpected events
         result.expect.no_more_events()
+
+
+def test_no_token_returns_no_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_module, "_GITHUB_TOKEN", "")
+    tools = agent_module._build_tools()
+    assert tools == []
+
+
+def test_token_set_returns_mcptoolset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_module, "_GITHUB_TOKEN", "ghp_testtoken123")
+    with patch("livekit.agents.mcp.MCPServerStdio") as mock_server_cls:
+        mock_server_cls.return_value = MagicMock()
+        tools = agent_module._build_tools()
+    assert len(tools) == 1
+    assert isinstance(tools[0], mcp.MCPToolset)
+    assert tools[0].id == "github"
+
+
+def test_mcpserver_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_module, "_GITHUB_TOKEN", "ghp_testtoken123")
+    with patch("livekit.agents.mcp.MCPServerStdio") as mock_server_cls:
+        mock_server_cls.return_value = MagicMock()
+        agent_module._build_tools()
+    _, kwargs = mock_server_cls.call_args
+    assert kwargs["command"] == "npx"
+    assert "@modelcontextprotocol/server-github@2025.4.8" in kwargs["args"]
+    assert kwargs["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"] == "ghp_testtoken123"
+    assert "PATH" in kwargs["env"]
+    assert kwargs["client_session_timeout_seconds"] == 30
+
+
+def test_missing_token_logs_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(agent_module, "_GITHUB_TOKEN", "")
+    with caplog.at_level(logging.WARNING, logger="agent"):
+        tools = agent_module._build_tools()
+    assert tools == []
+    assert any("GITHUB_TOKEN" in r.message for r in caplog.records if r.levelno == logging.WARNING)

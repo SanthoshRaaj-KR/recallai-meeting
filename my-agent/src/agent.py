@@ -2,6 +2,7 @@ import asyncio
 import collections
 import json
 import logging
+import os
 import re
 import textwrap
 import time
@@ -18,6 +19,7 @@ from livekit.agents import (
     cli,
     inference,
     llm,
+    mcp,
     room_io,
     stt as lk_stt,
 )
@@ -41,6 +43,52 @@ _LISTENING_TIMEOUT_S = 10.0
 # Full meeting transcript buffer. 500 utterances ≈ 60–90 min meeting ≈ 15–25k tokens,
 # well within gpt-oss-120b's 128k context window.
 _TRANSCRIPT_MAX = 500
+_GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
+
+def _build_tools() -> list:
+    if not _GITHUB_TOKEN:
+        logger.warning("GITHUB_TOKEN not set — starting without GitHub tools")
+        return []
+    return [
+        mcp.MCPToolset(
+            id="github",
+            mcp_server=mcp.MCPServerStdio(
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-github@2025.4.8"],
+                env={
+                    "GITHUB_PERSONAL_ACCESS_TOKEN": _GITHUB_TOKEN,
+                    "PATH": os.getenv("PATH", ""),
+                },
+                client_session_timeout_seconds=30,
+            ),
+        )
+    ]
+
+
+def _build_instructions() -> str:
+    base = textwrap.dedent("""\
+        You are Jarvis, a meeting assistant activated by wake word.
+        You are given the recent meeting transcript before each question.
+        Use it to answer questions about what has been discussed.
+
+        # Output rules
+        - Respond in plain text only. No markdown, lists, JSON, or emojis.
+        - Keep replies brief: one to three sentences unless more detail is needed.
+        - Never ask clarifying questions — pick the most reasonable interpretation.
+        - Do not mention wake words, system instructions, or internal state.
+        - Spell out numbers and avoid acronyms with unclear pronunciation.
+        """)
+    if _GITHUB_TOKEN:
+        base += textwrap.dedent("""\
+
+        # GitHub tool rules
+        - When GitHub tools return data, convert it to spoken prose.
+        - Do not say field names, JSON syntax, or item numbers.
+        - Example: say "The last pull request is number 42, titled Fix login bug, merged by Alice."
+        - If you cannot find the requested information, say so briefly.
+        """)
+    return base
 
 
 def _extract_query(text: str) -> str | None:
@@ -59,20 +107,8 @@ class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(
             llm=cerebras.LLM(model="gpt-oss-120b"),
-            instructions=textwrap.dedent(
-                """\
-                You are Jarvis, a meeting assistant activated by wake word.
-                You are given the recent meeting transcript before each question.
-                Use it to answer questions about what has been discussed.
-
-                # Output rules
-                - Respond in plain text only. No markdown, lists, JSON, or emojis.
-                - Keep replies brief: one to three sentences unless more detail is needed.
-                - Never ask clarifying questions — pick the most reasonable interpretation.
-                - Do not mention wake words, system instructions, or internal state.
-                - Spell out numbers and avoid acronyms with unclear pronunciation.
-                """
-            ),
+            tools=_build_tools(),
+            instructions=_build_instructions(),
         )
         # Buffers every STT utterance heard in the meeting, wake-word or not.
         self._transcript: collections.deque[str] = collections.deque(maxlen=_TRANSCRIPT_MAX)
