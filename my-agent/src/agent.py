@@ -55,26 +55,33 @@ _TRANSCRIPT_WINDOW = 100
 # 10 items = 5 Q&A pairs ≈ ~750 tokens for history.
 _CHAT_HISTORY_WINDOW = 10
 _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+# Optional default repo (owner/repo) used when the user doesn't name one.
+_GITHUB_DEFAULT_REPO = os.getenv("GITHUB_DEFAULT_REPO", "")
 
 
-def _build_tools() -> list:
+def _build_github_toolset() -> mcp.MCPToolset | None:
+    """Build the GitHub MCPToolset, or return None if no token is configured.
+
+    The toolset is created eagerly at startup but its MCP server subprocess is
+    not launched until Assistant.on_enter() calls toolset.setup() in the
+    background — so the npx/Node cold-start happens immediately when the
+    session opens, not on the user's first GitHub question.
+    """
     if not _GITHUB_TOKEN:
         logger.warning("GITHUB_TOKEN not set — starting without GitHub tools")
-        return []
-    return [
-        mcp.MCPToolset(
-            id="github",
-            mcp_server=mcp.MCPServerStdio(
-                command="npx",
-                args=["-y", "@modelcontextprotocol/server-github@2025.4.8"],
-                env={
-                    "GITHUB_PERSONAL_ACCESS_TOKEN": _GITHUB_TOKEN,
-                    "PATH": os.getenv("PATH", ""),
-                },
-                client_session_timeout_seconds=30,
-            ),
-        )
-    ]
+        return None
+    return mcp.MCPToolset(
+        id="github",
+        mcp_server=mcp.MCPServerStdio(
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-github@2025.4.8"],
+            env={
+                **os.environ,
+                "GITHUB_PERSONAL_ACCESS_TOKEN": _GITHUB_TOKEN,
+            },
+            client_session_timeout_seconds=60,
+        ),
+    )
 
 
 def _build_instructions() -> str:
@@ -99,6 +106,10 @@ def _build_instructions() -> str:
         - Example: say "The last pull request is number 42, titled Fix login bug, merged by Alice."
         - If you cannot find the requested information, say so briefly.
         """)
+        if _GITHUB_DEFAULT_REPO:
+            base += textwrap.dedent(f"""\
+        - When the user does not specify a repository, default to {_GITHUB_DEFAULT_REPO}.
+        """)
     return base
 
 
@@ -116,9 +127,10 @@ def _extract_query(text: str) -> str | None:
 
 class Assistant(Agent):
     def __init__(self) -> None:
+        self._github_toolset = _build_github_toolset()
         super().__init__(
             llm=cerebras.LLM(model="gpt-oss-120b"),
-            tools=_build_tools(),
+            tools=[self._github_toolset] if self._github_toolset else [],
             instructions=_build_instructions(),
         )
         # Buffers every STT utterance heard in the meeting, wake-word or not.
@@ -140,7 +152,14 @@ class Assistant(Agent):
         # on_user_turn_completed and goes straight to the LLM. After an interruption
         # LiveKit re-enters the agent, triggering on_enter() again — causing the agent
         # to answer without a wake word. Overriding with a no-op disables this.
-        pass
+
+        # Pre-warm the GitHub MCP server the moment the session opens so the
+        # npx/Node subprocess is fully connected before the user's first question.
+        # Runs in the background — does not block the agent from being ready.
+        if self._github_toolset:
+            asyncio.create_task(
+                self._github_toolset.setup(), name="github_mcp_prewarm"
+            )
 
     async def stt_node(
         self,
