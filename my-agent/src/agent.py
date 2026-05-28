@@ -6,6 +6,7 @@ import os
 import re
 import textwrap
 import time
+from pathlib import Path
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -30,7 +31,9 @@ from typing import AsyncIterable
 
 logger = logging.getLogger("agent")
 
-load_dotenv(".env.local")
+# Resolve .env.local relative to this file (my-agent/.env.local) so the agent
+# finds its credentials regardless of the working directory at launch time.
+load_dotenv(Path(__file__).parent.parent / ".env.local")
 
 # ── Wake word ─────────────────────────────────────────────────────────────────
 # Matches "Jarvis", "Hey Jarvis", and common STT mis-transcriptions.
@@ -40,9 +43,17 @@ _WAKE_PATTERN = re.compile(
 )
 # Seconds to stay in listening mode after a bare "Jarvis" before timing out.
 _LISTENING_TIMEOUT_S = 10.0
-# Full meeting transcript buffer. 500 utterances ≈ 60–90 min meeting ≈ 15–25k tokens,
-# well within gpt-oss-120b's 128k context window.
+# Full in-memory transcript buffer — all utterances are kept here.
 _TRANSCRIPT_MAX = 500
+# ── Sliding window limits ─────────────────────────────────────────────────────
+# Only the most recent _TRANSCRIPT_WINDOW utterances are sent to the LLM each
+# turn (~100 × 40 tokens ≈ 4 000 tokens). Older utterances stay in the buffer
+# so they can still be referenced if the window is widened later.
+_TRANSCRIPT_WINDOW = 100
+# Keep at most this many conversation items (user + assistant turns) in the
+# chat context. truncate() always preserves the system instruction message.
+# 10 items = 5 Q&A pairs ≈ ~750 tokens for history.
+_CHAT_HISTORY_WINDOW = 10
 _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 
@@ -118,6 +129,10 @@ class Assistant(Agent):
         # Tracks whether the ack was already played from a partial transcript hit,
         # so on_user_turn_completed doesn't double-play it.
         self._partial_wake_fired: bool = False
+        # ID of the rolling transcript system message kept in the chat context.
+        # Each turn we remove the old one and insert a fresh snapshot so the
+        # chat history never accumulates multiple embedded transcripts.
+        self._transcript_msg_id: str | None = None
 
     async def on_enter(self) -> None:
         # Do NOT call session.generate_reply() here.
@@ -181,7 +196,9 @@ class Assistant(Agent):
                 logger.info("Wake listening timed out — suppressing LLM")
                 raise StopResponse()
             logger.info("Listening mode query: %.80r", raw.strip())
-            new_message.content = [self._with_context(raw.strip())]
+            self._refresh_transcript_in_ctx(turn_ctx, new_message)
+            new_message.content = [raw.strip()]
+            await self.update_chat_ctx(turn_ctx)
             return
 
         query = _extract_query(raw)
@@ -203,14 +220,48 @@ class Assistant(Agent):
 
         # ── Wake word + inline query — dispatch to LLM with meeting context ──
         logger.info("Wake query dispatched: %.80r", query)
-        new_message.content = [self._with_context(query)]
+        self._refresh_transcript_in_ctx(turn_ctx, new_message)
+        new_message.content = [query]
+        await self.update_chat_ctx(turn_ctx)
 
-    def _with_context(self, query: str) -> str:
-        """Prepend the full meeting transcript to the query."""
+    def _refresh_transcript_in_ctx(
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+    ) -> None:
+        """Replace the rolling transcript system message and apply sliding windows.
+
+        Two caps are enforced on every LLM call to guarantee the request never
+        exceeds the Cerebras TPM limit regardless of meeting length:
+
+        1. Transcript window: only the most recent _TRANSCRIPT_WINDOW utterances
+           are included in the snapshot (~4 k tokens).
+        2. Chat history window: turn_ctx is truncated to _CHAT_HISTORY_WINDOW
+           items so accumulated Q&A pairs don't grow unbounded (~750 tokens).
+           truncate() always preserves the system instruction message.
+        """
+        # Remove the previous snapshot first so it isn't counted by truncate().
+        if self._transcript_msg_id:
+            idx = turn_ctx.index_by_id(self._transcript_msg_id)
+            if idx is not None:
+                turn_ctx.items.pop(idx)
+            self._transcript_msg_id = None
+
+        # Slide the conversation history window.
+        turn_ctx.truncate(max_items=_CHAT_HISTORY_WINDOW)
+
         if not self._transcript:
-            return query
-        full = "\n".join(self._transcript)
-        return f"[Meeting transcript so far]\n{full}\n\n[Question]\n{query}"
+            return
+
+        # Use only the most recent utterances for the snapshot.
+        recent = list(self._transcript)[-_TRANSCRIPT_WINDOW:]
+        snapshot = "[Meeting transcript (recent)]\n" + "\n".join(recent)
+
+        # Insert just before the pending user message so ordering is natural.
+        user_idx = turn_ctx.index_by_id(new_message.id)
+        insert_at = user_idx if user_idx is not None else len(turn_ctx.items)
+
+        msg = llm.ChatMessage(role="system", content=[snapshot])
+        turn_ctx.items.insert(insert_at, msg)
+        self._transcript_msg_id = msg.id
 
 
 server = AgentServer()
