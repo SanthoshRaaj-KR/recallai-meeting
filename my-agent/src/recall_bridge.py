@@ -223,7 +223,13 @@ class StartBotResponse(BaseModel):
     status: str
     bot_id: str
     room_name: str
+    # session_id mirrors room_name — required by the sync-sage-bot frontend's
+    # SessionStatus interface. Without it, MeetingInput cannot pass the session
+    # to MeetingLive via the URL, causing MeetingLive to see status="idle" and
+    # dispatch a second Recall bot into the same meeting.
+    session_id: str
     meeting_url: str
+    change_count: int = 0
 
 
 class ExecuteBody(BaseModel):
@@ -377,7 +383,9 @@ async def start_bot(body: StartBotRequest) -> StartBotResponse:
         status="joining",
         bot_id=bot_id,
         room_name=room_name,
+        session_id=room_name,
         meeting_url=body.meeting_url,
+        change_count=0,
     )
 
 
