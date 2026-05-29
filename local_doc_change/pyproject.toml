@@ -26,6 +26,7 @@ dependencies = [
     "striprtf>=0.0.32",
     "pymupdf4llm>=1.27.2.3",
     "nltk>=3.9.4",
+    "openai-agents>=0.17.4",
 ]
 
 [dependency-groups]
