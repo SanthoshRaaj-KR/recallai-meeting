@@ -124,10 +124,18 @@ class HybridRetriever:
         if not chunks:
             return []
 
+        # When dense_only=True but FAISS index is unavailable, fall back to BM25.
+        # This prevents silent empty results when no OpenAI client was provided
+        # at index-build time (graceful degradation without credentials).
+        effective_dense_only = dense_only and self._index.faiss_index is not None
+        effective_bm25_only = bm25_only or (
+            dense_only and self._index.faiss_index is None
+        )
+
         # ── Step 1: BM25 top-20 ───────────────────────────────────────────────
         bm25_ids: list[str] = []
         bm25_rank_map: dict[str, int] = {}
-        if not dense_only:
+        if not effective_dense_only:
             scores = self._index.bm25.get_scores(_tokenize(text))
             top_indices = np.argsort(scores)[::-1][:20]
             bm25_ids = [self._index.chunk_ids[i] for i in top_indices]
@@ -136,7 +144,7 @@ class HybridRetriever:
         # ── Step 2: FAISS top-20 ─────────────────────────────────────────────
         dense_ids: list[str] = []
         dense_rank_map: dict[str, int] = {}
-        if not bm25_only and self._index.faiss_index is not None:
+        if not effective_bm25_only and self._index.faiss_index is not None:
             q_vec = self._embed_query(text)
             D, I = self._index.faiss_index.search(q_vec, min(20, len(chunks)))
             dense_ids = [
