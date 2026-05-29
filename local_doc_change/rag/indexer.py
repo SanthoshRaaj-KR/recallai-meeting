@@ -1,0 +1,275 @@
+"""BM25 + FAISS document indexer with disk cache.
+
+FAISS FlatIP is O(N) search; adequate for <=5K chunks (~500 pages). For
+larger corpora, replace faiss.IndexFlatIP with
+faiss.IndexIVFFlat(quantizer, dim, nlist) where nlist=int(sqrt(N)). This
+requires calling index.train(vecs) before index.add(vecs).
+
+Index is persisted to disk under ``local_doc_change/index/<folder_hash>/``
+and reloaded on subsequent calls when folder contents are unchanged (same
+file-modification-time fingerprint).
+
+Security — T-12-02: only supported extensions are scanned when building the
+index.  Unknown file types are silently skipped.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import os
+import pickle
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+import faiss  # type: ignore[import]
+import numpy as np
+from rank_bm25 import BM25Okapi
+
+from models.rag import ChunkRecord
+from rag.chunker import chunk_document
+from rag.contextualizer import add_context_prefixes
+
+logger = logging.getLogger(__name__)
+
+# ── Cache directory (relative to project root; created at module load time) ───
+_PROJECT_ROOT = Path(__file__).parent.parent
+CACHE_DIR = _PROJECT_ROOT / "index"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Supported document extensions (must match chunker allowlist) ──────────────
+_DOC_EXTENSIONS = {".docx", ".odt", ".pdf", ".txt", ".md", ".rtf"}
+
+# ── FAISS embedding dimension (text-embedding-3-small) ───────────────────────
+_EMBED_DIM = 1536
+
+
+# ── Public dataclass ──────────────────────────────────────────────────────────
+
+
+@dataclass
+class DocumentIndex:
+    """In-memory RAG index for a folder of documents."""
+
+    chunks: list[ChunkRecord]
+    bm25: BM25Okapi
+    faiss_index: Optional[Any]  # faiss.IndexFlatIP or None when no embeddings
+    id_to_chunk: dict[str, ChunkRecord]
+    folder_hash: str
+    # Internal: stored alongside index for retrieval
+    chunk_ids: list[str] = field(default_factory=list)
+
+
+# ── Public function ───────────────────────────────────────────────────────────
+
+
+def build_index(
+    folder_path: str,
+    use_embeddings: bool = True,
+    contextual_retrieval: bool = True,
+    openai_client=None,
+) -> DocumentIndex:
+    """Build (or load from cache) a BM25 + FAISS index for a folder.
+
+    Parameters
+    ----------
+    folder_path:
+        Directory containing the documents to index.
+    use_embeddings:
+        When True and *openai_client* is not None, generate dense embeddings
+        via the OpenAI Embeddings API and add them to a FAISS FlatIP index.
+        When False, ``faiss_index`` is ``None``.
+    contextual_retrieval:
+        When True and *openai_client* is not None, prepend an LLM-generated
+        context description to each chunk before BM25/embedding (improves
+        retrieval quality for short sections).
+    openai_client:
+        An initialised ``openai.OpenAI`` or ``openai.AsyncOpenAI`` client.
+        Required for contextual retrieval and dense embeddings.
+
+    Returns
+    -------
+    DocumentIndex
+        Populated index ready for :class:`rag.retriever.HybridRetriever`.
+    """
+    folder_hash = _compute_folder_hash(folder_path)
+    cache_path = CACHE_DIR / folder_hash
+
+    # ── Fast path: load from disk cache ──────────────────────────────────────
+    chunks_file = cache_path / "chunks.json"
+    bm25_file = cache_path / "bm25.pkl"
+    faiss_file = cache_path / "faiss.bin"
+
+    if chunks_file.exists() and bm25_file.exists():
+        try:
+            chunks = _load_chunks(chunks_file)
+            with open(bm25_file, "rb") as f:
+                bm25 = pickle.load(f)
+            faiss_idx: Optional[Any] = None
+            if faiss_file.exists():
+                faiss_idx = faiss.read_index(str(faiss_file))
+            id_to_chunk = {c.chunk_id: c for c in chunks}
+            chunk_ids = [c.chunk_id for c in chunks]
+            logger.info(
+                "Loaded index from cache %s (%d chunks)", folder_hash, len(chunks)
+            )
+            return DocumentIndex(
+                chunks=chunks,
+                bm25=bm25,
+                faiss_index=faiss_idx,
+                id_to_chunk=id_to_chunk,
+                folder_hash=folder_hash,
+                chunk_ids=chunk_ids,
+            )
+        except Exception as exc:
+            logger.warning("Cache load failed (%s); rebuilding index.", exc)
+
+    # ── Slow path: build from scratch ────────────────────────────────────────
+    chunks = _gather_chunks(folder_path)
+    if not chunks:
+        logger.warning("No supported documents found in %s", folder_path)
+
+    # Optional contextual retrieval (LLM prefix enrichment)
+    if contextual_retrieval and openai_client is not None and chunks:
+        try:
+            chunks = asyncio.run(
+                add_context_prefixes(chunks, openai_client)
+            )
+        except RuntimeError:
+            # Already inside an event loop (e.g. pytest-asyncio)
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run, add_context_prefixes(chunks, openai_client)
+                )
+                chunks = future.result()
+        except Exception as exc:
+            logger.warning("Contextual retrieval enrichment failed: %s", exc)
+
+    # BM25 index
+    tokenized = [_tokenize(c.context_prefix + " " + c.content) for c in chunks]
+    bm25 = BM25Okapi(tokenized)
+
+    # FAISS index (optional)
+    faiss_idx = None
+    if use_embeddings and openai_client is not None and chunks:
+        faiss_idx = _build_faiss_index(chunks, openai_client)
+
+    id_to_chunk = {c.chunk_id: c for c in chunks}
+    chunk_ids = [c.chunk_id for c in chunks]
+
+    # Persist to cache
+    try:
+        cache_path.mkdir(parents=True, exist_ok=True)
+        _save_chunks(chunks, chunks_file)
+        with open(bm25_file, "wb") as f:
+            pickle.dump(bm25, f)
+        if faiss_idx is not None:
+            faiss.write_index(faiss_idx, str(faiss_file))
+    except Exception as exc:
+        logger.warning("Failed to persist index cache: %s", exc)
+
+    return DocumentIndex(
+        chunks=chunks,
+        bm25=bm25,
+        faiss_index=faiss_idx,
+        id_to_chunk=id_to_chunk,
+        folder_hash=folder_hash,
+        chunk_ids=chunk_ids,
+    )
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+
+def _compute_folder_hash(folder_path: str) -> str:
+    """Fingerprint a folder by path + mtime of all supported files."""
+    folder = Path(folder_path)
+    entries: list[str] = []
+    for ext in sorted(_DOC_EXTENSIONS):
+        for fpath in sorted(folder.rglob(f"*{ext}")):
+            try:
+                mtime = os.path.getmtime(fpath)
+                entries.append(f"{fpath!s}:{mtime}")
+            except OSError:
+                pass
+    fingerprint = "\n".join(entries).encode()
+    return hashlib.md5(fingerprint).hexdigest()[:16]
+
+
+def _gather_chunks(folder_path: str) -> list[ChunkRecord]:
+    """Chunk all supported documents in *folder_path*."""
+    folder = Path(folder_path)
+    chunks: list[ChunkRecord] = []
+    for ext in sorted(_DOC_EXTENSIONS):
+        for fpath in sorted(folder.rglob(f"*{ext}")):
+            try:
+                file_chunks = chunk_document(str(fpath))
+                chunks.extend(file_chunks)
+            except Exception as exc:
+                logger.warning("Failed to chunk %s: %s", fpath, exc)
+    return chunks
+
+
+def _build_faiss_index(
+    chunks: list[ChunkRecord],
+    openai_client,
+) -> Optional[Any]:
+    """Embed all chunks and build a FAISS FlatIP index."""
+    texts = [c.context_prefix + " " + c.content for c in chunks]
+    batch_size = 100
+    all_embeddings: list[list[float]] = []
+
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        try:
+            response = openai_client.embeddings.create(
+                input=batch,
+                model="text-embedding-3-small",
+            )
+            batch_embs = [item.embedding for item in response.data]
+            all_embeddings.extend(batch_embs)
+        except Exception as exc:
+            logger.warning("Embedding batch %d failed: %s; using zeros.", i, exc)
+            all_embeddings.extend([[0.0] * _EMBED_DIM] * len(batch))
+
+    vecs = np.array(all_embeddings, dtype=np.float32)
+    if vecs.ndim != 2 or vecs.shape[1] != _EMBED_DIM:
+        logger.warning("Unexpected embedding shape %s; skipping FAISS.", vecs.shape)
+        return None
+
+    faiss.normalize_L2(vecs)
+    index = faiss.IndexFlatIP(_EMBED_DIM)
+    index.add(vecs)
+    return index
+
+
+def _tokenize(text: str) -> list[str]:
+    """Tokenize text for BM25; removes stop words if NLTK data is available."""
+    tokens = re.findall(r"\b[a-zA-Z]{2,}\b", text.lower())
+    try:
+        from nltk.corpus import stopwords  # type: ignore[import]
+
+        stop = set(stopwords.words("english"))
+        tokens = [t for t in tokens if t not in stop]
+    except Exception:
+        pass
+    return tokens
+
+
+def _save_chunks(chunks: list[ChunkRecord], path: Path) -> None:
+    """Serialise a list of ChunkRecord objects to JSON."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump([c.model_dump() for c in chunks], f, ensure_ascii=False)
+
+
+def _load_chunks(path: Path) -> list[ChunkRecord]:
+    """Deserialise a list of ChunkRecord objects from JSON."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return [ChunkRecord.model_validate(item) for item in data]
