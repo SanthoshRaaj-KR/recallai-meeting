@@ -152,7 +152,7 @@ Plans:
 Plans:
 - [x] 12-01-PLAN.md — Pydantic models (LocalDocIntent, ChunkRecord, LocalDocProposal) + failing test suite TDD red (Wave 0) — COMPLETE 2026-05-29
 - [x] 12-02-PLAN.md — RAG layer: docling chunker, BM25+FAISS indexer with disk cache, hybrid retriever with RRF + optional cross-encoder rerank (Wave 1) — COMPLETE 2026-05-29
-- [ ] 12-03-PLAN.md — Agent chain: IntentExtractionAgent, EvaluationAgent, LocalDocEditorAgent, VerifierAgent — OpenAI Agents SDK (Wave 2)
+- [x] 12-03-PLAN.md — Agent chain: IntentExtractionAgent, EvaluationAgent, LocalDocEditorAgent, VerifierAgent — OpenAI Agents SDK (Wave 2) — COMPLETE 2026-05-29
 - [ ] 12-04-PLAN.md — Pipeline orchestrator (run.py), SafeApply write-back with backup + audit trail, 4 new FastAPI endpoints in recall_bridge.py (Wave 3)
 - [ ] 12-05-PLAN.md — Frontend: LocalDocProposalCard, PipelinePage "Local Doc" tab, TypeScript types + api.ts functions (Wave 4)
 
@@ -169,4 +169,4 @@ Plans:
 | 5. Safe Apply Hardening + Re-indexing | 2/2 | Complete | 2026-05-16 |
 | 7. Confluence Document Q&A Agent | 2/2 | Complete | 2026-05-17 |
 | 8. Auto-Generated Proposals — Quality, Accept, UI, Tests | 0/5 | Ready to execute | - |
-| 12. Local Document Change Pipeline | 2/5 | Executing (RAG layer complete) | - |
+| 12. Local Document Change Pipeline | 3/5 | Executing (agent chain complete) | - |
