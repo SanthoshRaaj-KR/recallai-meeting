@@ -17,6 +17,8 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "requests>=2.31",
     "livekit-api>=0.7",
+    "openai>=1.0",
+    "mcp>=1.0",
 ]
 
 [dependency-groups]
