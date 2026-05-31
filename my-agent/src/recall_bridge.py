@@ -426,6 +426,67 @@ async def bot_page() -> HTMLResponse:
     return HTMLResponse(_BOT_HTML_PATH.read_text(encoding="utf-8"))
 
 
+# ── Endpoints: Recall webhook ──────────────────────────────────────────────────
+
+def _session_for_bot(bot_id: str) -> "_SessionRecord | None":
+    """Return the session whose Recall bot_id matches, or None."""
+    return next((s for s in _sessions.values() if s.bot_id == bot_id), None)
+
+
+@app.post("/recall-webhook")
+async def recall_webhook(request: Request) -> dict:
+    """Receive Recall.ai project-level webhook events.
+
+    Register BRIDGE_SERVER_URL/recall-webhook in the Recall dashboard under
+    Webhooks → Events: bot.status_change (and optionally bot.participant_events).
+
+    Handles:
+      bot.status_change   → transitions session status (joining → in_meeting → ended)
+      bot.done            → marks session ended (legacy event name)
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": True}
+
+    event = body.get("event", "")
+    data = body.get("data", {})
+
+    # bot.status_change: {"event": "bot.status_change", "data": {"bot_id": "...", "status": {"code": "..."}}}
+    if event in ("bot.status_change", "bot.done"):
+        bot_id = data.get("bot_id", "")
+        s = _session_for_bot(bot_id) if bot_id else None
+        if s:
+            status_obj = data.get("status") or {}
+            code = status_obj.get("code") or (data.get("code") if event == "bot.done" else "")
+            new_status = _RECALL_STATUS_MAP.get(code, "")
+            if new_status and new_status != s.status:
+                s.status = new_status
+                if new_status in ("ended", "error") and not s.ended_at:
+                    s.ended_at = _utcnow()
+                s._touch()
+                logger.info("Recall webhook %s → session %s status=%s", event, s.session_id, new_status)
+        return {"ok": True}
+
+    # bot.participant_events: track current speaker for per-participant transcript attribution
+    if event == "bot.participant_events":
+        bot_id = data.get("bot_id", "")
+        s = _session_for_bot(bot_id) if bot_id else None
+        if s:
+            for evt in data.get("events", []):
+                etype = evt.get("type", "")
+                participant_name = (evt.get("participant") or {}).get("name", "").strip()
+                if not participant_name:
+                    continue
+                if etype == "speech_on":
+                    logger.debug("Speaker ON  [%s] → %s", s.session_id, participant_name)
+                elif etype == "speech_off":
+                    logger.debug("Speaker OFF [%s] → %s", s.session_id, participant_name)
+        return {"ok": True}
+
+    return {"ok": True}
+
+
 # ── Endpoints: health ──────────────────────────────────────────────────────────
 
 @app.get("/health")

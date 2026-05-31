@@ -370,6 +370,35 @@ def update_proposal_status(proposal_id: str, status: str) -> bool:
     return False
 
 
+def list_proposals_by_session(session_id: str, user_id: str) -> List[Dict[str, Any]]:
+    """Return all proposals for a session from the proposals table, ordered by creation time.
+
+    Used by GET /sessions/{session_id}/review/changes to surface pipeline-generated
+    cards after the SSE stream completes and across server restarts.
+    """
+    if not is_configured() or not session_id or not user_id:
+        return []
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/proposals",
+            headers=_rest_headers(),
+            params={
+                "session_id": f"eq.{session_id}",
+                "user_id": f"eq.{user_id}",
+                "select": "*",
+                "order": "created_at.asc",
+                "limit": "200",
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        logger.warning("list_proposals_by_session failed for %s: %s", session_id, exc)
+    return []
+
+
 def get_pipeline_job(job_id: str) -> Optional[Dict[str, Any]]:
     """Fetch a single pipeline_jobs row by job_id. Returns the row dict or None.
 

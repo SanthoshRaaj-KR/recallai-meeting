@@ -2614,8 +2614,23 @@ async def get_review_changes_for_session(
     state = _get_meeting_state(session_id)
     history_item, user = _history_item_for_request(session_id, authorization)
     _hydrate_state_from_history_item(state, history_item, user)
-    pending: List[Dict[str, Any]] = state.get("pending_changes", [])
-    return pending
+
+    # Legacy propose-changes cards stored in meeting_history.summary_json
+    legacy: List[Dict[str, Any]] = state.get("pending_changes", [])
+    # Pipeline proposals stored in the proposals Supabase table — these survive
+    # server restarts and are the authoritative source after a pipeline run.
+    pipeline_proposals: List[Dict[str, Any]] = []
+    if user and user.get("id"):
+        pipeline_proposals = await asyncio.to_thread(
+            supabase_store.list_proposals_by_session, session_id, user["id"]
+        )
+    if pipeline_proposals:
+        # Pipeline proposals take precedence; include legacy cards only if they
+        # have no Supabase counterpart (e.g. older sessions before the pipeline).
+        pipeline_ids = {str(p.get("id")) for p in pipeline_proposals if p.get("id")}
+        extra_legacy = [c for c in legacy if str(c.get("id")) not in pipeline_ids]
+        return pipeline_proposals + extra_legacy
+    return legacy
 
 
 @router.post("/review/changes/propose")
