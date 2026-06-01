@@ -72,10 +72,12 @@ def _build_github_toolset() -> mcp.MCPToolset | None:
     if not _GITHUB_TOKEN:
         logger.warning("GITHUB_TOKEN not set — starting without GitHub tools")
         return None
+    # On Windows, Python subprocesses cannot resolve bare "npx" — use "npx.cmd".
+    _npx = "npx.cmd" if os.name == "nt" else "npx"
     return mcp.MCPToolset(
         id="github",
         mcp_server=mcp.MCPServerStdio(
-            command="npx",
+            command=_npx,
             args=["-y", "@modelcontextprotocol/server-github@2025.4.8"],
             env={
                 **os.environ,

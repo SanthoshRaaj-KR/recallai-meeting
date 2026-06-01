@@ -831,6 +831,67 @@ async def pipeline_stream(job_id: str, token: str = "") -> StreamingResponse:
     )
 
 
+# ── Endpoints: stop bot ────────────────────────────────────────────────────────
+
+@app.post("/sessions/{session_id}/bot/stop")
+async def stop_bot(session_id: str) -> dict:
+    """Remove the Recall bot from the meeting and mark the session ended.
+
+    Calls the Recall.ai DELETE /bot/{id}/ endpoint to eject the bot, then
+    updates session status to 'ended' so the frontend poll sees the change
+    immediately without waiting for the webhook.
+    """
+    s = _require_session(session_id)
+    if s.bot_id and RECALL_API_KEY:
+        try:
+            resp = requests.delete(
+                f"{RECALL_BASE_URL}/bot/{s.bot_id}/",
+                headers={"Authorization": f"Token {RECALL_API_KEY}"},
+                timeout=10,
+            )
+            if not resp.ok:
+                logger.warning(
+                    "Recall bot removal returned %s for bot_id=%s — marking session ended anyway",
+                    resp.status_code, s.bot_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to remove Recall bot %s: %s", s.bot_id, exc)
+    s.status = "ended"
+    if not s.ended_at:
+        s.ended_at = _utcnow()
+    s._touch()
+    return s.as_session_status()
+
+
+# ── Endpoints: review — reject proposal ────────────────────────────────────────
+
+@app.post("/sessions/{session_id}/review/changes/{change_id}/reject")
+async def reject_proposal(session_id: str, change_id: str) -> dict:
+    """Mark a single proposal as rejected without executing it.
+
+    Rejected proposals are preserved in the session store so the audit trail
+    is complete, but they are excluded from future execute-all calls.
+    """
+    s = _require_session(session_id)
+    for ch in s.changes:
+        if str(ch.get("id")) == change_id:
+            ch["status"] = "rejected"
+            s._touch()
+            return ch
+    raise HTTPException(status_code=404, detail=f"Proposal {change_id!r} not found")
+
+
+# ── Endpoints: review — transcript ─────────────────────────────────────────────
+
+@app.get("/sessions/{session_id}/review/transcript")
+async def get_transcript(session_id: str) -> list:
+    """Return the full raw transcript captured for this session.
+
+    Each entry has: participant, text, timestamp (epoch float), source.
+    """
+    return _require_session(session_id).transcript
+
+
 # ── Endpoints: history ─────────────────────────────────────────────────────────
 
 @app.get("/history")
