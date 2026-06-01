@@ -6,9 +6,18 @@ The import is deferred into each test body so pytest can collect without errors.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from models import LocalDocIntent, LocalDocProposal
+
+# These tests make live OpenAI Agents calls. Skip (don't fail) when no key is
+# configured so the suite stays deterministic offline / in CI.
+requires_openai = pytest.mark.skipif(
+    not os.getenv("OPENAI_API_KEY"),
+    reason="OPENAI_API_KEY not set — live agent call skipped",
+)
 
 TRANSCRIPT = (
     "We need to update the data retention policy. "
@@ -17,6 +26,7 @@ TRANSCRIPT = (
 )
 
 
+@requires_openai
 @pytest.mark.asyncio
 async def test_intent_extraction_returns_intents():
     """IntentExtractionAgent returns a non-empty list of LocalDocIntent."""
@@ -38,6 +48,7 @@ def test_intent_extraction_confidence_threshold():
     pytest.fail("NOT IMPLEMENTED — IntentExtractionAgent not yet built")
 
 
+@requires_openai
 @pytest.mark.asyncio
 async def test_verifier_scores_proposal():
     """VerifierAgent returns scores in [0,1] and a non-empty verifier_note."""
