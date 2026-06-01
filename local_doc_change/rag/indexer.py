@@ -216,11 +216,42 @@ def _gather_chunks(folder_path: str) -> list[ChunkRecord]:
     return chunks
 
 
+def _as_sync_embeddings_client(openai_client):
+    """Return a synchronous OpenAI client suitable for embeddings.
+
+    Accepts either a sync OpenAI client (returned as-is) or an AsyncOpenAI
+    client (a new sync client is built from its api_key). Returns None if no
+    API key can be resolved.
+    """
+    import openai
+
+    if isinstance(openai_client, openai.OpenAI):
+        return openai_client
+    api_key = getattr(openai_client, "api_key", None) or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    return openai.OpenAI(api_key=api_key)
+
+
 def _build_faiss_index(
     chunks: list[ChunkRecord],
     openai_client,
 ) -> Optional[Any]:
-    """Embed all chunks and build a FAISS FlatIP index."""
+    """Embed all chunks and build a FAISS FlatIP index.
+
+    build_index() runs synchronously (often from inside a running event loop in
+    the async pipeline), so we must use a *synchronous* embeddings client here.
+    The pipeline passes an AsyncOpenAI client (needed by the contextualizer);
+    calling .embeddings.create() on it returns an un-awaited coroutine and the
+    embeddings silently become zero vectors. Derive a sync client instead.
+    """
+    import openai
+
+    sync_client = _as_sync_embeddings_client(openai_client)
+    if sync_client is None:
+        logger.warning("No usable embeddings client; skipping FAISS dense index.")
+        return None
+
     texts = [c.context_prefix + " " + c.content for c in chunks]
     batch_size = 100
     all_embeddings: list[list[float]] = []
@@ -228,7 +259,7 @@ def _build_faiss_index(
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
         try:
-            response = openai_client.embeddings.create(
+            response = sync_client.embeddings.create(
                 input=batch,
                 model="text-embedding-3-small",
             )

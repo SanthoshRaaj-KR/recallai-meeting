@@ -68,6 +68,18 @@ def chunk_document(file_path: str) -> list[ChunkRecord]:
     if ext == "rtf":
         return _handle_rtf(file_path, ext)
 
+    # Plain text: read raw to preserve line structure. docling reflows .txt into
+    # one paragraph, collapsing "SECTION N." headings into the body line and
+    # destroying section granularity (and breaking write-back). Raw read keeps
+    # headings on their own lines so _promote_plaintext_headings can detect them.
+    if ext == "txt":
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            logger.warning("Failed to read text file %s: %s", file_path, exc)
+            return []
+        return _markdown_to_chunks(raw, file_path, ext)
+
     # All other formats: docling single-API conversion
     try:
         result = _CONVERTER.convert(str(path))
@@ -159,6 +171,17 @@ def _markdown_to_chunks(
         re.match(r"^#+ ", s.lstrip()) for s in sections
     )
 
+    # Plain-text docs (esp. .txt) often carry headings that docling does NOT
+    # promote to Markdown '#': e.g. "SECTION 1. ..." or ALL-CAPS title lines.
+    # Promote those to Markdown headings before giving up to page-level windows,
+    # so retrieval and write-back operate at section granularity.
+    if not has_headings:
+        promoted = _promote_plaintext_headings(markdown)
+        if promoted is not None:
+            markdown = promoted
+            sections = re.split(r"\n(?=#+ )", markdown)
+            has_headings = True
+
     if not has_headings:
         return _page_level_fallback(markdown, file_path, source_format)
 
@@ -216,6 +239,46 @@ def _markdown_to_chunks(
         global_index += 1
 
     return chunks
+
+
+def _looks_like_plaintext_heading(line: str) -> bool:
+    """Heuristic: is this line a section heading in a plain-text document?
+
+    Domain-agnostic — detects two common conventions without hardcoding any
+    specific document's wording:
+      1. Numbered section markers: "SECTION 1. ...", "1. ...", "1.2 ..." etc.
+      2. Short ALL-CAPS title lines (the alphabetic characters are all upper).
+    """
+    s = line.strip()
+    if not s or len(s) > 70:
+        return False
+    # Numbered section conventions (SECTION N., N., N.N) followed by a word
+    if re.match(r"^(SECTION\s+)?\d+(\.\d+)*\.?\s+\S", s, re.IGNORECASE) and s.upper() == s:
+        return True
+    # ALL-CAPS heading line: needs >=3 letters, and every letter is uppercase
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) >= 3 and all(c.isupper() for c in letters):
+        return True
+    return False
+
+
+def _promote_plaintext_headings(text: str) -> str | None:
+    """Prefix detected plain-text heading lines with '# '.
+
+    Returns the rewritten text if at least one heading was found, else None
+    (signalling the caller to fall back to page-level windowing).
+    """
+    out_lines: list[str] = []
+    found = 0
+    for line in text.split("\n"):
+        if _looks_like_plaintext_heading(line):
+            out_lines.append(f"# {line.strip()}")
+            found += 1
+        else:
+            out_lines.append(line)
+    if found == 0:
+        return None
+    return "\n".join(out_lines)
 
 
 def _page_level_fallback(

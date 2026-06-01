@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 12-03-PLAN.md
-last_updated: "2026-05-29T07:00:00.000Z"
+stopped_at: Completed 12-04-PLAN.md
+last_updated: "2026-05-29T12:00:00.000Z"
 last_activity: 2026-05-29
 progress:
   total_phases: 12
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-05-16)
 
 ## Current Position
 
-Phase: 12 of 12 (local-doc-change-pipeline) — Plan 3 of 5 complete
-Plan: 3 complete (Wave 2 Agent Chain — IntentExtractionAgent, EvaluationAgent, LocalDocEditorAgent, VerifierAgent all GREEN)
-Status: test_agents.py (2 passed, 1 skipped). agents_local/ package complete.
+Phase: 12 of 12 (local-doc-change-pipeline) — Plan 4 of 5 complete
+Plan: 4 complete (Wave 3 Pipeline + SafeApply + 4 FastAPI endpoints)
+Status: test_safe_apply.py (5/5 GREEN), test_pipeline.py (3/3 GREEN). pipeline/ package complete.
 Last activity: 2026-05-29
 
 Progress: [████░░░░░░] 40%
@@ -61,6 +61,7 @@ Progress: [████░░░░░░] 40%
 | Phase 12-local-doc-change-pipeline P01 | 20min | 3 tasks | 17 files |
 | Phase 12-local-doc-change-pipeline P02 | 10min | 4 tasks | 5 files |
 | Phase 12-local-doc-change-pipeline P03 | 25min | 3 tasks | 5 files |
+| Phase 12-local-doc-change-pipeline P04 | 20min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,7 @@ Recent decisions affecting current work:
 - [Phase 12-01]: Deferred in-body imports in RED phase tests prevents collection errors; conftest.py adds project root to sys.path; python-docx added for fixture generation
 - [Phase 12-02]: dense_only falls back to BM25 when FAISS index absent (no credentials); module-level _CONVERTER singleton avoids repeated ML init; index cache keyed by MD5(path+mtime)
 - [Phase 12-03]: AgentOutputSchema(strict_json_schema=False) for LocalDocIntent (untyped dict field); test_intent_extraction_confidence_threshold marked skip (requires mocked LLM)
+- [Phase 12-04]: SafeApply backup-before-write always runs; session_id sanitised with [a-zA-Z0-9_-] allowlist for audit filenames; asyncio.wait_for(300s) SSE auto-close; deferred imports in run_pipeline() break circular import at FastAPI startup
 
 ### Pending Todos
 

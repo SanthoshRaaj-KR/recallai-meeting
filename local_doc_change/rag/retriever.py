@@ -20,11 +20,32 @@ from typing import Any, Optional
 import numpy as np
 
 from models.rag import ChunkRecord, RetrievalResult
-from rag.indexer import DocumentIndex, _tokenize  # reuse shared tokenizer
+from rag.indexer import (  # reuse shared tokenizer + sync-client helper
+    DocumentIndex,
+    _as_sync_embeddings_client,
+    _tokenize,
+)
 
 logger = logging.getLogger(__name__)
 
 _EMBED_DIM = 1536
+
+
+def _get_sync_embeddings_client(attached):
+    """Resolve a synchronous embeddings client from the attached client or env.
+
+    The query path runs synchronously; an AsyncOpenAI client would return an
+    un-awaited coroutine. Derive a sync client (from the attached client's
+    api_key, or OPENAI_API_KEY) so dense retrieval actually works.
+    """
+    if attached is not None:
+        return _as_sync_embeddings_client(attached)
+    import os
+
+    import openai
+
+    key = os.getenv("OPENAI_API_KEY")
+    return openai.OpenAI(api_key=key) if key else None
 
 
 # ── Module-level RRF helper ───────────────────────────────────────────────────
@@ -209,7 +230,9 @@ class HybridRetriever:
 
         Falls back to a zero vector when no OpenAI client is attached.
         """
-        client = getattr(self._index, "_openai_client", None)
+        client = _get_sync_embeddings_client(
+            getattr(self._index, "_openai_client", None)
+        )
         if client is None:
             return np.zeros((1, _EMBED_DIM), dtype=np.float32)
         try:
