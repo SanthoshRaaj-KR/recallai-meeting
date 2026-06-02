@@ -2696,7 +2696,7 @@ async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str)
 @app.get("/health")
 async def health():
     return {
-        "status": "healthy_agentic",
+        "status": "ok",
         "bot_id": meeting_state["bot_id"],
         "transcript_provider": RECALL_TRANSCRIPT_PROVIDER,
         "tts_provider": JARVIS_TTS_PROVIDER,

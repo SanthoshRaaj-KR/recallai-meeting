@@ -844,8 +844,8 @@ async def stop_bot(session_id: str) -> dict:
     s = _require_session(session_id)
     if s.bot_id and RECALL_API_KEY:
         try:
-            resp = requests.delete(
-                f"{RECALL_BASE_URL}/bot/{s.bot_id}/",
+            resp = requests.post(
+                f"{RECALL_BASE_URL}/bot/{s.bot_id}/leave_call/",
                 headers={"Authorization": f"Token {RECALL_API_KEY}"},
                 timeout=10,
             )

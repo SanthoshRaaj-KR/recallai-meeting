@@ -2585,8 +2585,53 @@ async def get_bot_status_for_session(
     history_item, user = _history_item_for_request(session_id, authorization)
     _hydrate_state_from_history_item(state, history_item, user)
     response = _build_bot_status_response(state)
+    # Fix #8: include pipeline proposals in change_count (they live in Supabase, not in-memory state)
+    if user and user.get("id") and response.get("change_count", 0) == 0:
+        pipeline_proposals = await asyncio.to_thread(
+            supabase_store.list_proposals_by_session, session_id, user["id"]
+        )
+        pending_count = sum(1 for p in pipeline_proposals if p.get("status") == "pending")
+        if pending_count:
+            response["change_count"] = pending_count
     _persist_history_snapshot(state, user)
     return response
+
+
+# ---------------------------------------------------------------------------
+# POST /sessions/{session_id}/bot/stop
+# ---------------------------------------------------------------------------
+
+@router.post("/sessions/{session_id}/bot/stop")
+async def stop_bot_for_session(
+    session_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Eject the Recall bot from the meeting and mark the session as ended."""
+    state = _get_meeting_state(session_id)
+    bot_id = state.get("bot_id")
+
+    if bot_id and state.get("session_status") not in {"ended", "error"}:
+        try:
+            from confluence_logic.jarvis_agentic import RECALL_API_KEY, RECALL_BASE_URL  # noqa: PLC0415
+            if RECALL_API_KEY:
+                await asyncio.to_thread(
+                    lambda: requests.delete(
+                        f"{RECALL_BASE_URL}/bot/{bot_id}/",
+                        headers={"Authorization": f"Token {RECALL_API_KEY}"},
+                        timeout=8,
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Recall bot removal failed (non-fatal): %s", exc)
+
+    state["is_active"] = False
+    state["session_status"] = "ended"
+    state["ended_at"] = _utc_now_iso()
+    state["end_reason"] = "stopped_by_user"
+
+    user = _auth_user_from_header(authorization)
+    _persist_history_snapshot(state, user)
+    return _build_bot_status_response(state)
 
 
 # ---------------------------------------------------------------------------
@@ -2827,6 +2872,67 @@ async def regenerate_proposal(
     if isinstance(updated_row, dict):
         merged.update(updated_row)
     return merged
+
+
+# ---------------------------------------------------------------------------
+# POST /sessions/{session_id}/review/changes/{proposal_id}/reject
+# ---------------------------------------------------------------------------
+
+@router.post("/sessions/{session_id}/review/changes/{proposal_id}/reject")
+async def reject_proposal_for_session(
+    session_id: str,
+    proposal_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Mark a single proposal as rejected without executing it."""
+    # Pipeline proposals — UUID string IDs stored in Supabase
+    if supabase_store.is_configured():
+        ok = await asyncio.to_thread(supabase_store.update_proposal_status, proposal_id, "rejected")
+        if ok:
+            row = await asyncio.to_thread(supabase_store.get_proposal_by_id, proposal_id)
+            if row:
+                return row
+
+    # Legacy in-memory proposals — integer IDs
+    state = _get_meeting_state(session_id)
+    pending = state.get("pending_changes") or []
+    for change in pending:
+        if str(change.get("id")) == proposal_id:
+            change["status"] = "rejected"
+            state["change_count"] = len([c for c in pending if c.get("status") == "pending"])
+            return change
+
+    raise HTTPException(status_code=404, detail=f"Proposal {proposal_id} not found.")
+
+
+# ---------------------------------------------------------------------------
+# GET /sessions/{session_id}/review/transcript
+# ---------------------------------------------------------------------------
+
+@router.get("/sessions/{session_id}/review/transcript")
+async def get_session_transcript(
+    session_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> List[Dict[str, Any]]:
+    """Return the full transcript for a session (in-memory first, Supabase fallback)."""
+    state = _get_meeting_state(session_id)
+    history_item, user = _history_item_for_request(session_id, authorization)
+    _hydrate_state_from_history_item(state, history_item, user)
+
+    transcript_log = state.get("transcript_log") or []
+    if not transcript_log and history_item:
+        transcript_log = _decompress_transcript(history_item)
+
+    return [
+        {
+            "participant": entry.get("participant") or "Unknown",
+            "text": entry.get("text") or "",
+            "timestamp": entry.get("timestamp") or 0,
+            "source": entry.get("source"),
+        }
+        for entry in transcript_log
+        if entry.get("text")
+    ]
 
 
 # ---------------------------------------------------------------------------
