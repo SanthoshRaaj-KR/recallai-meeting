@@ -2907,6 +2907,7 @@ async def _get_review_summary_for_state(state: Dict[str, Any], session_id: Optio
         "title": title,
         "session_id": state.get("session_id"),
         "date": date_str,
+        "meeting_url": meeting_url,
         "summary": insights["summary"],
         "key_topics": insights["key_topics"],
         "action_items": insights["action_items"],
@@ -2955,6 +2956,7 @@ def _stored_summary_response(
     }
     stored.setdefault("title", history_item.get("title") or _history_title(state))
     stored["session_id"] = history_item.get("session_id") or state.get("session_id")
+    stored["meeting_url"] = history_item.get("meeting_url") or state.get("meeting_url") or None
     stored.setdefault("date", history_item.get("started_at") or history_item.get("updated_at") or "")
     stored.setdefault("key_topics", [])
     stored.setdefault("action_items", [])
