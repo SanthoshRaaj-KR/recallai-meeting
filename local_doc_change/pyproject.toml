@@ -27,6 +27,7 @@ dependencies = [
     "pymupdf4llm>=1.27.2.3",
     "nltk>=3.9.4",
     "openai-agents>=0.17.4",
+    "pinecone>=9.0.1",
 ]
 
 [dependency-groups]

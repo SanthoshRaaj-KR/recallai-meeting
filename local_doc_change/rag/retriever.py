@@ -148,10 +148,11 @@ class HybridRetriever:
         # When dense_only=True but FAISS index is unavailable, fall back to BM25.
         # This prevents silent empty results when no OpenAI client was provided
         # at index-build time (graceful degradation without credentials).
-        effective_dense_only = dense_only and self._index.faiss_index is not None
-        effective_bm25_only = bm25_only or (
-            dense_only and self._index.faiss_index is None
+        has_dense = (self._index.faiss_index is not None) or (
+            self._index.vector_db == "pinecone" and self._index.pinecone_namespace
         )
+        effective_dense_only = dense_only and has_dense
+        effective_bm25_only = bm25_only or (dense_only and not has_dense)
 
         # ── Step 1: BM25 top-20 ───────────────────────────────────────────────
         bm25_ids: list[str] = []
@@ -162,17 +163,25 @@ class HybridRetriever:
             bm25_ids = [self._index.chunk_ids[i] for i in top_indices]
             bm25_rank_map = {cid: rank for rank, cid in enumerate(bm25_ids)}
 
-        # ── Step 2: FAISS top-20 ─────────────────────────────────────────────
+        # ── Step 2: dense top-20 (FAISS in-process or Pinecone) ──────────────
         dense_ids: list[str] = []
         dense_rank_map: dict[str, int] = {}
-        if not effective_bm25_only and self._index.faiss_index is not None:
+        if not effective_bm25_only and has_dense:
             q_vec = self._embed_query(text)
-            D, I = self._index.faiss_index.search(q_vec, min(20, len(chunks)))
-            dense_ids = [
-                self._index.chunk_ids[idx]
-                for idx in I[0]
-                if idx >= 0 and idx < len(self._index.chunk_ids)
-            ]
+            if self._index.vector_db == "pinecone":
+                from rag import vector_store
+
+                ids = vector_store.query(
+                    self._index.pinecone_namespace, q_vec[0], min(20, len(chunks))
+                )
+                dense_ids = [cid for cid in ids if cid in self._index.id_to_chunk]
+            else:
+                D, I = self._index.faiss_index.search(q_vec, min(20, len(chunks)))
+                dense_ids = [
+                    self._index.chunk_ids[idx]
+                    for idx in I[0]
+                    if idx >= 0 and idx < len(self._index.chunk_ids)
+                ]
             dense_rank_map = {cid: rank for rank, cid in enumerate(dense_ids)}
 
         # ── Step 3: RRF fusion ────────────────────────────────────────────────

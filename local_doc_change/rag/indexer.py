@@ -31,6 +31,7 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from models.rag import ChunkRecord
+from rag import vector_store
 from rag.chunker import chunk_document
 from rag.contextualizer import add_context_prefixes
 
@@ -57,11 +58,14 @@ class DocumentIndex:
 
     chunks: list[ChunkRecord]
     bm25: BM25Okapi
-    faiss_index: Optional[Any]  # faiss.IndexFlatIP or None when no embeddings
+    faiss_index: Optional[Any]  # faiss.IndexFlatIP or None (no embeddings / pinecone)
     id_to_chunk: dict[str, ChunkRecord]
     folder_hash: str
     # Internal: stored alongside index for retrieval
     chunk_ids: list[str] = field(default_factory=list)
+    # Dense backend selector: "faiss" (default) or "pinecone"
+    vector_db: str = "faiss"
+    pinecone_namespace: Optional[str] = None
 
 
 # ── Public function ───────────────────────────────────────────────────────────
@@ -104,7 +108,32 @@ def build_index(
     bm25_file = cache_path / "bm25.pkl"
     faiss_file = cache_path / "faiss.bin"
 
-    if chunks_file.exists() and bm25_file.exists():
+    # Pinecone cache hit: chunks+BM25 on disk AND vectors already in the namespace.
+    pinecone_cache_ok = (
+        chunks_file.exists()
+        and bm25_file.exists()
+        and use_embeddings
+        and vector_store.pinecone_enabled()
+        and vector_store.namespace_count(folder_hash) > 0
+    )
+    if pinecone_cache_ok:
+        try:
+            chunks = _load_chunks(chunks_file)
+            with open(bm25_file, "rb") as f:
+                bm25 = pickle.load(f)
+            id_to_chunk = {c.chunk_id: c for c in chunks}
+            chunk_ids = [c.chunk_id for c in chunks]
+            logger.info("Loaded index from cache %s via Pinecone (%d chunks)", folder_hash, len(chunks))
+            return DocumentIndex(
+                chunks=chunks, bm25=bm25, faiss_index=None, id_to_chunk=id_to_chunk,
+                folder_hash=folder_hash, chunk_ids=chunk_ids,
+                vector_db="pinecone", pinecone_namespace=folder_hash,
+            )
+        except Exception as exc:
+            logger.warning("Pinecone cache load failed (%s); rebuilding index.", exc)
+
+    # FAISS cache hit (default backend).
+    if chunks_file.exists() and bm25_file.exists() and not vector_store.pinecone_enabled():
         try:
             chunks = _load_chunks(chunks_file)
             with open(bm25_file, "rb") as f:
@@ -155,15 +184,27 @@ def build_index(
     tokenized = [_tokenize(c.context_prefix + " " + c.content) for c in chunks]
     bm25 = BM25Okapi(tokenized)
 
-    # FAISS index (optional)
-    faiss_idx = None
-    if use_embeddings and openai_client is not None and chunks:
-        faiss_idx = _build_faiss_index(chunks, openai_client)
-
     id_to_chunk = {c.chunk_id: c for c in chunks}
     chunk_ids = [c.chunk_id for c in chunks]
 
-    # Persist to cache
+    # Dense index — FAISS (default) or Pinecone (LDOC_VECTOR_DB=pinecone).
+    faiss_idx = None
+    vector_db = "faiss"
+    pinecone_ns: Optional[str] = None
+    want_dense = use_embeddings and openai_client is not None and chunks
+    if want_dense and vector_store.pinecone_enabled():
+        vecs = _embed_chunks(chunks, openai_client)
+        if vecs is not None and vector_store.upsert(folder_hash, chunk_ids, vecs):
+            vector_db = "pinecone"
+            pinecone_ns = folder_hash
+        else:
+            logger.warning("Pinecone dense build failed; falling back to FAISS for this folder.")
+            faiss_idx = _build_faiss_index(chunks, openai_client)
+    elif want_dense:
+        faiss_idx = _build_faiss_index(chunks, openai_client)
+
+    # Persist to cache (chunks + BM25 always; FAISS only for the FAISS backend —
+    # Pinecone vectors live server-side under the folder-hash namespace).
     try:
         cache_path.mkdir(parents=True, exist_ok=True)
         _save_chunks(chunks, chunks_file)
@@ -181,6 +222,8 @@ def build_index(
         id_to_chunk=id_to_chunk,
         folder_hash=folder_hash,
         chunk_ids=chunk_ids,
+        vector_db=vector_db,
+        pinecone_namespace=pinecone_ns,
     )
 
 
@@ -250,11 +293,8 @@ def _as_sync_embeddings_client(openai_client):
     return openai.OpenAI(api_key=api_key)
 
 
-def _build_faiss_index(
-    chunks: list[ChunkRecord],
-    openai_client,
-) -> Optional[Any]:
-    """Embed all chunks and build a FAISS FlatIP index.
+def _embed_chunks(chunks: list[ChunkRecord], openai_client) -> Optional[np.ndarray]:
+    """Embed all chunks; returns a (N, 1536) float32 array or None.
 
     build_index() runs synchronously (often from inside a running event loop in
     the async pipeline), so we must use a *synchronous* embeddings client here.
@@ -262,35 +302,37 @@ def _build_faiss_index(
     calling .embeddings.create() on it returns an un-awaited coroutine and the
     embeddings silently become zero vectors. Derive a sync client instead.
     """
-    import openai
-
     sync_client = _as_sync_embeddings_client(openai_client)
     if sync_client is None:
-        logger.warning("No usable embeddings client; skipping FAISS dense index.")
+        logger.warning("No usable embeddings client; skipping dense index.")
         return None
 
     texts = [c.context_prefix + " " + c.content for c in chunks]
     batch_size = 100
     all_embeddings: list[list[float]] = []
-
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
         try:
             response = sync_client.embeddings.create(
-                input=batch,
-                model="text-embedding-3-small",
+                input=batch, model="text-embedding-3-small"
             )
-            batch_embs = [item.embedding for item in response.data]
-            all_embeddings.extend(batch_embs)
+            all_embeddings.extend(item.embedding for item in response.data)
         except Exception as exc:
             logger.warning("Embedding batch %d failed: %s; using zeros.", i, exc)
             all_embeddings.extend([[0.0] * _EMBED_DIM] * len(batch))
 
     vecs = np.array(all_embeddings, dtype=np.float32)
     if vecs.ndim != 2 or vecs.shape[1] != _EMBED_DIM:
-        logger.warning("Unexpected embedding shape %s; skipping FAISS.", vecs.shape)
+        logger.warning("Unexpected embedding shape %s; skipping dense index.", vecs.shape)
         return None
+    return vecs
 
+
+def _build_faiss_index(chunks: list[ChunkRecord], openai_client) -> Optional[Any]:
+    """Embed all chunks and build a FAISS FlatIP index (cosine via normalized IP)."""
+    vecs = _embed_chunks(chunks, openai_client)
+    if vecs is None:
+        return None
     faiss.normalize_L2(vecs)
     index = faiss.IndexFlatIP(_EMBED_DIM)
     index.add(vecs)
