@@ -187,32 +187,49 @@ def build_index(
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 
+def _is_backup_file(path: Path) -> bool:
+    """True for SafeApply backup files (e.g. policy.backup.20260601T....docx).
+
+    SafeApply writes backups into the same folder as the source document; they
+    must NOT be re-indexed as if they were real documents, or accepted changes
+    would pollute the corpus and the pipeline could propose edits to backups.
+    """
+    return ".backup." in path.name
+
+
+def _iter_doc_files(folder: Path):
+    """Yield supported document files in a folder, excluding backups."""
+    for ext in sorted(_DOC_EXTENSIONS):
+        for fpath in sorted(folder.rglob(f"*{ext}")):
+            if _is_backup_file(fpath):
+                continue
+            yield fpath
+
+
 def _compute_folder_hash(folder_path: str) -> str:
     """Fingerprint a folder by path + mtime of all supported files."""
     folder = Path(folder_path)
     entries: list[str] = []
-    for ext in sorted(_DOC_EXTENSIONS):
-        for fpath in sorted(folder.rglob(f"*{ext}")):
-            try:
-                mtime = os.path.getmtime(fpath)
-                entries.append(f"{fpath!s}:{mtime}")
-            except OSError:
-                pass
+    for fpath in _iter_doc_files(folder):
+        try:
+            mtime = os.path.getmtime(fpath)
+            entries.append(f"{fpath!s}:{mtime}")
+        except OSError:
+            pass
     fingerprint = "\n".join(entries).encode()
     return hashlib.md5(fingerprint).hexdigest()[:16]
 
 
 def _gather_chunks(folder_path: str) -> list[ChunkRecord]:
-    """Chunk all supported documents in *folder_path*."""
+    """Chunk all supported documents in *folder_path* (excluding backups)."""
     folder = Path(folder_path)
     chunks: list[ChunkRecord] = []
-    for ext in sorted(_DOC_EXTENSIONS):
-        for fpath in sorted(folder.rglob(f"*{ext}")):
-            try:
-                file_chunks = chunk_document(str(fpath))
-                chunks.extend(file_chunks)
-            except Exception as exc:
-                logger.warning("Failed to chunk %s: %s", fpath, exc)
+    for fpath in _iter_doc_files(folder):
+        try:
+            file_chunks = chunk_document(str(fpath))
+            chunks.extend(file_chunks)
+        except Exception as exc:
+            logger.warning("Failed to chunk %s: %s", fpath, exc)
     return chunks
 
 
