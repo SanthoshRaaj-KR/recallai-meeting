@@ -272,6 +272,9 @@ class LocalDocPipelineStartBody(BaseModel):
 
 class LocalDocExecuteBody(BaseModel):
     proposal_ids: list[str]
+    # Optional per-proposal user edits: proposal_id -> revised after_content.
+    # When present, the user's text is written instead of the AI draft.
+    edited_content: dict[str, str] = {}
 
 
 # ── LiveKit token minting ──────────────────────────────────────────────────────
@@ -785,16 +788,24 @@ async def execute_local_doc_changes(session_id: str, body: LocalDocExecuteBody) 
             results.append({"proposal_id": pid, "success": False, "message": "Not found"})
             continue
         chunk = proposal.get("source_chunk", {})
+        # Honor a user edit from the card's textarea, if provided.
+        override = body.edited_content.get(pid)
+        content = override if override is not None else proposal.get("after_content", "")
         try:
             backup_path = await asyncio.to_thread(
                 applier.apply,
                 file_path=chunk.get("source_path", ""),
                 section_heading=chunk.get("section_heading", ""),
-                new_content=proposal.get("after_content", ""),
+                new_content=content,
                 session_id=session_id,
                 proposal_id=pid,
             )
             proposal["status"] = "accepted"
+            if override is not None:
+                # Reflect the user's edit in the stored proposal and flag it so
+                # the UI no longer presents stale AI verification as authoritative.
+                proposal["after_content"] = override
+                proposal["user_edited"] = True
             results.append({"proposal_id": pid, "success": True, "backup_path": backup_path})
         except Exception as exc:
             logger.error("Safe apply failed for proposal %s: %s", pid, exc)
