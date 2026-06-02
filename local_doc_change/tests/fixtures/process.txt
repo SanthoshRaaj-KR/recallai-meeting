@@ -1,0 +1,5 @@
+SECTION 1. DEPLOYMENT PROCESS
+Production deployments require two approvals from senior engineers.
+
+SECTION 2. ROLLBACK PROCEDURE
+Failed deployments must be rolled back within 15 minutes.

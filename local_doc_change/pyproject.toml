@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-starter-python"
+version = "1.0.0"
+description = "Simple voice AI assistant built with LiveKit Agents for Python"
+requires-python = ">=3.10, <3.15"
+
+dependencies = [
+    "livekit-agents[assemblyai,cerebras,mcp,silero,turn-detector]~=1.5.2",
+    "livekit-plugins-ai-coustics~=0.2",
+    "python-dotenv",
+    # Recall.ai bridge dependencies
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "requests>=2.31",
+    "livekit-api>=0.7",
+    "python-docx>=1.2.0",
+    "docling>=2.96.0",
+    "rank-bm25>=0.2.2",
+    "faiss-cpu>=1.9.0",
+    "openai>=1.0.0",
+    "sentence-transformers>=5.5.1",
+    "striprtf>=0.0.32",
+    "pymupdf4llm>=1.27.2.3",
+    "nltk>=3.9.4",
+    "openai-agents>=0.17.4",
+    "pinecone>=9.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.uv]
+# yarl 1.24.1 was published with only a cp310 wheel and no sdist, so it can't
+# install on Python 3.11+. Remove this once upstream uploads the remaining wheels.
+constraint-dependencies = ["yarl<1.24"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "A", "C4", "UP", "SIM", "RUF"]
+ignore = ["E501"]  # Line too long (handled by formatter)
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
