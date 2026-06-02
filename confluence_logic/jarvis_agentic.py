@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from gtts import gTTS
 from openai import OpenAI
 
@@ -167,6 +168,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+_CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Mount the review API router (GET /review/summary and related endpoints).
 from .review.api import router as _review_router  # noqa: E402
@@ -2483,8 +2493,6 @@ async def websocket_endpoint_for_session(websocket: WebSocket, session_id: str):
     await _websocket_endpoint_for_session(websocket, session_id)
 
 
-<<<<<<< Updated upstream
-=======
 @app.post("/livekit-transcript/{session_id}")
 async def receive_livekit_transcript(session_id: str, request: Request):
     """Receive final STT transcripts from the LiveKit agent worker.
@@ -2586,7 +2594,6 @@ async def serve_favicon():
     return FileResponse(_favicon_path, media_type="image/x-icon")
 
 
->>>>>>> Stashed changes
 async def _websocket_endpoint_for_session(websocket: WebSocket, session_id: str):
     token = set_current_meeting_session(session_id)
     await websocket.accept()

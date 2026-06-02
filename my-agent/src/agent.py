@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import requests
 import textwrap
 import time
 from pathlib import Path
@@ -57,6 +58,7 @@ _CHAT_HISTORY_WINDOW = 10
 _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 # Optional default repo (owner/repo) used when the user doesn't name one.
 _GITHUB_DEFAULT_REPO = os.getenv("GITHUB_DEFAULT_REPO", "")
+_BRIDGE_INTERNAL_URL = os.getenv("BRIDGE_INTERNAL_URL", "http://127.0.0.1:8001").rstrip("/")
 
 
 def _build_github_toolset() -> mcp.MCPToolset | None:
@@ -126,7 +128,8 @@ def _extract_query(text: str) -> str | None:
 
 
 class Assistant(Agent):
-    def __init__(self) -> None:
+    def __init__(self, session_id: str = "") -> None:
+        self._session_id = session_id
         self._github_toolset = _build_github_toolset()
         super().__init__(
             llm=cerebras.LLM(model="gpt-oss-120b"),
@@ -206,6 +209,7 @@ class Assistant(Agent):
         # Always buffer so the LLM has full meeting context when it is called.
         if raw.strip():
             self._transcript.append(raw.strip())
+            self._post_transcript(raw.strip())
 
         # ── Listening mode: bare "Jarvis" was just said, awaiting the query ──
         if self._listening:
@@ -242,6 +246,32 @@ class Assistant(Agent):
         self._refresh_transcript_in_ctx(turn_ctx, new_message)
         new_message.content = [query]
         await self.update_chat_ctx(turn_ctx)
+
+    def _post_transcript(self, text: str) -> None:
+        """Send final STT turns to recall_bridge for post-meeting review.
+
+        agent.py and recall_bridge.py usually run in separate processes, so the
+        review pipeline cannot read this in-memory transcript directly.
+        """
+        if not self._session_id or not text:
+            return
+
+        def _send() -> None:
+            try:
+                requests.post(
+                    f"{_BRIDGE_INTERNAL_URL}/livekit-transcript/{self._session_id}",
+                    json={
+                        "speaker": "Meeting",
+                        "text": text,
+                        "timestamp": time.time(),
+                        "source": "livekit",
+                    },
+                    timeout=2,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Could not post transcript to bridge: %s", exc)
+
+        asyncio.create_task(asyncio.to_thread(_send))
 
     def _refresh_transcript_in_ctx(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
@@ -347,7 +377,7 @@ async def my_agent(ctx: JobContext):
         # and publishes it to LiveKit under this exact identity. Without this filter the
         # agent would try to subscribe to all participants and may not find the right track.
         await session.start(
-            agent=Assistant(),
+            agent=Assistant(session_id=room_name),
             room=ctx.room,
             room_options=room_io.RoomOptions(
                 participant_identity=f"recall-browser-{room_name}",

@@ -59,11 +59,16 @@ import requests
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from livekit import api as livekit_api
 from pydantic import BaseModel
+
+try:
+    from .review_pipeline import ProposalPipeline
+except ImportError:  # Allows `uvicorn recall_bridge:app` from my-agent/src.
+    from review_pipeline import ProposalPipeline
 
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
@@ -137,8 +142,11 @@ class _SessionRecord:
         self.status: str = "joining"
         self.error: str | None = None
         self.changes: list[dict] = []
+        self.transcript: list[dict] = []
         self._change_counter: int = 0
         self.summary: dict | None = None
+        self.extracted_meeting = None
+        self.pipeline_diagnostics: list[dict] = []
         self.started_at: str = _utcnow()
         self.ended_at: str | None = None
         self.updated_at: str = self.started_at
@@ -195,7 +203,7 @@ class _SessionRecord:
             "summary": summary_obj.get("summary"),
             "change_count": len(self.changes),
             "stats": {
-                "transcript_entries": 0,
+                "transcript_entries": len(self.transcript),
                 "topic_count": len(summary_obj.get("key_topics", [])),
                 "decision_count": len(summary_obj.get("decisions", [])),
                 "action_item_count": len(summary_obj.get("action_items", [])),
@@ -209,6 +217,23 @@ def _require_session(session_id: str) -> _SessionRecord:
     if not s:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     return s
+
+
+def _pipeline() -> ProposalPipeline:
+    return ProposalPipeline()
+
+
+async def _execute_change_dict(change: dict) -> dict:
+    """Execute one proposal and fold exceptions into the API response shape."""
+    try:
+        result = await _pipeline().execute(change)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Proposal execution failed")
+        result = {"success": False, "message": str(exc)}
+    change["status"] = "executed" if result.get("success") else "failed"
+    if not result.get("success"):
+        change["last_error"] = result.get("message") or result.get("error")
+    return result
 
 
 # ── Request / response models ──────────────────────────────────────────────────
@@ -401,6 +426,67 @@ async def bot_page() -> HTMLResponse:
     return HTMLResponse(_BOT_HTML_PATH.read_text(encoding="utf-8"))
 
 
+# ── Endpoints: Recall webhook ──────────────────────────────────────────────────
+
+def _session_for_bot(bot_id: str) -> "_SessionRecord | None":
+    """Return the session whose Recall bot_id matches, or None."""
+    return next((s for s in _sessions.values() if s.bot_id == bot_id), None)
+
+
+@app.post("/recall-webhook")
+async def recall_webhook(request: Request) -> dict:
+    """Receive Recall.ai project-level webhook events.
+
+    Register BRIDGE_SERVER_URL/recall-webhook in the Recall dashboard under
+    Webhooks → Events: bot.status_change (and optionally bot.participant_events).
+
+    Handles:
+      bot.status_change   → transitions session status (joining → in_meeting → ended)
+      bot.done            → marks session ended (legacy event name)
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": True}
+
+    event = body.get("event", "")
+    data = body.get("data", {})
+
+    # bot.status_change: {"event": "bot.status_change", "data": {"bot_id": "...", "status": {"code": "..."}}}
+    if event in ("bot.status_change", "bot.done"):
+        bot_id = data.get("bot_id", "")
+        s = _session_for_bot(bot_id) if bot_id else None
+        if s:
+            status_obj = data.get("status") or {}
+            code = status_obj.get("code") or (data.get("code") if event == "bot.done" else "")
+            new_status = _RECALL_STATUS_MAP.get(code, "")
+            if new_status and new_status != s.status:
+                s.status = new_status
+                if new_status in ("ended", "error") and not s.ended_at:
+                    s.ended_at = _utcnow()
+                s._touch()
+                logger.info("Recall webhook %s → session %s status=%s", event, s.session_id, new_status)
+        return {"ok": True}
+
+    # bot.participant_events: track current speaker for per-participant transcript attribution
+    if event == "bot.participant_events":
+        bot_id = data.get("bot_id", "")
+        s = _session_for_bot(bot_id) if bot_id else None
+        if s:
+            for evt in data.get("events", []):
+                etype = evt.get("type", "")
+                participant_name = (evt.get("participant") or {}).get("name", "").strip()
+                if not participant_name:
+                    continue
+                if etype == "speech_on":
+                    logger.debug("Speaker ON  [%s] → %s", s.session_id, participant_name)
+                elif etype == "speech_off":
+                    logger.debug("Speaker OFF [%s] → %s", s.session_id, participant_name)
+        return {"ok": True}
+
+    return {"ok": True}
+
+
 # ── Endpoints: health ──────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -442,6 +528,37 @@ async def bot_status_no_session() -> dict:
     }
 
 
+@app.post("/livekit-transcript/{session_id}")
+async def receive_livekit_transcript(session_id: str, request: Request) -> dict:
+    """Receive final STT utterances from my-agent.
+
+    The LiveKit agent process and this FastAPI bridge commonly run as separate
+    processes, so the transcript is posted over localhost rather than shared in
+    memory.
+    """
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return {"ok": True}
+    session = _sessions.get(session_id)
+    if session is None:
+        session = _SessionRecord(session_id, bot_id=None, meeting_url=None)
+        session.status = "in_meeting"
+        _sessions[session_id] = session
+    session.transcript.append(
+        {
+            "participant": (body.get("speaker") or body.get("participant") or "Meeting").strip(),
+            "text": text,
+            "timestamp": body.get("timestamp") or datetime.datetime.utcnow().timestamp(),
+            "source": body.get("source") or "livekit",
+        }
+    )
+    if len(session.transcript) > 2000:
+        session.transcript = session.transcript[-2000:]
+    session._touch()
+    return {"ok": True, "transcript_entries": len(session.transcript)}
+
+
 # ── Endpoints: review — changes ────────────────────────────────────────────────
 
 @app.get("/sessions/{session_id}/review/changes")
@@ -466,9 +583,10 @@ async def execute_changes(session_id: str, body: ExecuteBody) -> dict:
         pid = str(body.proposal_id)
         for ch in s.changes:
             if str(ch.get("id")) == pid:
-                ch["status"] = "executed"
+                ch["status"] = "executing"
+                result = await _execute_change_dict(ch)
                 s._touch()
-                return {"success": True}
+                return result
         raise HTTPException(status_code=404, detail=f"Proposal {pid!r} not found")
 
     if body.proposal_ids is not None:
@@ -476,8 +594,15 @@ async def execute_changes(session_id: str, body: ExecuteBody) -> dict:
         for pid in body.proposal_ids:
             matched = next((ch for ch in s.changes if str(ch.get("id")) == pid), None)
             if matched:
-                matched["status"] = "executed"
-                results.append({"page": matched.get("page_title", pid), "success": True})
+                matched["status"] = "executing"
+                result = await _execute_change_dict(matched)
+                results.append(
+                    {
+                        "page": matched.get("page_title", pid),
+                        "success": bool(result.get("success")),
+                        "message": result.get("message") or result.get("error"),
+                    }
+                )
             else:
                 results.append({"page": pid, "success": False, "message": "Not found"})
         s._touch()
@@ -486,10 +611,17 @@ async def execute_changes(session_id: str, body: ExecuteBody) -> dict:
     if body.ids is not None:
         results = []
         for cid in body.ids:
-            matched = next((ch for ch in s.changes if ch.get("id") == cid), None)
+            matched = next((ch for ch in s.changes if str(ch.get("id")) == str(cid)), None)
             if matched:
-                matched["status"] = "executed"
-                results.append({"id": cid, "success": True})
+                matched["status"] = "executing"
+                result = await _execute_change_dict(matched)
+                results.append(
+                    {
+                        "id": cid,
+                        "success": bool(result.get("success")),
+                        "error": None if result.get("success") else result.get("message") or result.get("error"),
+                    }
+                )
             else:
                 results.append({"id": cid, "success": False, "error": "Not found"})
         s._touch()
@@ -505,12 +637,22 @@ async def propose_changes(session_id: str, body: ProposeBody) -> dict:
     """
     Propose new Confluence changes for this session.
 
-    Placeholder: returns existing pending changes.
-    Wire up to confluence_logic agents for real AI-generated proposals.
+    Runs the new my-agent pipeline synchronously and returns generated cards.
     """
     s = _require_session(session_id)
-    pending = [ch for ch in s.changes if ch.get("status") == "pending"]
-    return {"changes": pending, "generated_count": 0}
+    pipeline = _pipeline()
+    meeting, proposals = await pipeline.run(
+        session_id=session_id,
+        transcript=s.transcript,
+        query=body.query,
+    )
+    s.extracted_meeting = meeting
+    s.summary = pipeline.summary_response(session_id, meeting, s.transcript)
+    s.summary["proposal_diagnostics"] = pipeline.last_diagnostics
+    s.pipeline_diagnostics = pipeline.last_diagnostics
+    s.changes = proposals
+    s._touch()
+    return {"changes": s.changes, "generated_count": len(proposals)}
 
 
 # ── Endpoints: review — summary ────────────────────────────────────────────────
@@ -521,28 +663,7 @@ async def get_summary(session_id: str) -> dict:
     s = _require_session(session_id)
     if s.summary:
         return s.summary
-    today = datetime.datetime.utcnow().strftime("%B %d, %Y")
-    return {
-        "title": f"Meeting {s.session_id[:8]}",
-        "session_id": s.session_id,
-        "date": today,
-        "summary": (
-            "Transcript is being captured. "
-            "The summary will appear once the meeting ends and the pipeline completes."
-        ),
-        "key_topics": [],
-        "action_items": [],
-        "decisions": [],
-        "participants": [],
-        "mom": [],
-        "transcript_highlights": [],
-        "stats": {
-            "transcript_entries": 0,
-            "topic_count": 0,
-            "decision_count": 0,
-            "action_item_count": 0,
-        },
-    }
+    return _pipeline().summary_response(session_id, None, s.transcript)
 
 
 # ── Endpoints: review — chat ───────────────────────────────────────────────────
@@ -552,19 +673,24 @@ async def chat_with_meeting(session_id: str, body: ChatBody) -> dict:
     """
     Answer a question about the meeting using its transcript + summary.
 
-    Placeholder: returns a canned response.
-    Wire up to confluence_logic meeting_responder / graph_rag for real answers.
+    Lightweight transcript-grounded chat endpoint.
     """
     s = _require_session(session_id)
+    last_user = next(
+        (m.get("content", "") for m in reversed(body.messages) if m.get("role") == "user"),
+        "",
+    )
+    recent = "\n".join(f"{e.get('participant', 'Speaker')}: {e.get('text', '')}" for e in s.transcript[-20:])
     return {
         "answer": (
-            "Transcript processing is still in progress. "
-            "Full chat will be available once the pipeline completes."
+            f"I found {len(s.transcript)} transcript entries for this meeting. "
+            f"Most recent context: {recent[-600:] or 'no transcript captured yet.'}"
         ),
         "session_id": session_id,
         "context": {
-            "transcript_entries": 0,
+            "transcript_entries": len(s.transcript),
             "has_summary": s.summary is not None,
+            "last_question": last_user,
         },
     }
 
@@ -598,36 +724,96 @@ async def pipeline_start(body: PipelineStartBody) -> dict:
         "status": "running",
         "stage": None,
         "created_at": _utcnow(),
+        "events": [],
+        "completed_at": None,
+        "error": None,
     }
     logger.info("Pipeline started — job_id=%s session=%s", job_id, body.session_id)
+    asyncio.create_task(_run_pipeline_job(job_id), name=f"review-pipeline-{job_id}")
     return {"job_id": job_id, "status": "running"}
 
 
+def _record_pipeline_event(job_id: str, event: dict) -> None:
+    job = _pipelines.get(job_id)
+    if not job:
+        return
+    if event.get("type") == "stage_start":
+        job["stage"] = event.get("stage")
+    job.setdefault("events", []).append(event)
+
+
+async def _run_pipeline_job(job_id: str) -> None:
+    job = _pipelines[job_id]
+    session_id = job["session_id"]
+    s = _require_session(session_id)
+    pipeline = _pipeline()
+
+    async def emit(event: dict) -> None:
+        _record_pipeline_event(job_id, event)
+
+    try:
+        meeting, proposals = await pipeline.run(
+            session_id=session_id,
+            transcript=s.transcript,
+            emit=emit,
+        )
+        s.extracted_meeting = meeting
+        s.summary = pipeline.summary_response(session_id, meeting, s.transcript)
+        s.summary["proposal_diagnostics"] = pipeline.last_diagnostics
+        s.pipeline_diagnostics = pipeline.last_diagnostics
+        s.changes = proposals
+        s._touch()
+        job["status"] = "completed"
+        job["stage"] = None
+        job["completed_at"] = _utcnow()
+        _record_pipeline_event(
+            job_id,
+            {
+                "type": "pipeline_complete",
+                "proposal_count": len(proposals),
+                "diagnostic_count": len(pipeline.last_diagnostics),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Pipeline failed — job_id=%s", job_id)
+        job["status"] = "failed"
+        job["stage"] = None
+        job["error"] = str(exc)
+        job["completed_at"] = _utcnow()
+        _record_pipeline_event(job_id, {"type": "pipeline_error", "detail": str(exc)})
+
+
+def _sse(event: dict) -> str:
+    event_type = event.get("type", "message")
+    data = {k: v for k, v in event.items() if k != "type"}
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
 async def _pipeline_sse(job_id: str) -> AsyncGenerator[str, None]:
-    """
-    Emit SSE events through each pipeline stage.
-
-    Placeholder: completes immediately with 0 proposals.
-    Wire up to confluence_logic review/api.py for real AI-generated proposals.
-    """
-    stages = [
-        "transcript_source",
-        "fact_extraction",
-        "rag_retrieval",
-        "drafting",
-        "verification",
-    ]
-    for stage in stages:
-        if job_id in _pipelines:
-            _pipelines[job_id]["stage"] = stage
-        yield f"event: stage_start\ndata: {json.dumps({'stage': stage})}\n\n"
-        await asyncio.sleep(0.4)
-
-    if job_id in _pipelines:
-        _pipelines[job_id]["status"] = "completed"
-        _pipelines[job_id]["stage"] = None
-
-    yield f"event: pipeline_complete\ndata: {json.dumps({'proposal_count': 0})}\n\n"
+    """Stream buffered and live pipeline events."""
+    sent = 0
+    while True:
+        job = _pipelines.get(job_id)
+        if not job:
+            yield _sse({"type": "pipeline_error", "detail": f"Pipeline job {job_id!r} not found"})
+            return
+        events = job.get("events", [])
+        while sent < len(events):
+            event = events[sent]
+            sent += 1
+            yield _sse(event)
+            if event.get("type") in {"pipeline_complete", "pipeline_error"}:
+                return
+        if job.get("status") in {"completed", "failed"}:
+            # Defensive fallback in case terminal event was not appended.
+            terminal = (
+                {"type": "pipeline_complete", "proposal_count": len(_sessions[job["session_id"]].changes)}
+                if job.get("status") == "completed"
+                else {"type": "pipeline_error", "detail": job.get("error") or "Pipeline failed"}
+            )
+            yield _sse(terminal)
+            return
+        await asyncio.sleep(0.25)
 
 
 @app.get("/review/pipeline/{job_id}/stream")
