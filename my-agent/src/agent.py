@@ -3,10 +3,12 @@ import collections
 import json
 import logging
 import os
+import random
 import re
 import requests
 import textwrap
 import time
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -92,7 +94,13 @@ def _build_instructions() -> str:
     base = textwrap.dedent("""\
         You are Jarvis, a meeting assistant activated by wake word.
         You are given the recent meeting transcript before each question.
-        Use it to answer questions about what has been discussed.
+        Draw on both the meeting transcript and your own trained knowledge when answering.
+
+        # Handling conflicts between meeting content and your knowledge
+        - If the meeting contains a claim that contradicts your knowledge, acknowledge both sides honestly and politely, like a human colleague would.
+        - Say what was mentioned in the meeting first, then share your own understanding and briefly explain why.
+        - Example: "In the meeting this was described as X, but from what I know it is actually Y, because Z."
+        - Never fabricate meeting content. If the topic was not mentioned, answer from your own knowledge only.
 
         # Output rules
         - Respond in plain text only. No markdown, lists, JSON, or emojis.
@@ -146,10 +154,51 @@ class Assistant(Agent):
         # Tracks whether the ack was already played from a partial transcript hit,
         # so on_user_turn_completed doesn't double-play it.
         self._partial_wake_fired: bool = False
+        # Ensures the opening greeting fires exactly once, even though LiveKit
+        # can re-enter on_enter() after an interruption.
+        self._greeted: bool = False
         # ID of the rolling transcript system message kept in the chat context.
         # Each turn we remove the old one and insert a fresh snapshot so the
         # chat history never accumulates multiple embedded transcripts.
         self._transcript_msg_id: str | None = None
+
+    def _build_greeting(self) -> str:
+        """Return a time-aware, one-of-a-kind opening greeting for the meeting."""
+        hour = datetime.now().hour
+        if hour < 12:
+            time_phrase = "Good morning"
+        elif hour < 17:
+            time_phrase = "Good afternoon"
+        else:
+            time_phrase = "Good evening"
+
+        options = [
+            (
+                f"{time_phrase}, everyone! Jarvis here, bright-eyed and ready to roll. "
+                "Whenever you need me, just say Hey Jarvis and I am on it!"
+            ),
+            (
+                f"{time_phrase}, team! I am Jarvis, your meeting companion for today. "
+                "Think of me as that colleague who actually reads the notes — "
+                "just call my name and I will jump right in."
+            ),
+            (
+                f"{time_phrase}! Jarvis has joined the room and is all set. "
+                "Ask me anything during the meeting — facts, summaries, quick calculations — "
+                "just say Hey Jarvis!"
+            ),
+            (
+                f"{time_phrase}, folks! Great to be here. I am Jarvis. "
+                "I will stay quietly in the background and be ready the moment you need me. "
+                "Just say Hey Jarvis!"
+            ),
+            (
+                f"{time_phrase}! Jarvis reporting for duty. "
+                "Whether it is a quick fact-check or a meeting recap, I have got you covered. "
+                "Give me a shout anytime — Hey Jarvis!"
+            ),
+        ]
+        return random.choice(options)
 
     async def on_enter(self) -> None:
         # Do NOT call session.generate_reply() here.
@@ -157,6 +206,16 @@ class Assistant(Agent):
         # on_user_turn_completed and goes straight to the LLM. After an interruption
         # LiveKit re-enters the agent, triggering on_enter() again — causing the agent
         # to answer without a wake word. Overriding with a no-op disables this.
+
+        # One-time opening greeting. LiveKit can re-trigger on_enter() after an
+        # interruption, so the flag ensures we only greet once per session.
+        if not self._greeted:
+            self._greeted = True
+            greeting = self._build_greeting()
+            asyncio.create_task(
+                self.session.say(greeting, add_to_chat_ctx=False),
+                name="opening_greeting",
+            )
 
         # Pre-warm the GitHub MCP server the moment the session opens so the
         # npx/Node subprocess is fully connected before the user's first question.
