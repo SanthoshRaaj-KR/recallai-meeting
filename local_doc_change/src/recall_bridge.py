@@ -150,6 +150,10 @@ class _SessionRecord:
         self.changes: list[dict] = []
         self._change_counter: int = 0
         self.summary: dict | None = None
+        # Final meeting transcript, pushed once by the LiveKit agent when the
+        # meeting ends (reuses the agent's existing transcript buffer — no
+        # second transcription). Consumed by the local-doc pipeline.
+        self.transcript: str = ""
         self.started_at: str = _utcnow()
         self.ended_at: str | None = None
         self.updated_at: str = self.started_at
@@ -268,6 +272,9 @@ class LocalDocPipelineStartBody(BaseModel):
     use_embeddings: bool = True
     rerank: bool = True
     contextual_retrieval: bool = True
+    # Optional: paste a meeting transcript directly (no Recall meeting needed).
+    # When omitted, falls back to the session's transcript.
+    transcript: str | None = None
 
 
 class LocalDocExecuteBody(BaseModel):
@@ -684,6 +691,35 @@ async def list_history() -> list:
 
 # ── Endpoints: local-doc pipeline ─────────────────────────────────────────────
 
+class TranscriptIngestBody(BaseModel):
+    transcript: str
+
+
+@app.post("/sessions/{session_id}/transcript")
+async def ingest_session_transcript(session_id: str, body: TranscriptIngestBody) -> dict:
+    """Store a meeting transcript for a session (pushed once by the LiveKit agent).
+
+    This is the single transcript source reused by the local-doc pipeline — the
+    agent already transcribed the meeting for live Q&A, so we do not transcribe
+    again. Creates the session record if it does not exist yet.
+    """
+    session = _sessions.get(session_id)
+    if session is None:
+        session = _SessionRecord(session_id, bot_id=None, meeting_url=None)
+        _sessions[session_id] = session
+    session.transcript = body.transcript or ""
+    logger.info("Stored transcript for session %s (%d chars)", session_id, len(session.transcript))
+    return {"session_id": session_id, "length": len(session.transcript)}
+
+
+@app.get("/sessions/{session_id}/transcript")
+async def get_session_transcript(session_id: str) -> dict:
+    """Report whether a captured transcript is available for a session."""
+    session = _sessions.get(session_id)
+    text = getattr(session, "transcript", "") if session else ""
+    return {"session_id": session_id, "available": bool(text.strip()), "length": len(text)}
+
+
 @app.post("/local-doc/pipeline/start")
 async def local_doc_pipeline_start(body: LocalDocPipelineStartBody) -> dict:
     """Kick off the local document change pipeline for a session."""
@@ -703,11 +739,13 @@ async def local_doc_pipeline_start(body: LocalDocPipelineStartBody) -> dict:
         "proposals": [],
         "created_at": _utcnow(),
     }
-    # Get transcript from session if available
-    session = _sessions.get(body.session_id)
-    transcript = ""
-    if session and hasattr(session, "transcript"):
-        transcript = getattr(session, "transcript", "") or ""
+    # Prefer a transcript pasted directly in the request (sandbox / no-meeting
+    # flow); otherwise fall back to the session's transcript.
+    transcript = (body.transcript or "").strip()
+    if not transcript:
+        session = _sessions.get(body.session_id)
+        if session and hasattr(session, "transcript"):
+            transcript = getattr(session, "transcript", "") or ""
 
     config = PipelineConfig(
         session_id=body.session_id,
