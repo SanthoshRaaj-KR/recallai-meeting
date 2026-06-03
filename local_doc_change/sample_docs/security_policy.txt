@@ -1,0 +1,11 @@
+SECTION 1. DATA RETENTION
+Application logs are retained for 90 days before automatic deletion. Customer records must be retained for 7 years to satisfy regulatory requirements.
+
+SECTION 2. ACCESS CONTROL
+Employee access to production systems requires approval from a single team manager. Access is reviewed quarterly.
+
+SECTION 3. INCIDENT RESPONSE
+Security incidents must be reported to the security team within 24 hours of discovery. Confirmed breaches trigger the formal incident response plan.
+
+SECTION 4. PASSWORD POLICY
+User passwords must be at least 12 characters long. Multi-factor authentication is required for all administrative accounts.

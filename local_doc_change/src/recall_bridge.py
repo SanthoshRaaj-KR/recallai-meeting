@@ -268,6 +268,9 @@ class LocalDocPipelineStartBody(BaseModel):
     use_embeddings: bool = True
     rerank: bool = True
     contextual_retrieval: bool = True
+    # Optional: paste a meeting transcript directly (no Recall meeting needed).
+    # When omitted, falls back to the session's transcript.
+    transcript: str | None = None
 
 
 class LocalDocExecuteBody(BaseModel):
@@ -703,11 +706,13 @@ async def local_doc_pipeline_start(body: LocalDocPipelineStartBody) -> dict:
         "proposals": [],
         "created_at": _utcnow(),
     }
-    # Get transcript from session if available
-    session = _sessions.get(body.session_id)
-    transcript = ""
-    if session and hasattr(session, "transcript"):
-        transcript = getattr(session, "transcript", "") or ""
+    # Prefer a transcript pasted directly in the request (sandbox / no-meeting
+    # flow); otherwise fall back to the session's transcript.
+    transcript = (body.transcript or "").strip()
+    if not transcript:
+        session = _sessions.get(body.session_id)
+        if session and hasattr(session, "transcript"):
+            transcript = getattr(session, "transcript", "") or ""
 
     config = PipelineConfig(
         session_id=body.session_id,

@@ -1,0 +1,8 @@
+SECTION 1. RESPONSE SLA
+Support must send a first response to every customer ticket within 24 hours of submission. Tickets are tracked in the support queue.
+
+SECTION 2. ESCALATION PROCEDURE
+Unresolved tickets are escalated to tier 2 after 48 hours. Critical outages are escalated to engineering immediately.
+
+SECTION 3. REFUND POLICY
+Customers may request a refund within 30 days of purchase. Refunds are processed within five business days of approval.
