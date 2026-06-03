@@ -13,6 +13,8 @@ from typing import Any
 
 from openai import OpenAI
 
+from memory_compaction import add_memory_context
+
 from .confluence import HybridConfluenceClient
 from .models import ChangeIntent, ExtractedMeeting, PageCandidate, Proposal
 from .text_utils import (
@@ -57,6 +59,7 @@ class ProposalPipeline:
         session_id: str,
         transcript: list[dict[str, Any]],
         query: str | None = None,
+        memory_context: str | None = None,
         emit: EmitFn | None = None,
     ) -> tuple[ExtractedMeeting, list[dict[str, Any]]]:
         self.last_diagnostics = []
@@ -66,7 +69,7 @@ class ProposalPipeline:
                 await emit(event)
 
         await _emit({"type": "stage_start", "stage": "transcript_source"})
-        transcript_text = format_transcript(transcript)
+        transcript_text = add_memory_context(format_transcript(transcript), memory_context)
         if not transcript_text:
             meeting = ExtractedMeeting(
                 title="Meeting Review",

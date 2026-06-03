@@ -32,6 +32,11 @@ from livekit.plugins import ai_coustics, assemblyai, cerebras, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from typing import AsyncIterable
 
+try:
+    from .memory_compaction import TranscriptCompactor
+except ImportError:  # Allows `python src/agent.py ...` from my-agent.
+    from memory_compaction import TranscriptCompactor
+
 logger = logging.getLogger("agent")
 
 # Resolve .env.local relative to this file (my-agent/.env.local) so the agent
@@ -93,7 +98,7 @@ def _build_github_toolset() -> mcp.MCPToolset | None:
 def _build_instructions() -> str:
     base = textwrap.dedent("""\
         You are Jarvis, a meeting assistant activated by wake word.
-        You are given the recent meeting transcript before each question.
+        You are given compacted prior meeting memory and the recent meeting transcript before each question.
         Draw on both the meeting transcript and your own trained knowledge when answering.
 
         # Handling conflicts between meeting content and your knowledge
@@ -148,6 +153,10 @@ class Assistant(Agent):
         )
         # Buffers every STT utterance heard in the meeting, wake-word or not.
         self._transcript: collections.deque[str] = collections.deque(maxlen=_TRANSCRIPT_MAX)
+        self._transcript_memory = TranscriptCompactor(
+            window_size=_TRANSCRIPT_WINDOW,
+            max_memory_chars=int(os.getenv("JARVIS_COMPACTED_MEMORY_CHARS", "8000")),
+        )
         # Two-stage wake: bare "Jarvis" → listening mode → next utterance is the query.
         self._listening: bool = False
         self._listening_since: float = 0.0
@@ -270,6 +279,7 @@ class Assistant(Agent):
         # Always buffer so the LLM has full meeting context when it is called.
         if raw.strip():
             self._transcript.append(raw.strip())
+            self._transcript_memory.observe_utterance(raw.strip())
             self._post_transcript(raw.strip())
 
         # ── Listening mode: bare "Jarvis" was just said, awaiting the query ──
@@ -337,13 +347,14 @@ class Assistant(Agent):
     def _refresh_transcript_in_ctx(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
-        """Replace the rolling transcript system message and apply sliding windows.
+        """Replace the rolling transcript system message and apply memory windows.
 
-        Two caps are enforced on every LLM call to guarantee the request never
-        exceeds the Cerebras TPM limit regardless of meeting length:
+        Two caps are enforced on every LLM call to keep the request bounded
+        regardless of meeting length:
 
         1. Transcript window: only the most recent _TRANSCRIPT_WINDOW utterances
-           are included in the snapshot (~4 k tokens).
+           are included verbatim in the snapshot (~4 k tokens). Older utterances
+           are represented by a compacted memory block.
         2. Chat history window: turn_ctx is truncated to _CHAT_HISTORY_WINDOW
            items so accumulated Q&A pairs don't grow unbounded (~750 tokens).
            truncate() always preserves the system instruction message.
@@ -363,7 +374,12 @@ class Assistant(Agent):
 
         # Use only the most recent utterances for the snapshot.
         recent = list(self._transcript)[-_TRANSCRIPT_WINDOW:]
-        snapshot = "[Meeting transcript (recent)]\n" + "\n".join(recent)
+        compacted_memory = self._transcript_memory.memory_text()
+        snapshot_parts = []
+        if compacted_memory:
+            snapshot_parts.append(compacted_memory)
+        snapshot_parts.append("[Meeting transcript (recent)]\n" + "\n".join(recent))
+        snapshot = "\n\n".join(snapshot_parts)
 
         # Insert just before the pending user message so ordering is natural.
         user_idx = turn_ctx.index_by_id(new_message.id)

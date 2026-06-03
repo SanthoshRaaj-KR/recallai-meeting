@@ -67,8 +67,10 @@ from pydantic import BaseModel
 
 try:
     from .review_pipeline import ProposalPipeline
+    from .memory_compaction import TranscriptCompactor
 except ImportError:  # Allows `uvicorn recall_bridge:app` from my-agent/src.
     from review_pipeline import ProposalPipeline
+    from memory_compaction import TranscriptCompactor
 
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
@@ -143,6 +145,10 @@ class _SessionRecord:
         self.error: str | None = None
         self.changes: list[dict] = []
         self.transcript: list[dict] = []
+        self.transcript_memory = TranscriptCompactor(
+            window_size=2000,
+            max_memory_chars=int(os.getenv("JARVIS_BRIDGE_COMPACTED_MEMORY_CHARS", "12000")),
+        )
         self._change_counter: int = 0
         self.summary: dict | None = None
         self.extracted_meeting = None
@@ -210,6 +216,9 @@ class _SessionRecord:
             },
             "updated_at": self.updated_at,
         }
+
+    def compacted_transcript_context(self) -> str:
+        return self.transcript_memory.memory_text()
 
 
 def _require_session(session_id: str) -> _SessionRecord:
@@ -545,14 +554,14 @@ async def receive_livekit_transcript(session_id: str, request: Request) -> dict:
         session = _SessionRecord(session_id, bot_id=None, meeting_url=None)
         session.status = "in_meeting"
         _sessions[session_id] = session
-    session.transcript.append(
-        {
-            "participant": (body.get("speaker") or body.get("participant") or "Meeting").strip(),
-            "text": text,
-            "timestamp": body.get("timestamp") or datetime.datetime.utcnow().timestamp(),
-            "source": body.get("source") or "livekit",
-        }
-    )
+    entry = {
+        "participant": (body.get("speaker") or body.get("participant") or "Meeting").strip(),
+        "text": text,
+        "timestamp": body.get("timestamp") or datetime.datetime.utcnow().timestamp(),
+        "source": body.get("source") or "livekit",
+    }
+    session.transcript.append(entry)
+    session.transcript_memory.observe_entry(entry)
     if len(session.transcript) > 2000:
         session.transcript = session.transcript[-2000:]
     session._touch()
@@ -645,6 +654,7 @@ async def propose_changes(session_id: str, body: ProposeBody) -> dict:
         session_id=session_id,
         transcript=s.transcript,
         query=body.query,
+        memory_context=s.compacted_transcript_context(),
     )
     s.extracted_meeting = meeting
     s.summary = pipeline.summary_response(session_id, meeting, s.transcript)
@@ -755,6 +765,7 @@ async def _run_pipeline_job(job_id: str) -> None:
         meeting, proposals = await pipeline.run(
             session_id=session_id,
             transcript=s.transcript,
+            memory_context=s.compacted_transcript_context(),
             emit=emit,
         )
         s.extracted_meeting = meeting
