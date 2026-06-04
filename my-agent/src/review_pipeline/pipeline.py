@@ -123,6 +123,232 @@ class ProposalPipeline:
             await _emit({"type": "proposal_ready", **proposal})
         return meeting, verified
 
+    async def propose_custom_new_page(
+        self,
+        *,
+        session_id: str,
+        transcript: list[dict[str, Any]],
+        query: str,
+        memory_context: str | None = None,
+    ) -> tuple[ExtractedMeeting, list[dict[str, Any]]]:
+        """Draft a create-page proposal from explicit user guidance.
+
+        This is intentionally separate from the normal edit-heavy pipeline. The
+        custom dialog's "add new page" mode should create one cohesive page,
+        using current meeting context plus style samples from existing pages.
+        """
+        transcript_text = add_memory_context(format_transcript(transcript), memory_context)
+        meeting = await self._extract_meeting(transcript, transcript_text, query=query)
+        style_pages = await self._sample_style_pages(query=query, meeting=meeting)
+        try:
+            proposal = await asyncio.to_thread(
+                self._draft_styled_new_page_sync,
+                session_id,
+                meeting,
+                transcript_text,
+                query,
+                style_pages,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Styled new-page drafting failed; using fallback: %s", exc)
+            proposal = self._fallback_styled_new_page(session_id, meeting, query)
+        proposals = [proposal.to_dict()]
+        for page in style_pages:
+            await self._index_page_for_rag(page)
+        return meeting, proposals
+
+    async def _sample_style_pages(
+        self,
+        *,
+        query: str,
+        meeting: ExtractedMeeting,
+        limit: int = 4,
+    ) -> list[PageCandidate]:
+        pages_by_id: dict[str, PageCandidate] = {}
+        terms = self._candidate_search_terms(meeting, query, query=query)[:6]
+        for term in terms:
+            try:
+                results = await self._hybrid_search_pages(term, limit=limit)
+            except Exception:
+                continue
+            for result in results:
+                page_id = str(result.get("page_id") or result.get("id") or "")
+                if not page_id or page_id in pages_by_id:
+                    continue
+                try:
+                    page = await self._fetch_page_for_retrieval(page_id, str(result.get("source") or "style_sample"))
+                except Exception:
+                    continue
+                pages_by_id[page_id] = page
+                if len(pages_by_id) >= limit:
+                    return list(pages_by_id.values())
+
+        if len(pages_by_id) < limit:
+            try:
+                recent = await self.client.list_pages(limit=limit * 2)
+            except Exception as exc:
+                logger.debug("Could not list style sample pages: %s", exc)
+                recent = []
+            for result in recent:
+                page_id = str(result.get("page_id") or result.get("id") or "")
+                if not page_id or page_id in pages_by_id:
+                    continue
+                try:
+                    page = await self._fetch_page_for_retrieval(page_id, "style_recent_page")
+                except Exception:
+                    continue
+                pages_by_id[page_id] = page
+                if len(pages_by_id) >= limit:
+                    break
+
+        return list(pages_by_id.values())
+
+    def _draft_styled_new_page_sync(
+        self,
+        session_id: str,
+        meeting: ExtractedMeeting,
+        transcript_text: str,
+        query: str,
+        style_pages: list[PageCandidate],
+    ) -> Proposal:
+        client = self._get_openai()
+        title_hint = self._new_page_title_hint(query, meeting)
+        style_payload = [
+            {
+                "title": page.title,
+                "space_key": page.space_key,
+                "sections": [
+                    {
+                        "heading": section.get("heading") or "",
+                        "text_excerpt": (section.get("text") or "")[:900],
+                        "html_excerpt": (section.get("html") or "")[:1200],
+                    }
+                    for section in (page.sections or extract_sections(page.html))[:8]
+                ],
+            }
+            for page in style_pages[:4]
+        ]
+        prompt = (
+            "Draft a complete new Confluence page from a meeting and user request. "
+            "First infer the writing style from existing same-space page samples: heading depth, "
+            "section order, tone, bullets vs paragraphs, tables, panels, status/color conventions, "
+            "and how concise the pages are. Then write a new page in that style.\n\n"
+            "Return JSON only with: title, body_markdown, rationale. body_markdown must be publishable "
+            "page content using markdown-ish syntax: ## headings, ### subheadings, bullet lists, "
+            "numbered steps, and simple tables if useful. If an image/diagram would help, insert a "
+            "placeholder line like '[IMAGE PLACEHOLDER: describe the exact image needed]'. "
+            "Do not invent facts beyond the transcript/request. If details are missing, include a "
+            "short 'Open questions' section instead of guessing."
+        )
+        payload = {
+            "user_request": query,
+            "title_hint": title_hint,
+            "meeting": {
+                "title": meeting.title,
+                "summary": meeting.summary,
+                "key_topics": meeting.key_topics,
+                "decisions": meeting.decisions,
+                "action_items": meeting.action_items,
+            },
+            "transcript_excerpt": transcript_text[:18000],
+            "same_space_style_samples": style_payload,
+        }
+        opts: dict[str, Any] = {"model": self.model, "response_format": {"type": "json_object"}}
+        if self.model.startswith(("gpt-5", "o1", "o3", "o4")):
+            opts["max_completion_tokens"] = 2200
+        else:
+            opts["max_tokens"] = 2200
+            opts["temperature"] = 0.1
+        response = client.chat.completions.create(
+            **opts,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+        )
+        data = json.loads(response.choices[0].message.content or "{}")
+        title = normalize_ws(str(data.get("title") or title_hint or "Meeting Notes"))
+        body = str(data.get("body_markdown") or "").strip()
+        if not body:
+            return self._fallback_styled_new_page(session_id, meeting, query)
+        rationale = normalize_ws(str(data.get("rationale") or "New page drafted from custom user request and meeting context."))
+        return Proposal(
+            id=str(uuid.uuid4()),
+            change_type="create",
+            page_id=None,
+            page_title=title[:120],
+            section_heading="Overview",
+            before_content=None,
+            after_content=body,
+            timestamp=_utcnow(),
+            session_id=session_id,
+            rationale=rationale,
+            generation_query=query,
+            transcript_evidence=[],
+            confidence="medium",
+            risk="review",
+            verifier_note=(
+                "Custom new-page proposal. Style was inferred from existing Confluence pages; "
+                "review placeholders and open questions before accepting."
+            ),
+            change_summary=f"Create new page '{title[:80]}'",
+            confidence_score=0.72,
+            confidence_bin="medium",
+        )
+
+    def _fallback_styled_new_page(
+        self,
+        session_id: str,
+        meeting: ExtractedMeeting,
+        query: str,
+    ) -> Proposal:
+        title = self._new_page_title_hint(query, meeting)
+        body_lines = [
+            f"## {title}",
+            "",
+            meeting.summary or normalize_ws(query) or "Draft page requested from the meeting.",
+        ]
+        if meeting.decisions:
+            body_lines.extend(["", "## Decisions", *[f"- {item}" for item in meeting.decisions[:8]]])
+        if meeting.action_items:
+            body_lines.append("")
+            body_lines.append("## Action items")
+            for item in meeting.action_items[:8]:
+                if isinstance(item, dict):
+                    body_lines.append(f"- {item.get('description') or item}")
+                else:
+                    body_lines.append(f"- {item}")
+        body_lines.extend(["", "## Open questions", "- Confirm any missing owners, dates, links, or diagrams before publishing."])
+        return Proposal(
+            id=str(uuid.uuid4()),
+            change_type="create",
+            page_id=None,
+            page_title=title[:120],
+            section_heading="Overview",
+            before_content=None,
+            after_content="\n".join(body_lines).strip(),
+            timestamp=_utcnow(),
+            session_id=session_id,
+            rationale="Fallback new page draft from meeting context.",
+            generation_query=query,
+            confidence="low",
+            risk="review",
+            verifier_note="Style sampling or LLM drafting was unavailable; review before accepting.",
+            change_summary=f"Create new page '{title[:80]}'",
+            confidence_score=0.55,
+            confidence_bin="low",
+        )
+
+    def _new_page_title_hint(self, query: str, meeting: ExtractedMeeting) -> str:
+        cleaned = normalize_ws(re.sub(r"(?i)\b(create|add|make|new|page|confluence|document|doc)\b", " ", query or ""))
+        cleaned = re.sub(r"[^A-Za-z0-9 /:_-]", " ", cleaned)
+        cleaned = normalize_ws(cleaned)
+        if cleaned:
+            return cleaned[:90].title()
+        if meeting.key_topics:
+            return normalize_ws(str(meeting.key_topics[0]))[:90].title()
+        return (meeting.title or "Meeting Notes")[:90]
+
     async def _extract_meeting(
         self,
         transcript: list[dict[str, Any]],

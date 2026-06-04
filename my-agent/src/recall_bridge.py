@@ -274,6 +274,7 @@ class ExecuteBody(BaseModel):
 
 class ProposeBody(BaseModel):
     query: Optional[str] = None
+    create_new_page: bool = False
 
 
 class ChatBody(BaseModel):
@@ -650,12 +651,20 @@ async def propose_changes(session_id: str, body: ProposeBody) -> dict:
     """
     s = _require_session(session_id)
     pipeline = _pipeline()
-    meeting, proposals = await pipeline.run(
-        session_id=session_id,
-        transcript=s.transcript,
-        query=body.query,
-        memory_context=s.compacted_transcript_context(),
-    )
+    if body.create_new_page:
+        meeting, proposals = await pipeline.propose_custom_new_page(
+            session_id=session_id,
+            transcript=s.transcript,
+            query=body.query or "",
+            memory_context=s.compacted_transcript_context(),
+        )
+    else:
+        meeting, proposals = await pipeline.run(
+            session_id=session_id,
+            transcript=s.transcript,
+            query=body.query,
+            memory_context=s.compacted_transcript_context(),
+        )
     s.extracted_meeting = meeting
     s.summary = pipeline.summary_response(session_id, meeting, s.transcript)
     s.summary["proposal_diagnostics"] = pipeline.last_diagnostics
