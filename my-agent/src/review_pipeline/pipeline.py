@@ -21,6 +21,7 @@ from .rag import ConfluenceVectorIndex
 from .text_utils import (
     append_new_section,
     best_section_heading,
+    extract_sections,
     extract_tasks,
     format_transcript,
     html_to_text,

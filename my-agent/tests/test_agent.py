@@ -10,6 +10,23 @@ import agent as agent_module
 from agent import Assistant
 
 
+def test_tail_lines_to_char_budget_preserves_recent_tail() -> None:
+    lines = ["old line", "middle line", "new line"]
+    budget = len("middle line") + len("new line") + 2
+
+    trimmed = agent_module._tail_lines_to_char_budget(lines, max_chars=budget)
+
+    assert trimmed == ["middle line", "new line"]
+
+
+def test_trim_text_to_char_budget_preserves_recent_suffix() -> None:
+    text = "older compacted memory\nnewer compacted memory"
+
+    trimmed = agent_module._trim_text_to_char_budget(text, max_chars=len("newer compacted memory"))
+
+    assert trimmed == "newer compacted memory"
+
+
 def _judge_llm() -> llm.LLM:
     return inference.LLM(model="openai/gpt-4.1-mini")
 

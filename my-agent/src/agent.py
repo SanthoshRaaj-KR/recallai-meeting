@@ -58,6 +58,24 @@ _TRANSCRIPT_MAX = 500
 # turn (~100 × 40 tokens ≈ 4 000 tokens). Older utterances stay in the buffer
 # so they can still be referenced if the window is widened later.
 _TRANSCRIPT_WINDOW = 100
+# Keep the recent/raw transcript budget independent from compacted memory. We
+# approximate tokens by chars here to avoid adding a tokenizer dependency to the
+# live agent path.
+_CHARS_PER_TOKEN_APPROX = 4
+_RECENT_TRANSCRIPT_TOKENS = int(os.getenv("JARVIS_RECENT_TRANSCRIPT_TOKENS", "4000"))
+_RECENT_TRANSCRIPT_CHARS = int(
+    os.getenv(
+        "JARVIS_RECENT_TRANSCRIPT_CHARS",
+        str(_RECENT_TRANSCRIPT_TOKENS * _CHARS_PER_TOKEN_APPROX),
+    )
+)
+_COMPACTED_MEMORY_TOKENS = int(os.getenv("JARVIS_COMPACTED_MEMORY_TOKENS", "2000"))
+_COMPACTED_MEMORY_CHARS = int(
+    os.getenv(
+        "JARVIS_COMPACTED_MEMORY_CHARS",
+        str(_COMPACTED_MEMORY_TOKENS * _CHARS_PER_TOKEN_APPROX),
+    )
+)
 # Keep at most this many conversation items (user + assistant turns) in the
 # chat context. truncate() always preserves the system instruction message.
 # 10 items = 5 Q&A pairs ≈ ~750 tokens for history.
@@ -66,6 +84,32 @@ _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 # Optional default repo (owner/repo) used when the user doesn't name one.
 _GITHUB_DEFAULT_REPO = os.getenv("GITHUB_DEFAULT_REPO", "")
 _BRIDGE_INTERNAL_URL = os.getenv("BRIDGE_INTERNAL_URL", "http://127.0.0.1:8001").rstrip("/")
+_OPENING_GREETING_DELAY_S = float(os.getenv("JARVIS_OPENING_GREETING_DELAY_SECONDS", "1.25"))
+
+
+def _trim_text_to_char_budget(text: str, max_chars: int) -> str:
+    value = (text or "").strip()
+    if len(value) <= max_chars:
+        return value
+    return value[-max_chars:].lstrip()
+
+
+def _tail_lines_to_char_budget(lines: list[str], max_chars: int) -> list[str]:
+    kept: collections.deque[str] = collections.deque()
+    total = 0
+    for line in reversed(lines):
+        clean = line.strip()
+        if not clean:
+            continue
+        line_cost = len(clean) + 1
+        if kept and total + line_cost > max_chars:
+            break
+        if not kept and line_cost > max_chars:
+            kept.appendleft(clean[-max_chars:].lstrip())
+            break
+        kept.appendleft(clean)
+        total += line_cost
+    return list(kept)
 
 
 def _build_github_toolset() -> mcp.MCPToolset | None:
@@ -155,7 +199,7 @@ class Assistant(Agent):
         self._transcript: collections.deque[str] = collections.deque(maxlen=_TRANSCRIPT_MAX)
         self._transcript_memory = TranscriptCompactor(
             window_size=_TRANSCRIPT_WINDOW,
-            max_memory_chars=int(os.getenv("JARVIS_COMPACTED_MEMORY_CHARS", "8000")),
+            max_memory_chars=_COMPACTED_MEMORY_CHARS,
         )
         # Two-stage wake: bare "Jarvis" → listening mode → next utterance is the query.
         self._listening: bool = False
@@ -170,6 +214,7 @@ class Assistant(Agent):
         # Each turn we remove the old one and insert a fresh snapshot so the
         # chat history never accumulates multiple embedded transcripts.
         self._transcript_msg_id: str | None = None
+        self._opening_greeting_task: asyncio.Task | None = None
 
     def _build_greeting(self) -> str:
         """Return a time-aware, one-of-a-kind opening greeting for the meeting."""
@@ -221,8 +266,8 @@ class Assistant(Agent):
         if not self._greeted:
             self._greeted = True
             greeting = self._build_greeting()
-            asyncio.create_task(
-                self.session.say(greeting, add_to_chat_ctx=False),
+            self._opening_greeting_task = asyncio.create_task(
+                self._play_opening_greeting(greeting),
                 name="opening_greeting",
             )
 
@@ -233,6 +278,20 @@ class Assistant(Agent):
             asyncio.create_task(
                 self._github_toolset.setup(), name="github_mcp_prewarm"
             )
+
+    async def _play_opening_greeting(self, greeting: str) -> None:
+        """Delay first speech so the Recall browser has time to attach playback."""
+        if _OPENING_GREETING_DELAY_S > 0:
+            await asyncio.sleep(_OPENING_GREETING_DELAY_S)
+        try:
+            handle = self.session.say(
+                greeting,
+                add_to_chat_ctx=False,
+                allow_interruptions=False,
+            )
+            await handle.wait_for_playout()
+        except Exception as exc:
+            logger.warning("Opening greeting failed: %s", exc)
 
     async def stt_node(
         self,
@@ -349,13 +408,15 @@ class Assistant(Agent):
     ) -> None:
         """Replace the rolling transcript system message and apply memory windows.
 
-        Two caps are enforced on every LLM call to keep the request bounded
+        Separate caps are enforced on every LLM call to keep the request bounded
         regardless of meeting length:
 
-        1. Transcript window: only the most recent _TRANSCRIPT_WINDOW utterances
-           are included verbatim in the snapshot (~4 k tokens). Older utterances
-           are represented by a compacted memory block.
-        2. Chat history window: turn_ctx is truncated to _CHAT_HISTORY_WINDOW
+        1. Recent transcript: up to _TRANSCRIPT_WINDOW latest utterances, then
+           trimmed to _RECENT_TRANSCRIPT_CHARS. This budget is reserved for raw
+           transcript and is not consumed by compacted memory.
+        2. Compacted memory: older utterances are rewritten into one bounded
+           memory block, capped separately by _COMPACTED_MEMORY_CHARS.
+        3. Chat history window: turn_ctx is truncated to _CHAT_HISTORY_WINDOW
            items so accumulated Q&A pairs don't grow unbounded (~750 tokens).
            truncate() always preserves the system instruction message.
         """
@@ -372,9 +433,16 @@ class Assistant(Agent):
         if not self._transcript:
             return
 
-        # Use only the most recent utterances for the snapshot.
-        recent = list(self._transcript)[-_TRANSCRIPT_WINDOW:]
-        compacted_memory = self._transcript_memory.memory_text()
+        # Use the most recent utterances for the snapshot, with a budget that is
+        # independent from the compacted-memory budget.
+        recent = _tail_lines_to_char_budget(
+            list(self._transcript)[-_TRANSCRIPT_WINDOW:],
+            _RECENT_TRANSCRIPT_CHARS,
+        )
+        compacted_memory = _trim_text_to_char_budget(
+            self._transcript_memory.memory_text(),
+            _COMPACTED_MEMORY_CHARS,
+        )
         snapshot_parts = []
         if compacted_memory:
             snapshot_parts.append(compacted_memory)

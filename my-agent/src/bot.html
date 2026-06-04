@@ -96,6 +96,30 @@
       return audioCtx;
     }
 
+    function warmSilentPlaybackPath() {
+      // Warm Chrome/Recall's audio element path without producing meeting sound.
+      // This is intentionally a muted, zero-volume, 10ms silent WAV.
+      var warmup = document.createElement('audio');
+      warmup.muted = true;
+      warmup.volume = 0;
+      warmup.autoplay = false;
+      warmup.src = 'data:audio/wav;base64,UklGRmQBAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YUABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
+      document.body.appendChild(warmup);
+      warmup.play()
+        .then(function () {
+          console.log('[bot.html][subscriber] Silent playback path warmup completed');
+        })
+        .catch(function (e) {
+          console.warn('[bot.html][subscriber] Silent playback path warmup failed:', e);
+        })
+        .finally(function () {
+          setTimeout(function () {
+            warmup.pause();
+            warmup.remove();
+          }, 250);
+        });
+    }
+
     function playTrack(track, identity) {
       // Primary path: HTMLAudioElement — reliable in Recall's headless Chrome.
       // Recall captures audio from <audio> elements and injects it into the meeting.
@@ -131,6 +155,7 @@
     room.on(LivekitClient.RoomEvent.Connected, function () {
       setStatus('Subscriber connected — room: ' + (roomName || '<unknown>'));
       ensureAudioCtx();
+      warmSilentPlaybackPath();
       room.startAudio().catch(function (e) {
         console.warn('[bot.html][subscriber] room.startAudio() failed (may be normal):', e);
       });

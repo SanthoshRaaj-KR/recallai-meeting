@@ -7,7 +7,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from review_pipeline.models import ChangeIntent, ExtractedMeeting, PageCandidate
 from review_pipeline.pipeline import ProposalPipeline
-from review_pipeline.rag import VectorSearchHit, chunk_page
+from review_pipeline.rag import ConfluenceVectorIndex, VectorSearchHit, chunk_page
 
 
 class FakeConfluenceClient:
@@ -84,6 +84,40 @@ class FakeVectorIndex:
         self.upserted.append(page.page_id)
 
 
+class FakePineconeIndex:
+    def __init__(self):
+        self.vectors = {}
+        self.upsert_calls = 0
+
+    def fetch(self, ids, namespace=None):
+        return {"vectors": {item_id: self.vectors[item_id] for item_id in ids if item_id in self.vectors}}
+
+    def upsert(self, vectors, namespace=None):
+        self.upsert_calls += 1
+        for vector in vectors:
+            self.vectors[vector["id"]] = vector
+
+    def delete(self, ids, namespace=None):
+        for item_id in ids:
+            self.vectors.pop(item_id, None)
+
+
+class LocalVectorIndex(ConfluenceVectorIndex):
+    def __init__(self):
+        super().__init__()
+        self.fake_index = FakePineconeIndex()
+
+    @property
+    def enabled(self):
+        return True
+
+    def _index(self):
+        return self.fake_index
+
+    def _embed(self, texts):
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+
 def test_pipeline_drafts_exact_date_replacement(monkeypatch):
     pipeline = ProposalPipeline()
     pipeline._client = FakeConfluenceClient()
@@ -140,6 +174,30 @@ def test_rag_chunks_one_page_without_mixing_pages():
     assert [chunk.page_id for chunk in chunks] == ["page-1", "page-1"]
     assert [chunk.heading for chunk in chunks] == ["Classifier", "Detector"]
     assert all(chunk.title == "Metrics" for chunk in chunks)
+
+
+def test_rag_upsert_skips_unchanged_page_and_reindexes_changed_page():
+    index = LocalVectorIndex()
+    page = PageCandidate(
+        page_id="page-1",
+        title="Metrics",
+        html="<h2>Classifier</h2><p>Recall: 0.91</p>",
+        version=3,
+    )
+
+    index.upsert_page(page)
+    index.upsert_page(page)
+    changed_page = PageCandidate(
+        page_id="page-1",
+        title="Metrics",
+        html="<h2>Classifier</h2><p>Recall: 0.98</p>",
+        version=4,
+    )
+    index.upsert_page(changed_page)
+
+    assert index.fake_index.upsert_calls == 2
+    assert index.fake_index.vectors["page-1:0"]["metadata"]["version"] == 4
+    assert index.fake_index.vectors["page-1:0"]["metadata"]["chunk_count"] == 1
 
 
 def test_vector_rag_finds_metric_page_and_drafts_inline_replace(monkeypatch):
