@@ -17,6 +17,7 @@ from memory_compaction import add_memory_context
 
 from .confluence import HybridConfluenceClient
 from .models import ChangeIntent, ExtractedMeeting, PageCandidate, Proposal
+from .rag import ConfluenceVectorIndex
 from .text_utils import (
     append_new_section,
     best_section_heading,
@@ -49,7 +50,9 @@ class ProposalPipeline:
         self.model = os.getenv("MY_AGENT_REVIEW_MODEL", os.getenv("JARVIS_REVIEW_MODEL", "gpt-4o-mini")).strip()
         self.max_candidate_pages = int(os.getenv("MY_AGENT_PIPELINE_MAX_PAGES", "16"))
         self.max_search_terms = int(os.getenv("MY_AGENT_PIPELINE_MAX_SEARCH_TERMS", "24"))
+        self.rag_top_k = int(os.getenv("MY_AGENT_PIPELINE_RAG_TOP_K", "8"))
         self._client: HybridConfluenceClient | None = None
+        self._rag: ConfluenceVectorIndex | None = None
         self._openai: OpenAI | None = None
         self.last_diagnostics: list[dict[str, Any]] = []
 
@@ -282,7 +285,7 @@ class ProposalPipeline:
         pages_by_id: dict[str, PageCandidate] = {}
         for term in search_terms:
             try:
-                results = await self.client.search_pages(term, limit=5)
+                results = await self._hybrid_search_pages(term, limit=5)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Page-grounded candidate search failed for %r: %s", term, exc)
                 continue
@@ -291,10 +294,11 @@ class ProposalPipeline:
                 if not page_id or page_id in pages_by_id:
                     continue
                 try:
-                    page = await self.client.fetch_page(page_id)
+                    page = await self._fetch_page_for_retrieval(page_id, str(result.get("source") or "hybrid_search"))
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Page-grounded candidate fetch failed for %s: %s", page_id, exc)
                     continue
+                page.score = float(result.get("retrieval_score") or 0.0)
                 pages_by_id[page_id] = page
                 if len(pages_by_id) >= self.max_candidate_pages:
                     break
@@ -511,7 +515,7 @@ class ProposalPipeline:
             pages_by_id: dict[str, PageCandidate] = {}
             if intent.page_id:
                 try:
-                    page = await self.client.fetch_page(intent.page_id)
+                    page = await self._fetch_page_for_retrieval(intent.page_id, intent.source or "page_hint")
                     page.source = intent.source or "page_hint"
                     page.score = self._score_page(intent, page) + 5.0
                     pages_by_id[intent.page_id] = page
@@ -519,21 +523,21 @@ class ProposalPipeline:
                     logger.debug("Could not fetch hinted candidate page %s: %s", intent.page_id, exc)
             for query in queries:
                 try:
-                    results = await self.client.search_pages(query, limit=6)
+                    results = await self._hybrid_search_pages(query, limit=6)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("Confluence search failed for %r: %s", query, exc)
+                    logger.warning("Hybrid Confluence search failed for %r: %s", query, exc)
                     continue
                 for result in results:
                     page_id = result.get("page_id") or result.get("id")
                     if not page_id or page_id in pages_by_id:
                         continue
                     try:
-                        page = await self.client.fetch_page(str(page_id))
+                        page = await self._fetch_page_for_retrieval(str(page_id), str(result.get("source") or "hybrid_search"))
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("Could not fetch candidate page %s: %s", page_id, exc)
                         continue
                     page.source = result.get("source") or page.source or "search"
-                    page.score = self._score_page(intent, page)
+                    page.score = self._score_page(intent, page) + float(result.get("retrieval_score") or 0.0)
                     pages_by_id[str(page_id)] = page
             ranked = sorted(pages_by_id.values(), key=lambda p: p.score, reverse=True)
             if not ranked and (intent.instruction or intent.subject or intent.new_value):
@@ -545,6 +549,83 @@ class ProposalPipeline:
                 )
             out.append((intent, ranked[: self.max_candidate_pages]))
         return out
+
+    async def _hybrid_search_pages(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        """Search both live Confluence/Rovo and vector RAG, then merge by page."""
+        clean_query = normalize_ws(query)
+        if not clean_query:
+            return []
+
+        live_results: list[dict[str, Any]] = []
+        rag_hits = []
+        try:
+            live_results = await self.client.search_pages(clean_query, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Confluence/Rovo search failed for %r: %s", clean_query, exc)
+        try:
+            rag_hits = await asyncio.to_thread(self.rag.search, clean_query, max(limit, self.rag_top_k))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Vector RAG search failed for %r: %s", clean_query, exc)
+
+        merged: dict[str, dict[str, Any]] = {}
+        for idx, result in enumerate(live_results):
+            page_id = str(result.get("page_id") or result.get("id") or "")
+            title = str(result.get("title") or page_id)
+            key = page_id or title.lower()
+            if not key:
+                continue
+            merged[key] = {
+                **result,
+                "page_id": page_id,
+                "title": title,
+                "source": result.get("source") or "confluence_search",
+                "retrieval_score": float(result.get("retrieval_score") or (1.0 - min(idx, limit) * 0.03)),
+            }
+
+        for hit in rag_hits:
+            key = hit.page_id or hit.title.lower()
+            if not key:
+                continue
+            existing = merged.get(key)
+            if existing:
+                if "vector_rag" not in str(existing.get("source") or ""):
+                    existing["source"] = f"{existing.get('source') or 'confluence_search'}+vector_rag"
+                existing["rag_score"] = hit.score
+                existing["rag_heading"] = hit.heading
+                existing["rag_excerpt"] = hit.text
+                existing["retrieval_score"] = max(float(existing.get("retrieval_score") or 0.0), hit.score + 0.25)
+                continue
+            merged[key] = {
+                "page_id": hit.page_id,
+                "title": hit.title,
+                "space_key": hit.space_key,
+                "version": hit.version,
+                "source": "vector_rag",
+                "rag_score": hit.score,
+                "rag_heading": hit.heading,
+                "rag_excerpt": hit.text,
+                "retrieval_score": hit.score,
+            }
+
+        return sorted(
+            merged.values(),
+            key=lambda item: float(item.get("retrieval_score") or 0.0),
+            reverse=True,
+        )[:limit]
+
+    async def _fetch_page_for_retrieval(self, page_id: str, source: str = "search") -> PageCandidate:
+        page = await self.client.fetch_page(page_id)
+        page.source = source or page.source
+        await self._index_page_for_rag(page)
+        return page
+
+    async def _index_page_for_rag(self, page: PageCandidate) -> None:
+        if not page.page_id:
+            return
+        try:
+            await asyncio.to_thread(self.rag.upsert_page, page)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Vector RAG indexing failed for page %s: %s", page.page_id, exc)
 
     def _queries_for_intent(self, intent: ChangeIntent) -> list[str]:
         values = [
@@ -635,6 +716,115 @@ class ProposalPipeline:
                 best = (score, task)
         return best[1] if best[0] >= 4.0 else None
 
+    def _metric_inline_replacement(
+        self,
+        intent: ChangeIntent,
+        page: PageCandidate,
+    ) -> tuple[str, str] | None:
+        new_number = self._last_numeric_value(intent.new_value)
+        if not new_number:
+            return None
+        metric_names = self._metric_name_candidates(intent)
+        if not metric_names:
+            return None
+
+        text = page.text or html_to_text(page.html)
+        candidates: list[tuple[float, str, str]] = []
+        for raw_line in text.splitlines():
+            line = normalize_ws(raw_line)
+            if not line or len(line) > 400:
+                continue
+            line_norm = normalize_for_match(line)
+            metric = next((name for name in metric_names if normalize_for_match(name) in line_norm), "")
+            if not metric:
+                continue
+            replaced = self._replace_metric_number(line, metric, new_number)
+            if not replaced or replaced == line:
+                continue
+            score = 1.0
+            metric_norm = normalize_for_match(metric)
+            if line_norm.startswith(metric_norm):
+                score += 2.0
+            if intent.target_hint and normalize_for_match(intent.target_hint) in normalize_for_match(page.title):
+                score += 1.5
+            context_tokens = {t for t in normalize_for_match(f"{intent.subject} {intent.target_hint} {intent.instruction}").split() if len(t) > 3}
+            line_tokens = {t for t in line_norm.split() if len(t) > 3}
+            score += min(2.0, len(context_tokens & line_tokens) * 0.4)
+            candidates.append((score, line, replaced))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+            self._add_diagnostic(
+                intent,
+                "ambiguous_metric_inline_match",
+                "Multiple metric lines matched with equal confidence; refusing automatic inline replacement.",
+                severity="review",
+                page_title=page.title,
+            )
+            return None
+        return candidates[0][1], candidates[0][2]
+
+    def _metric_name_candidates(self, intent: ChangeIntent) -> list[str]:
+        values = [intent.subject, intent.target_hint]
+        match = re.search(
+            r"\b([A-Za-z][A-Za-z0-9 _/-]{1,40}?)\s+(?:to|=|is|becomes?|changed?\s+to)\s+\d",
+            intent.instruction,
+            re.IGNORECASE,
+        )
+        if match:
+            values.append(match.group(1))
+
+        candidates: list[str] = []
+        seen: set[str] = set()
+        stopwords = {
+            "change",
+            "changed",
+            "metric",
+            "score",
+            "set",
+            "the",
+            "to",
+            "update",
+            "value",
+        }
+        for value in values:
+            cleaned = re.sub(r"\d+(?:\.\d+)?%?", " ", value or "")
+            cleaned = re.sub(r"[^A-Za-z0-9 _/-]", " ", cleaned)
+            cleaned = normalize_ws(cleaned)
+            if not cleaned:
+                continue
+            words = [word for word in cleaned.split() if word.lower() not in stopwords]
+            options = [cleaned, *words]
+            for option in options:
+                key = option.lower()
+                if len(option) >= 2 and key not in seen:
+                    seen.add(key)
+                    candidates.append(option)
+        return candidates[:8]
+
+    def _replace_metric_number(self, line: str, metric: str, new_number: str) -> str | None:
+        metric_re = re.escape(metric)
+        labelled = re.compile(
+            rf"(?i)(\b{metric_re}\b(?:\s+(?:score|rate|metric|value))?\s*(?:is|=|:|-|of)?\s*)(\d+(?:\.\d+)?%?)"
+        )
+        match = labelled.search(line)
+        if match:
+            if match.group(2) == new_number:
+                return None
+            return f"{line[:match.start(2)]}{new_number}{line[match.end(2):]}"
+
+        numbers = list(re.finditer(r"(?<![\w.])\d+(?:\.\d+)?%?(?![\w.])", line))
+        if len(numbers) != 1 or numbers[0].group(0) == new_number:
+            return None
+        match = numbers[0]
+        return f"{line[:match.start()]}{new_number}{line[match.end():]}"
+
+    def _last_numeric_value(self, value: str) -> str | None:
+        matches = re.findall(r"(?<![\w.])\d+(?:\.\d+)?%?(?![\w.])", value or "")
+        return matches[-1] if matches else None
+
     def _draft_proposals(
         self,
         *,
@@ -706,16 +896,13 @@ class ProposalPipeline:
             for idx, intent in enumerate(meeting.change_intents)
             if idx not in covered and (intent.instruction or intent.subject or intent.new_value)
         ]
-        if missing:
-            note = (
-                "Coverage audit: no proposal could be anchored for "
-                + "; ".join((m.instruction or m.subject)[:120] for m in missing[:5])
+        for intent in missing:
+            self._add_diagnostic(
+                intent,
+                "coverage_audit_unanchored_intent",
+                "Coverage audit could not anchor this extracted intent to a proposal.",
+                severity="review",
             )
-            for proposal in proposals:
-                existing = proposal.get("verifier_note") or ""
-                proposal["verifier_note"] = f"{existing} {note}".strip()
-                if proposal.get("risk") == "safe":
-                    proposal["risk"] = "review"
         return proposals
 
     def _draft_for_page(
@@ -758,16 +945,30 @@ class ProposalPipeline:
         change_type = "title" if title_change else "delete" if remove else "edit"
         before = intent.old_value if old_found and not title_change else None
         after = None if remove else (intent.new_value or intent.instruction or intent.subject)
+        metric_replacement = None
+        if change_type == "edit" and not before and action in {"replace", "update", "add"}:
+            metric_replacement = self._metric_inline_replacement(intent, page)
+            if metric_replacement:
+                before, after = metric_replacement
         edit_mode = None
         if change_type == "edit":
             edit_mode = "replace" if before else "append"
             if not after:
                 return None
+            if self._looks_like_instruction_text(after):
+                self._add_diagnostic(
+                    intent,
+                    "instruction_text_after_content",
+                    "Draft after_content looked like an editing instruction rather than publishable page content.",
+                    severity="review",
+                    page_title=page.title,
+                )
+                return None
         if change_type == "title" and not after:
             return None
         section_heading = best_section_heading(
             page.html,
-            intent.old_value,
+            before or intent.old_value,
             intent.subject,
             intent.target_hint,
             intent.new_value,
@@ -779,7 +980,8 @@ class ProposalPipeline:
                 edit_mode = refined.get("edit_mode") or edit_mode
                 section_heading = refined.get("section_heading") or section_heading
 
-        confidence = "high" if old_found and intent.evidence else "medium" if old_found or subject_found else "low"
+        anchored = old_found or metric_replacement is not None
+        confidence = "high" if anchored and intent.evidence else "medium" if anchored or subject_found else "low"
         risk = "review" if change_type in {"title", "delete"} else "safe" if confidence == "high" else "review"
         score = 0.9 if confidence == "high" else 0.72 if confidence == "medium" else 0.45
 
@@ -954,6 +1156,22 @@ class ProposalPipeline:
         heading = normalize_ws(str(data.get("section_heading") or current_heading or "")) or None
         return {"edit_mode": mode, "section_heading": heading or "", "after_content": after}
 
+    def _looks_like_instruction_text(self, value: str) -> bool:
+        text = normalize_ws(value)
+        if not text:
+            return False
+        bracketed = re.findall(r"\[([^\]]{3,240})\]", text)
+        if not bracketed:
+            return False
+        instruction_re = re.compile(
+            r"\b("
+            r"add|clarify|create|draft|expand|include|insert|mention|rewrite|"
+            r"summarize|update|write|minimum|paragraph|section"
+            r")\b",
+            re.IGNORECASE,
+        )
+        return any(instruction_re.search(part) for part in bracketed)
+
     def _create_page_proposal(
         self,
         session_id: str,
@@ -1099,6 +1317,7 @@ class ProposalPipeline:
         proposals: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         by_id = {str(p.get("id")): p for p in proposals}
+        rejected_ids: set[str] = set()
         for verdict in data.get("proposal_verdicts") or []:
             if not isinstance(verdict, dict):
                 continue
@@ -1145,6 +1364,21 @@ class ProposalPipeline:
                 existing = proposal.get("verifier_note") or ""
                 proposal["verifier_note"] = " ".join([existing, *warnings]).strip()
 
+            if not supported or page_fit == "wrong":
+                rejected_ids.add(str(proposal.get("id")))
+                self._add_diagnostic(
+                    None,
+                    "verifier_rejected_proposal",
+                    note
+                    or (
+                        "Verifier rejected proposal as unsupported."
+                        if not supported
+                        else "Verifier rejected proposal because it targets the wrong page."
+                    ),
+                    severity="risky",
+                    page_title=str(proposal.get("page_title") or "") or None,
+                )
+
         missed = data.get("missed_intents") or []
         if missed:
             missed_note = "Adversarial verifier found possible missed intents: " + "; ".join(
@@ -1157,7 +1391,7 @@ class ProposalPipeline:
                 proposal["verifier_note"] = f"{existing} {missed_note}".strip()
                 if proposal.get("risk") == "safe":
                     proposal["risk"] = "review"
-        return proposals
+        return [proposal for proposal in proposals if str(proposal.get("id")) not in rejected_ids]
 
     async def _rovo_independent_critic(
         self,
@@ -1179,7 +1413,7 @@ class ProposalPipeline:
             pages_by_id: dict[str, PageCandidate] = {}
             for term in terms:
                 try:
-                    results = await self.client.search_pages(term, limit=4)
+                    results = await self._hybrid_search_pages(term, limit=4)
                 except Exception:
                     continue
                 for result in results:
@@ -1187,7 +1421,10 @@ class ProposalPipeline:
                     if not page_id or page_id in pages_by_id:
                         continue
                     try:
-                        pages_by_id[page_id] = await self.client.fetch_page(page_id)
+                        pages_by_id[page_id] = await self._fetch_page_for_retrieval(
+                            page_id,
+                            str(result.get("source") or "hybrid_search"),
+                        )
                     except Exception:
                         continue
                     if len(pages_by_id) >= 12:
@@ -1313,6 +1550,19 @@ class ProposalPipeline:
             title = str(proposal.get("page_title") or "New Confluence Page")
             html_content = _storage_html(str(proposal.get("after_content") or title))
             result = await self.client.create_page(title, html_content)
+            new_page_id = str(result.get("id") or result.get("page_id") or "")
+            if new_page_id:
+                await self._index_page_for_rag(
+                    PageCandidate(
+                        page_id=new_page_id,
+                        title=title,
+                        html=html_content,
+                        text=html_to_text(html_content),
+                        version=(result.get("version") or {}).get("number") if isinstance(result.get("version"), dict) else None,
+                        source="created_page",
+                        sections=extract_sections(html_content),
+                    )
+                )
             return {"success": True, "message": f"Created Confluence page {result.get('id') or title}."}
 
         page_id = proposal.get("page_id")
@@ -1325,6 +1575,7 @@ class ProposalPipeline:
             if not new_title:
                 return {"success": False, "message": "Title proposal has no new title."}
             await self.client.update_page(str(page_id), page.html, title=new_title, expected_version=page.version)
+            await self._index_page_for_rag(self._updated_page_candidate(page, page.html, title=new_title))
             return {"success": True, "message": f"Renamed page to {new_title}."}
 
         if change_type == "delete":
@@ -1362,7 +1613,29 @@ class ProposalPipeline:
             new_html = insert_html_in_section(page.html, proposal.get("section_heading"), addition)
 
         await self.client.update_page(str(page_id), new_html, expected_version=page.version)
+        await self._index_page_for_rag(self._updated_page_candidate(page, new_html))
         return {"success": True, "message": "Applied change to Confluence."}
+
+    def _updated_page_candidate(
+        self,
+        page: PageCandidate,
+        html_content: str,
+        *,
+        title: str | None = None,
+    ) -> PageCandidate:
+        next_version = page.version + 1 if page.version is not None else None
+        return PageCandidate(
+            page_id=page.page_id,
+            title=title or page.title,
+            space_key=page.space_key,
+            url=page.url,
+            html=html_content,
+            text=html_to_text(html_content),
+            version=next_version,
+            source="post_apply_reindex",
+            score=page.score,
+            sections=extract_sections(html_content),
+        )
 
     def summary_response(
         self,
@@ -1402,6 +1675,12 @@ class ProposalPipeline:
         if self._client is None:
             self._client = HybridConfluenceClient()
         return self._client
+
+    @property
+    def rag(self) -> ConfluenceVectorIndex:
+        if self._rag is None:
+            self._rag = ConfluenceVectorIndex()
+        return self._rag
 
 
 def _utcnow() -> str:

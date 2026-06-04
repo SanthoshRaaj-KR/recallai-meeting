@@ -7,6 +7,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from review_pipeline.models import ChangeIntent, ExtractedMeeting, PageCandidate
 from review_pipeline.pipeline import ProposalPipeline
+from review_pipeline.rag import VectorSearchHit, chunk_page
 
 
 class FakeConfluenceClient:
@@ -44,6 +45,43 @@ class FakeConfluenceClient:
 
     async def create_page(self, title, html_content, space_key=None):
         return {"id": "new-page"}
+
+
+class VectorOnlyConfluenceClient:
+    async def search_pages(self, query, limit=10):
+        return []
+
+    async def fetch_page(self, page_id):
+        return PageCandidate(
+            page_id=page_id,
+            title="Vision Model Metrics",
+            html="<h2>Classifier</h2><p>Precision: 0.96</p><p>Recall: 0.91</p>",
+            text="Classifier\nPrecision: 0.96\nRecall: 0.91",
+            version=4,
+            source="fake",
+        )
+
+
+class FakeVectorIndex:
+    def __init__(self):
+        self.upserted = []
+
+    def search(self, query, top_k=8):
+        if "recall" in query.lower():
+            return [
+                VectorSearchHit(
+                    page_id="metrics-page",
+                    title="Vision Model Metrics",
+                    heading="Classifier",
+                    score=0.88,
+                    text="Recall: 0.91",
+                    version=4,
+                )
+            ]
+        return []
+
+    def upsert_page(self, page):
+        self.upserted.append(page.page_id)
 
 
 def test_pipeline_drafts_exact_date_replacement(monkeypatch):
@@ -85,6 +123,64 @@ def test_pipeline_drafts_exact_date_replacement(monkeypatch):
     assert proposal["after_content"] == "3rd December"
     assert proposal["confidence"] == "high"
     assert proposal["section_heading"] == "Timeline"
+
+
+def test_rag_chunks_one_page_without_mixing_pages():
+    chunks = chunk_page(
+        PageCandidate(
+            page_id="page-1",
+            title="Metrics",
+            space_key="ENG",
+            html="<h2>Classifier</h2><p>Recall: 0.91</p><h2>Detector</h2><p>Recall: 0.82</p>",
+            version=3,
+        ),
+        max_words=20,
+    )
+
+    assert [chunk.page_id for chunk in chunks] == ["page-1", "page-1"]
+    assert [chunk.heading for chunk in chunks] == ["Classifier", "Detector"]
+    assert all(chunk.title == "Metrics" for chunk in chunks)
+
+
+def test_vector_rag_finds_metric_page_and_drafts_inline_replace(monkeypatch):
+    pipeline = ProposalPipeline()
+    pipeline._client = VectorOnlyConfluenceClient()
+    pipeline._rag = FakeVectorIndex()
+
+    async def fake_extract(_transcript, _text, query=None):
+        return ExtractedMeeting(
+            title="Metrics Meeting",
+            summary="Recall changed.",
+            change_intents=[
+                ChangeIntent(
+                    instruction="Change recall to 0.98 for the classifier",
+                    subject="recall",
+                    target_hint="classifier metrics",
+                    new_value="0.98",
+                    action="replace",
+                    evidence=["recall should be 0.98"],
+                )
+            ],
+        )
+
+    monkeypatch.setattr(pipeline, "_extract_meeting", fake_extract)
+    monkeypatch.setattr(pipeline, "_generate_page_grounded_candidates", async_no_candidates)
+    monkeypatch.setattr(pipeline, "_adversarial_verify", async_passthrough_verify)
+    monkeypatch.setattr(pipeline, "_rovo_independent_critic", async_passthrough_critic)
+
+    _meeting, proposals = asyncio.run(
+        pipeline.run(
+            session_id="s1",
+            transcript=[{"participant": "Asha", "text": "Change recall to 0.98 for the classifier."}],
+        )
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0]["page_id"] == "metrics-page"
+    assert proposals[0]["edit_mode"] == "replace"
+    assert proposals[0]["before_content"] == "Recall: 0.91"
+    assert proposals[0]["after_content"] == "Recall: 0.98"
+    assert pipeline._rag.upserted == ["metrics-page"]
 
 
 def test_pipeline_returns_empty_without_transcript():
@@ -218,6 +314,115 @@ def test_section_level_drafter_refines_additive_proposal(monkeypatch):
     assert proposal.section_heading == "Timeline"
     assert proposal.edit_mode == "append"
     assert proposal.after_content == "Launch review is on Friday."
+
+
+def test_pipeline_drops_instruction_text_after_content():
+    pipeline = ProposalPipeline()
+    page = PageCandidate(
+        page_id="page-1",
+        title="Audio-based Defect Detection Page",
+        html="<h2>Introduction</h2><p>This page is dedicated to audio-based defect detection.</p>",
+        text="Introduction\nThis page is dedicated to audio-based defect detection.",
+        sections=[{"heading": "Introduction", "text": "This page is dedicated to audio-based defect detection."}],
+        score=10,
+    )
+    intent = ChangeIntent(
+        instruction="Expand the introduction section",
+        subject="audio-based defect detection",
+        target_hint="Audio-based Defect Detection Page",
+        old_value="This page is dedicated to audio-based defect detection.",
+        new_value=(
+            "This page is dedicated to audio-based defect detection. "
+            "[Expand to a minimum of 2 paragraphs, including audio-based deepfake detection.]"
+        ),
+        action="replace",
+        evidence=["expand the audio defect detection intro"],
+    )
+
+    proposal = pipeline._draft_for_page("s1", intent, page, "now", None)
+
+    assert proposal is None
+    assert pipeline.last_diagnostics[-1]["reason"] == "instruction_text_after_content"
+
+
+def test_adversarial_verdict_removes_wrong_or_unsupported_proposals():
+    pipeline = ProposalPipeline()
+    proposals = [
+        {
+            "id": "p1",
+            "page_title": "Getting started in Confluence",
+            "change_type": "edit",
+            "before_content": "[ ] Select Add status",
+            "after_content": "[x] Select Add status",
+            "risk": "review",
+            "confidence": "medium",
+        },
+        {
+            "id": "p2",
+            "page_title": "Audio-based Defect Detection Page",
+            "change_type": "edit",
+            "before_content": "old",
+            "after_content": "new",
+            "risk": "safe",
+            "confidence": "high",
+        },
+    ]
+    verdict = {
+        "proposal_verdicts": [
+            {
+                "id": "p1",
+                "supported": False,
+                "page_fit": "wrong",
+                "duplicate_of": None,
+                "confidence": "low",
+                "risk": "risky",
+                "note": "Proposal targets the wrong page.",
+            },
+            {
+                "id": "p2",
+                "supported": True,
+                "page_fit": "good",
+                "duplicate_of": None,
+                "confidence": "high",
+                "risk": "safe",
+                "note": "",
+            },
+        ],
+        "missed_intents": [],
+    }
+
+    filtered = pipeline._apply_adversarial_verdict(verdict, proposals)
+
+    assert [p["id"] for p in filtered] == ["p2"]
+    assert pipeline.last_diagnostics[-1]["reason"] == "verifier_rejected_proposal"
+
+
+def test_coverage_audit_records_diagnostics_without_polluting_cards():
+    pipeline = ProposalPipeline()
+    meeting = ExtractedMeeting(
+        change_intents=[
+            ChangeIntent(
+                instruction="Create audio-based defect detection page",
+                subject="audio-based defect detection",
+                new_value="Audio defects should include deepfake detection.",
+            )
+        ]
+    )
+    proposals = [
+        {
+            "id": "p1",
+            "page_title": "Some Page",
+            "after_content": "Unrelated content",
+            "verifier_note": "Clean note.",
+            "risk": "safe",
+        }
+    ]
+
+    updated = asyncio.run(pipeline._coverage_audit(meeting, proposals, "transcript"))
+
+    assert updated[0]["verifier_note"] == "Clean note."
+    assert updated[0]["risk"] == "safe"
+    assert pipeline.last_diagnostics[-1]["reason"] == "coverage_audit_unanchored_intent"
 
 
 def test_execute_append_inserts_into_selected_section():
