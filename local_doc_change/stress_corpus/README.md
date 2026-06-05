@@ -15,7 +15,10 @@ pipeline at scale (RAG retrieval, per-format chunking/write-back, precision).
   corpus-wide rename test (a shared brand planted across 14 docs).
 - **`generate_corpus.py`** — deterministic (seeded) generator. Re-run to
   regenerate identical docs.
-- **`scale_test.py`** — the test battery.
+- **`scale_test.py`** — the needle battery (one change per transcript).
+- **`multi_file_test.py`** — huge-transcript battery: ONE long meeting transcript
+  containing many changes across many files at once, to stress extraction recall,
+  cross-file routing, and precision under load.
 
 ## Anchors (ground-truth test cases)
 
