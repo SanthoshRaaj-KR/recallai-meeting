@@ -10,6 +10,15 @@ Orchestrates all 8 stages:
   7. verification       — verify edit quality via VerifierAgent
   8. ready_for_review   — assemble and return LocalDocProposal list
 
+Each extracted intent is routed by kind (see agents_local.structural):
+  - "edit"    → retrieve → evaluate → draft → verify (localized change). An edit
+                intent may now produce MULTIPLE proposals when several sections
+                qualify (e.g. one change that affects two documents).
+  - "rename"  → literal corpus-wide value replacement: one proposal per section
+                that mentions the old value.
+  - "removal" → whole-section deletion: resolve which ordered sections the
+                instruction targets, one delete proposal per section.
+
 Progress is reported via an asyncio.Queue (one stage name per message).
 None sentinel closes the stream when the pipeline finishes or errors.
 """
@@ -20,6 +29,7 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 import uuid
 from typing import Optional
 
@@ -58,6 +68,14 @@ class PipelineConfig(BaseModel):
     contextual_retrieval: bool = True
     top_k: int = 3
     relevance_threshold: float = 0.7
+    # How many candidate sections to pull per edit intent before evaluation.
+    # Wider than top_k so cross-section / cross-document changes can surface.
+    retrieval_top_k: int = 8
+    # Cap on how many sections a single edit intent may change (scalability).
+    max_targets_per_intent: int = 4
+    # Drafts below this intent-fulfilment score are dropped as failed (no-op /
+    # unfulfilled) rather than shown as a misleading accept-able card.
+    min_fulfillment: float = 0.4
     skip_contextual: bool = False   # test flag: skip GPT-4o-mini context enrichment
     openai_api_key: Optional[str] = None  # falls back to OPENAI_API_KEY env var
 
@@ -82,6 +100,51 @@ def _get_openai_client(config: PipelineConfig) -> openai.AsyncOpenAI:
     )
 
 
+def _ordered_sections(chunks: list[ChunkRecord], source_path: str) -> list[ChunkRecord]:
+    """All chunks for one document, in document order, one per heading."""
+    by_heading: dict[str, ChunkRecord] = {}
+    for c in chunks:
+        if c.source_path != source_path:
+            continue
+        # Keep the first chunk per heading (oversized sections split into .0/.1).
+        if c.section_heading not in by_heading:
+            by_heading[c.section_heading] = c
+    return sorted(by_heading.values(), key=lambda c: c.section_index)
+
+
+def _make_proposal(
+    config: PipelineConfig,
+    intent,
+    chunk: ChunkRecord,
+    before_content: str,
+    after_content: str,
+    edit_type: str,
+    *,
+    factual: float,
+    formatting: float,
+    fulfillment: float,
+    quality: float,
+    note: str,
+) -> LocalDocProposal:
+    return LocalDocProposal(
+        proposal_id=str(uuid.uuid4()),
+        session_id=config.session_id,
+        intent=intent,
+        source_chunk=chunk,
+        before_content=before_content,
+        after_content=after_content,
+        edit_type=edit_type,
+        confidence=quality,
+        factual_consistency=factual,
+        formatting_integrity=formatting,
+        intent_fulfillment=fulfillment,
+        quality_score=quality,
+        verifier_note=note,
+        status="pending",
+        created_at=_utcnow(),
+    )
+
+
 # ── Pipeline orchestrator ─────────────────────────────────────────────────────
 
 
@@ -92,20 +155,8 @@ async def run_pipeline(
 ) -> list[LocalDocProposal]:
     """Run the full 8-stage local document change pipeline.
 
-    Parameters
-    ----------
-    transcript:
-        Meeting transcript text to extract intents from.
-    config:
-        Pipeline configuration (doc_folder, model flags, etc.).
-    progress_queue:
-        Optional asyncio.Queue; each stage name is put() before that stage runs.
-        A None sentinel is put() when the pipeline finishes (or errors).
-
-    Returns
-    -------
-    list[LocalDocProposal]
-        Proposals ready for human review. Empty list if no qualifying edits found.
+    Returns proposals ready for human review. Empty list if no qualifying edits
+    are found.
     """
     q = progress_queue
 
@@ -119,6 +170,7 @@ async def run_pipeline(
     # ── Stage 2: intent_extraction ────────────────────────────────────────────
     await _emit(q, "intent_extraction")
     from agents_local.intent_extraction import IntentExtractionAgent  # noqa: PLC0415
+    from agents_local.structural import classify_kind  # noqa: PLC0415
 
     intent_agent = IntentExtractionAgent()
     intents = await intent_agent.extract(transcript)
@@ -126,6 +178,15 @@ async def run_pipeline(
         logger.info("run_pipeline: no intents extracted from transcript")
         await _emit(q, "ready_for_review")
         return []
+
+    # Route each intent by kind.
+    edit_intents = [i for i in intents if classify_kind(i) == "edit"]
+    rename_intents = [i for i in intents if classify_kind(i) == "rename"]
+    removal_intents = [i for i in intents if classify_kind(i) == "removal"]
+    logger.info(
+        "run_pipeline: %d intents (edit=%d rename=%d removal=%d)",
+        len(intents), len(edit_intents), len(rename_intents), len(removal_intents),
+    )
 
     # ── Stage 3: rag_indexing ─────────────────────────────────────────────────
     await _emit(q, "rag_indexing")
@@ -138,6 +199,7 @@ async def run_pipeline(
         contextual_retrieval=config.contextual_retrieval and not config.skip_contextual,
         openai_client=openai_client,
     )
+    all_chunks: list[ChunkRecord] = index.chunks
 
     # ── Stage 4: rag_retrieval ────────────────────────────────────────────────
     await _emit(q, "rag_retrieval")
@@ -145,13 +207,73 @@ async def run_pipeline(
 
     retriever = HybridRetriever(index, rerank=config.rerank)
 
-    # Collect (intent, candidates) pairs
+    # Edit intents: collect candidate sections (wide net for recall).
     intent_candidates: list[tuple] = []
-    for intent in intents:
-        query_text = f"{intent.affected_topic} {intent.new_value or ''}".strip()
-        results = retriever.query(query_text, top_k=config.top_k)
-        chunks = [r.chunk for r in results]
-        intent_candidates.append((intent, chunks))
+    for intent in edit_intents:
+        query_text = " ".join(
+            p for p in (intent.affected_topic, intent.old_value, intent.new_value) if p
+        ).strip()
+        results = retriever.query(query_text, top_k=config.retrieval_top_k)
+        intent_candidates.append((intent, [r.chunk for r in results]))
+
+    # Removal intents: pick the target document, resolve which sections to drop.
+    removal_targets: list[tuple] = []  # (intent, chunk) per section to delete
+    if removal_intents:
+        from agents_local.structural import RemovalResolverAgent  # noqa: PLC0415
+
+        resolver = RemovalResolverAgent()
+
+        # Positional removals ("the last 4 points", "sections 5-8") need the
+        # ordered section list and an LLM to resolve the position. Named/topical
+        # removals ("no benefits", "drop the travel section") map directly to the
+        # strongest-retrieved section, which is far more reliable than asking an
+        # LLM to connect loose wording to a specific heading.
+        _POSITIONAL_RE = re.compile(
+            r"\b(last|first|final|bottom|top|next|preceding|following)\b"
+            r"|\d+\s*(to|through|thru|[-–])\s*\d+|sections?\s+\d",
+            re.IGNORECASE,
+        )
+
+        async def _plan_removal(intent) -> list[tuple]:
+            snippet = " ".join(intent.verbatim_snippets or []) or intent.new_value or ""
+            instruction = (
+                f'Instruction: "{snippet}". '
+                f"Topic: {intent.affected_topic}. "
+                f"Intended change: {intent.new_value}."
+            )
+            results = retriever.query(
+                f"{intent.affected_topic} {intent.new_value}".strip(),
+                top_k=config.retrieval_top_k,
+            )
+            if not results:
+                return []
+            target_path = results[0].chunk.source_path
+            sections = _ordered_sections(all_chunks, target_path)
+            headings = [c.section_heading for c in sections]
+            by_heading = {c.section_heading: c for c in sections}
+
+            text = f"{instruction} {snippet}"
+            is_positional = bool(_POSITIONAL_RE.search(text))
+
+            to_delete = await resolver.resolve(instruction, headings)
+            if to_delete:
+                return [(intent, by_heading[h]) for h in to_delete if h in by_heading]
+
+            # Named removal with no resolver hit: delete the strongest matching
+            # content section in the target document (skip a leading title/intro).
+            if not is_positional:
+                for r in results:
+                    if r.chunk.source_path != target_path:
+                        continue
+                    if r.chunk.section_index == 0 and len(sections) > 1:
+                        continue  # avoid deleting the document title/intro
+                    return [(intent, r.chunk)]
+            return []
+
+        removal_plans = await asyncio.gather(
+            *[_plan_removal(i) for i in removal_intents]
+        )
+        removal_targets = [pair for plan in removal_plans for pair in plan]
 
     # ── Stage 5: evaluation ───────────────────────────────────────────────────
     await _emit(q, "evaluation")
@@ -160,32 +282,29 @@ async def run_pipeline(
     eval_agent = EvaluationAgent()
 
     async def _score_candidates(intent, chunks: list[ChunkRecord]) -> list[tuple]:
-        """Score all chunks for an intent concurrently; return qualifying pairs."""
+        """Keep EVERY section that scores above threshold (deduped, capped)."""
         if not chunks:
             return []
-        scores = await asyncio.gather(*[eval_agent.score(intent, chunk) for chunk in chunks])
-        qualified = [
-            (intent, chunk)
-            for chunk, score in zip(chunks, scores)
-            if score >= config.relevance_threshold
-        ]
-        if qualified:
-            # Take the best-scoring chunk only (highest score)
-            best_idx = max(range(len(chunks)), key=lambda i: scores[i])
-            if scores[best_idx] >= config.relevance_threshold:
-                return [(intent, chunks[best_idx])]
-        return []
+        scores = await asyncio.gather(*[eval_agent.score(intent, c) for c in chunks])
+        ranked = sorted(zip(chunks, scores), key=lambda cs: cs[1], reverse=True)
+        kept: list[tuple] = []
+        seen: set[tuple[str, str]] = set()
+        for chunk, score in ranked:
+            if score < config.relevance_threshold:
+                continue
+            key = (chunk.source_path, chunk.section_heading)
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append((intent, chunk))
+            if len(kept) >= config.max_targets_per_intent:
+                break
+        return kept
 
-    # Run evaluation concurrently for all intents
     eval_results = await asyncio.gather(
         *[_score_candidates(intent, chunks) for intent, chunks in intent_candidates]
     )
-    qualified: list[tuple] = [pair for result_list in eval_results for pair in result_list]
-
-    if not qualified:
-        logger.info("run_pipeline: no sections qualified above threshold %.2f", config.relevance_threshold)
-        await _emit(q, "ready_for_review")
-        return []
+    qualified: list[tuple] = [pair for rl in eval_results for pair in rl]
 
     # ── Stage 6: drafting ─────────────────────────────────────────────────────
     await _emit(q, "drafting")
@@ -194,7 +313,7 @@ async def run_pipeline(
     editor = LocalDocEditorAgent()
     drafts = await asyncio.gather(
         *[editor.draft(intent, chunk.content) for intent, chunk in qualified]
-    )
+    ) if qualified else []
 
     # ── Stage 7: verification ─────────────────────────────────────────────────
     await _emit(q, "verification")
@@ -210,29 +329,93 @@ async def run_pipeline(
             )
             for (intent, chunk), draft in zip(qualified, drafts)
         ]
-    )
+    ) if qualified else []
 
     # ── Stage 8: ready_for_review ─────────────────────────────────────────────
     await _emit(q, "ready_for_review")
     proposals: list[LocalDocProposal] = []
+
+    # Edit proposals — suppress no-ops and clearly-unfulfilled drafts.
     for (intent, chunk), draft, verification in zip(qualified, drafts, verifications):
-        proposal = LocalDocProposal(
-            proposal_id=str(uuid.uuid4()),
-            session_id=config.session_id,
-            intent=intent,
-            source_chunk=chunk,
-            before_content=draft.before_content,
-            after_content=draft.after_content,
-            confidence=verification.quality_score,
-            factual_consistency=verification.factual_consistency,
-            formatting_integrity=verification.formatting_integrity,
-            intent_fulfillment=verification.intent_fulfillment,
-            quality_score=verification.quality_score,
-            verifier_note=verification.verifier_note,
-            status="pending",
-            created_at=_utcnow(),
+        before = draft.before_content
+        after = draft.after_content
+        if after.strip() == before.strip():
+            logger.info("run_pipeline: dropping no-op edit on %r", chunk.section_heading)
+            continue
+        if verification.intent_fulfillment < config.min_fulfillment:
+            logger.info(
+                "run_pipeline: dropping unfulfilled edit on %r (fulfillment=%.2f)",
+                chunk.section_heading, verification.intent_fulfillment,
+            )
+            continue
+        proposals.append(
+            _make_proposal(
+                config, intent, chunk, before, after,
+                edit_type=draft.edit_type if draft.edit_type in
+                ("replace", "append", "delete_section") else "replace",
+                factual=verification.factual_consistency,
+                formatting=verification.formatting_integrity,
+                fulfillment=verification.intent_fulfillment,
+                quality=verification.quality_score,
+                note=verification.verifier_note,
+            )
         )
-        proposals.append(proposal)
+
+    # Rename proposals — deterministic literal replacement across the corpus.
+    if rename_intents:
+        from agents_local.structural import (  # noqa: PLC0415
+            find_rename_targets,
+            infer_replacement_target,
+        )
+
+        inferred: Optional[str] = None
+        for intent in rename_intents:
+            new_value = (intent.new_value or "").strip()
+            if not new_value:
+                continue
+            old_value = (intent.old_value or "").strip()
+            # If the transcript gave no old value (or one that isn't in the
+            # docs), infer the dominant cross-document brand name.
+            if not old_value or not find_rename_targets(old_value, all_chunks):
+                if inferred is None:
+                    inferred = infer_replacement_target(all_chunks) or ""
+                old_value = inferred
+            if not old_value:
+                continue
+            pattern = re.compile(re.escape(old_value), re.IGNORECASE)
+            for chunk, original in find_rename_targets(
+                old_value, all_chunks, max_targets=config.max_targets_per_intent * 3
+            ):
+                new_body = pattern.sub(new_value, original)
+                if new_body == original:
+                    continue
+                proposals.append(
+                    _make_proposal(
+                        config, intent, chunk, original, new_body,
+                        edit_type="replace",
+                        factual=1.0, formatting=1.0, fulfillment=1.0, quality=0.9,
+                        note=(
+                            f"Replaces '{old_value}' with '{new_value}' in this "
+                            f"section (deterministic rename)."
+                        ),
+                    )
+                )
+
+    # Removal proposals — whole-section deletions.
+    seen_removals: set[tuple[str, str]] = set()
+    for intent, chunk in removal_targets:
+        key = (chunk.source_path, chunk.section_heading)
+        if key in seen_removals:
+            continue
+        seen_removals.add(key)
+        proposals.append(
+            _make_proposal(
+                config, intent, chunk, chunk.content, "",
+                edit_type="delete_section",
+                factual=1.0, formatting=1.0, fulfillment=1.0, quality=0.9,
+                note="Proposes removing this entire section.",
+            )
+        )
 
     logger.info(
         "run_pipeline: completed — session=%s proposals=%d",

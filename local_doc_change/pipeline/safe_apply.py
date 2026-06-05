@@ -433,6 +433,94 @@ class SafeApply:
         self._append_audit(session_id, audit_entry)
         return backup_path
 
+    def delete_section(
+        self,
+        file_path: str,
+        section_heading: str,
+        session_id: str = "default",
+        proposal_id: str = "",
+    ) -> str:
+        """Remove an entire section (heading line + body) from a document.
+
+        Supported: .docx, .md, .txt. A backup is always created first.
+        The removal is recorded in the audit log with after_content == "".
+        """
+        suffix = Path(file_path).suffix.lower()
+        if suffix == ".pdf":
+            raise ValueError("PDF is read-only; no write-back supported")
+
+        if suffix == ".docx":
+            before_content = self._delete_docx(file_path, section_heading)
+        elif suffix == ".md":
+            before_content = self._delete_markdown(file_path, section_heading)
+        elif suffix == ".txt":
+            before_content = self._delete_txt(file_path, section_heading)
+        else:
+            raise ValueError(f"Unsupported format for delete: {suffix}")
+        return before_content  # the format-specific helpers handle backup + audit
+
+    # ── delete_section format helpers ───────────────────────────────────────
+
+    def _delete_markdown(self, file_path: str, section_heading: str) -> str:
+        content = Path(file_path).read_text(encoding="utf-8")
+        pattern = (
+            r"(?m)^#{1,6} " + re.escape(section_heading) + r"\n(.*?)(?=^#{1,6} |\Z)"
+        )
+        match = re.search(pattern, content, flags=re.MULTILINE | re.DOTALL)
+        before_content = match.group(0) if match else ""
+        self._backup(file_path)
+        new_text = re.sub(pattern, "", content, flags=re.MULTILINE | re.DOTALL)
+        # Collapse any blank-line gap the removal left behind.
+        new_text = re.sub(r"\n{3,}", "\n\n", new_text)
+        Path(file_path).write_text(new_text, encoding="utf-8")
+        return before_content
+
+    def _delete_txt(self, file_path: str, section_heading: str) -> str:
+        content = Path(file_path).read_text(encoding="utf-8")
+        pattern = (
+            r"(" + re.escape(section_heading) + r"[\r\n]+)(.*?)"
+            r"(?=(?:SECTION \d+\.|Page \d+, Window)|\Z)"
+        )
+        match = re.search(pattern, content, flags=re.DOTALL)
+        before_content = match.group(0) if match else ""
+        self._backup(file_path)
+        new_text = re.sub(pattern, "", content, flags=re.DOTALL)
+        new_text = re.sub(r"\n{3,}", "\n\n", new_text)
+        Path(file_path).write_text(new_text, encoding="utf-8")
+        return before_content
+
+    def _delete_docx(self, file_path: str, section_heading: str) -> str:
+        import docx as python_docx
+
+        doc = python_docx.Document(file_path)
+        paragraphs = doc.paragraphs
+        heading_idx: Optional[int] = None
+        for i, para in enumerate(paragraphs):
+            if para.text.strip() == section_heading:
+                heading_idx = i
+                break
+        if heading_idx is None:
+            self._backup(file_path)
+            return ""
+
+        # Capture the heading + body that will be removed (for the audit trail).
+        removed_parts = [paragraphs[heading_idx].text]
+        to_remove = [paragraphs[heading_idx]]
+        for i in range(heading_idx + 1, len(paragraphs)):
+            para = paragraphs[i]
+            if para.style.name.startswith("Heading"):
+                break
+            removed_parts.append(para.text)
+            to_remove.append(para)
+        before_content = "\n".join(removed_parts)
+
+        self._backup(file_path)
+        for para in to_remove:
+            p_elem = para._element
+            p_elem.getparent().remove(p_elem)
+        doc.save(file_path)
+        return before_content
+
     def apply(
         self,
         file_path: str,
@@ -440,14 +528,36 @@ class SafeApply:
         new_content: str,
         session_id: str = "default",
         proposal_id: str = "",
+        edit_type: str = "replace",
     ) -> str:
         """Route to the correct format-specific apply method.
 
         Supported: .docx, .md, .txt, .odt
         Read-only: .pdf (raises ValueError)
         Unknown: raises ValueError
+
+        edit_type == "delete_section" removes the whole section instead of
+        replacing its body (for .docx, .md, .txt).
         """
         suffix = Path(file_path).suffix.lower()
+
+        if edit_type == "delete_section":
+            before_content = self.delete_section(
+                file_path, section_heading, session_id, proposal_id
+            )
+            audit_entry = self._build_audit_entry(
+                proposal_id=proposal_id,
+                session_id=session_id,
+                file_path=file_path,
+                section_heading=section_heading,
+                before_content=before_content,
+                after_content="",
+                backup_path="",
+            )
+            audit_entry["edit_type"] = "delete_section"
+            self._append_audit(session_id, audit_entry)
+            return ""
+
         if suffix == ".docx":
             return self.apply_docx(file_path, section_heading, new_content, session_id, proposal_id)
         elif suffix == ".md":

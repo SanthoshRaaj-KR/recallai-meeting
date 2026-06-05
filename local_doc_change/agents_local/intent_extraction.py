@@ -31,12 +31,20 @@ Intent types:
 - onboarding_update: a change to onboarding or training material
 - other: any other document-worthy change
 
+Completeness is critical — capture EVERY distinct change, not just the obvious ones:
+- Extract one separate intent per distinct change. Never merge two unrelated changes into one intent.
+- Removals / deletions count ("remove the last 4 security points", "no benefits anymore", "drop the carryover clause"). For a removal, set new_value to a short phrase describing what is removed (e.g. "remove the last 4 security sections") and put the removed scope in affected_topic.
+- Renames / rebrands count ("we are renaming the company to X", "the team is now called Y"). For a rename, old_value is the current name if stated (else null) and new_value is the new name; affected_topic should say what is being renamed (e.g. "company name").
+- Numeric and policy changes count even when phrased loosely ("only 3 days a month", "increased by 3 days", "extend retention to a year").
+- Product / strategy pivots count ("we're switching the product to X", "web app first, then mobile").
+- Ignore filler, hesitations, and side chatter that imply no document change.
+
 Rules:
 1. Only extract intents where a specific document update is clearly implied.
 2. verbatim_snippets MUST contain exact quoted text from the transcript.
 3. confidence: 0.9+ only when the transcript is unambiguous; 0.5-0.89 for probable; < 0.5 for speculative.
-4. old_value: the current state BEFORE the change (null if unknown).
-5. new_value: the intended new state AFTER the change.
+4. old_value: the current state BEFORE the change (null if unknown). Never guess a value the transcript does not give.
+5. new_value: the intended new state AFTER the change (for a relative change like "increased by 3 days", describe the delta, e.g. "current sick days + 3").
 6. If no actionable document change intents are found, return {"intents": []}.
 """
 
