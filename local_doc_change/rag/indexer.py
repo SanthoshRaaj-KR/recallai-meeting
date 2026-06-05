@@ -293,6 +293,38 @@ def _as_sync_embeddings_client(openai_client):
     return openai.OpenAI(api_key=api_key)
 
 
+def _embed_batch_with_retry(sync_client, batch, offset, max_retries=6):
+    """Embed one batch with backoff on rate limits.
+
+    On large corpora the embeddings endpoint hits the per-minute token limit
+    (HTTP 429). Zero-filling on the first failure silently destroys dense
+    retrieval for those chunks, so retry with exponential backoff first and only
+    zero-fill as a last resort.
+    """
+    import time as _time
+
+    delay = 2.0
+    for attempt in range(max_retries):
+        try:
+            resp = sync_client.embeddings.create(
+                input=batch, model="text-embedding-3-small"
+            )
+            return [item.embedding for item in resp.data]
+        except Exception as exc:
+            is_rate = "429" in str(exc) or "rate_limit" in str(exc).lower()
+            if attempt < max_retries - 1 and is_rate:
+                logger.warning(
+                    "Embedding batch %d rate-limited (attempt %d/%d); retrying in %.1fs",
+                    offset, attempt + 1, max_retries, delay,
+                )
+                _time.sleep(delay)
+                delay = min(delay * 2, 30.0)
+                continue
+            logger.warning("Embedding batch %d failed: %s; using zeros.", offset, exc)
+            return [[0.0] * _EMBED_DIM] * len(batch)
+    return [[0.0] * _EMBED_DIM] * len(batch)
+
+
 def _embed_chunks(chunks: list[ChunkRecord], openai_client) -> Optional[np.ndarray]:
     """Embed all chunks; returns a (N, 1536) float32 array or None.
 
@@ -312,14 +344,7 @@ def _embed_chunks(chunks: list[ChunkRecord], openai_client) -> Optional[np.ndarr
     all_embeddings: list[list[float]] = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        try:
-            response = sync_client.embeddings.create(
-                input=batch, model="text-embedding-3-small"
-            )
-            all_embeddings.extend(item.embedding for item in response.data)
-        except Exception as exc:
-            logger.warning("Embedding batch %d failed: %s; using zeros.", i, exc)
-            all_embeddings.extend([[0.0] * _EMBED_DIM] * len(batch))
+        all_embeddings.extend(_embed_batch_with_retry(sync_client, batch, i))
 
     vecs = np.array(all_embeddings, dtype=np.float32)
     if vecs.ndim != 2 or vecs.shape[1] != _EMBED_DIM:

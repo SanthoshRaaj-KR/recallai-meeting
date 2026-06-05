@@ -69,8 +69,9 @@ class PipelineConfig(BaseModel):
     top_k: int = 3
     relevance_threshold: float = 0.7
     # How many candidate sections to pull per edit intent before evaluation.
-    # Wider than top_k so cross-section / cross-document changes can surface.
-    retrieval_top_k: int = 8
+    # Wider than top_k so the right section survives to the eval stage even on a
+    # large corpus where many sections are lexically similar.
+    retrieval_top_k: int = 12
     # Cap on how many sections a single edit intent may change. Default 1: an
     # edit ("change X from A to B") almost always targets one specific section,
     # and selecting only the single best-matching section avoids drafting onto a
@@ -216,8 +217,14 @@ async def run_pipeline(
     # Edit intents: collect candidate sections (wide net for recall).
     intent_candidates: list[tuple] = []
     for intent in edit_intents:
+        # Include the verbatim quote so BM25 gets the exact terms the speaker
+        # used — critical for needle-in-haystack retrieval on large corpora where
+        # paraphrased topics alone are not distinctive enough.
         query_text = " ".join(
-            p for p in (intent.affected_topic, intent.old_value, intent.new_value) if p
+            p for p in (
+                intent.affected_topic, intent.old_value, intent.new_value,
+                " ".join(intent.verbatim_snippets or []),
+            ) if p
         ).strip()
         results = retriever.query(query_text, top_k=config.retrieval_top_k)
         intent_candidates.append((intent, [r.chunk for r in results]))
@@ -402,10 +409,8 @@ async def run_pipeline(
                 continue
             pattern = re.compile(re.escape(old_value), re.IGNORECASE)
             # A rename must reach every section that mentions the old value across
-            # the whole corpus — independent of the per-edit-intent cap.
-            for chunk, original in find_rename_targets(
-                old_value, all_chunks, max_targets=30
-            ):
+            # the whole corpus — round-robin per document for full coverage.
+            for chunk, original in find_rename_targets(old_value, all_chunks):
                 seen_key = (chunk.source_path, chunk.section_heading)
                 if seen_key in rename_seen:
                     continue

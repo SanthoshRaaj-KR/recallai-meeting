@@ -16,6 +16,11 @@ audit/
 index/
 *.backup.*
 
+# Stress-corpus test run artifacts (the docs/ + manifest ARE committed)
+stress_corpus/scale_progress.txt
+stress_corpus/scale_run.log
+stress_corpus/*.out
+
 # Claude Code
 .claude/settings.local.json
 .claude/worktrees/

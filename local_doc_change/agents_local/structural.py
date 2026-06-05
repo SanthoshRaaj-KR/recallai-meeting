@@ -189,16 +189,21 @@ def looks_like_name(value: str) -> bool:
 def find_rename_targets(
     old_value: str,
     chunks: list[ChunkRecord],
-    max_targets: int = 12,
+    max_targets: int = 200,
+    per_doc: int = 8,
 ) -> list[tuple[ChunkRecord, str]]:
-    """Find every section whose body contains *old_value* (case-insensitive).
+    """Find sections whose body contains *old_value* (case-insensitive).
 
-    Returns a list of (chunk, new_body) pairs where new_body is the section
-    content with all occurrences of old_value replaced — preserving the original
-    casing pattern is not attempted; the caller's new_value is inserted verbatim.
+    A rename must reach EVERY document that mentions the old value. A flat cap
+    iterated in chunk order exhausts the budget on the first few documents, so
+    matches are grouped per document and taken round-robin (one section per doc
+    per round, up to *per_doc* rounds). This guarantees coverage across the whole
+    corpus before adding extra sections within any single document.
+
+    Returns (chunk, original_content) pairs; the caller substitutes the new value.
     """
     pattern = re.compile(re.escape(old_value), re.IGNORECASE)
-    targets: list[tuple[ChunkRecord, str]] = []
+    by_doc: dict[str, list[ChunkRecord]] = {}
     seen: set[tuple[str, str]] = set()
     for c in chunks:
         if not pattern.search(c.content):
@@ -207,9 +212,15 @@ def find_rename_targets(
         if key in seen:
             continue
         seen.add(key)
-        targets.append((c, c.content))  # new_body filled in by caller
-        if len(targets) >= max_targets:
-            break
+        by_doc.setdefault(c.source_path, []).append(c)
+
+    targets: list[tuple[ChunkRecord, str]] = []
+    for r in range(per_doc):
+        for secs in by_doc.values():
+            if r < len(secs):
+                targets.append((secs[r], secs[r].content))
+                if len(targets) >= max_targets:
+                    return targets
     return targets
 
 

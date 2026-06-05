@@ -1,0 +1,1249 @@
+{
+  "documents": [
+    {
+      "doc_index": 0,
+      "file": "docs\\security_aldermont_000.md",
+      "fmt": "md",
+      "org": "Aldermont",
+      "kind": "Information Security Policy",
+      "target_pages": 32,
+      "sections": 31,
+      "has_brand": false
+    },
+    {
+      "doc_index": 1,
+      "file": "docs\\hr_brightforge_001.txt",
+      "fmt": "txt",
+      "org": "Brightforge",
+      "kind": "People Operations Handbook",
+      "target_pages": 50,
+      "sections": 66,
+      "has_brand": false
+    },
+    {
+      "doc_index": 2,
+      "file": "docs\\eng_cindergate_002.docx",
+      "fmt": "docx",
+      "org": "Cindergate",
+      "kind": "Engineering Handbook",
+      "target_pages": 28,
+      "sections": 37,
+      "has_brand": true
+    },
+    {
+      "doc_index": 3,
+      "file": "docs\\support_drayveil_003.odt",
+      "fmt": "odt",
+      "org": "Drayveil",
+      "kind": "Customer Support SOP",
+      "target_pages": 39,
+      "sections": 45,
+      "has_brand": false
+    },
+    {
+      "doc_index": 4,
+      "file": "docs\\product_everwynd_004.md",
+      "fmt": "md",
+      "org": "Everwynd",
+      "kind": "Product Operations Guide",
+      "target_pages": 22,
+      "sections": 26,
+      "has_brand": false
+    },
+    {
+      "doc_index": 5,
+      "file": "docs\\finance_fenmark_005.txt",
+      "fmt": "txt",
+      "org": "Fenmark",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 31,
+      "sections": 36,
+      "has_brand": false
+    },
+    {
+      "doc_index": 6,
+      "file": "docs\\it_glasshollow_006.docx",
+      "fmt": "docx",
+      "org": "Glasshollow",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 56,
+      "sections": 56,
+      "has_brand": false
+    },
+    {
+      "doc_index": 7,
+      "file": "docs\\data_harrowfield_007.odt",
+      "fmt": "odt",
+      "org": "Harrowfield",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 57,
+      "sections": 62,
+      "has_brand": false
+    },
+    {
+      "doc_index": 8,
+      "file": "docs\\security_ironbloom_008.md",
+      "fmt": "md",
+      "org": "Ironbloom",
+      "kind": "Information Security Policy",
+      "target_pages": 27,
+      "sections": 31,
+      "has_brand": false
+    },
+    {
+      "doc_index": 9,
+      "file": "docs\\hr_junivault_009.txt",
+      "fmt": "txt",
+      "org": "Junivault",
+      "kind": "People Operations Handbook",
+      "target_pages": 27,
+      "sections": 35,
+      "has_brand": true
+    },
+    {
+      "doc_index": 10,
+      "file": "docs\\eng_kesterline_010.docx",
+      "fmt": "docx",
+      "org": "Kesterline",
+      "kind": "Engineering Handbook",
+      "target_pages": 63,
+      "sections": 65,
+      "has_brand": false
+    },
+    {
+      "doc_index": 11,
+      "file": "docs\\support_larkspire_011.odt",
+      "fmt": "odt",
+      "org": "Larkspire",
+      "kind": "Customer Support SOP",
+      "target_pages": 74,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 12,
+      "file": "docs\\product_morrowgate_012.md",
+      "fmt": "md",
+      "org": "Morrowgate",
+      "kind": "Product Operations Guide",
+      "target_pages": 20,
+      "sections": 20,
+      "has_brand": false
+    },
+    {
+      "doc_index": 13,
+      "file": "docs\\finance_netherby_013.txt",
+      "fmt": "txt",
+      "org": "Netherby",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 32,
+      "sections": 41,
+      "has_brand": false
+    },
+    {
+      "doc_index": 14,
+      "file": "docs\\it_oakmeridian_014.docx",
+      "fmt": "docx",
+      "org": "Oakmeridian",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 48,
+      "sections": 62,
+      "has_brand": false
+    },
+    {
+      "doc_index": 15,
+      "file": "docs\\data_pallasvane_015.odt",
+      "fmt": "odt",
+      "org": "Pallasvane",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 36,
+      "sections": 48,
+      "has_brand": false
+    },
+    {
+      "doc_index": 16,
+      "file": "docs\\security_quillhaven_016.md",
+      "fmt": "md",
+      "org": "Quillhaven",
+      "kind": "Information Security Policy",
+      "target_pages": 19,
+      "sections": 21,
+      "has_brand": true
+    },
+    {
+      "doc_index": 17,
+      "file": "docs\\hr_rampart_017.txt",
+      "fmt": "txt",
+      "org": "Rampart Lyle",
+      "kind": "People Operations Handbook",
+      "target_pages": 68,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 18,
+      "file": "docs\\eng_stormfell_018.docx",
+      "fmt": "docx",
+      "org": "Stormfell",
+      "kind": "Engineering Handbook",
+      "target_pages": 39,
+      "sections": 38,
+      "has_brand": false
+    },
+    {
+      "doc_index": 19,
+      "file": "docs\\support_tindermere_019.odt",
+      "fmt": "odt",
+      "org": "Tindermere",
+      "kind": "Customer Support SOP",
+      "target_pages": 58,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 20,
+      "file": "docs\\product_umberlane_020.md",
+      "fmt": "md",
+      "org": "Umberlane",
+      "kind": "Product Operations Guide",
+      "target_pages": 47,
+      "sections": 45,
+      "has_brand": false
+    },
+    {
+      "doc_index": 21,
+      "file": "docs\\finance_vauxhollow_021.txt",
+      "fmt": "txt",
+      "org": "Vauxhollow",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 73,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 22,
+      "file": "docs\\it_westmarch_022.docx",
+      "fmt": "docx",
+      "org": "Westmarch",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 23,
+      "sections": 31,
+      "has_brand": false
+    },
+    {
+      "doc_index": 23,
+      "file": "docs\\data_xanthe_023.odt",
+      "fmt": "odt",
+      "org": "Xanthe Reef",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 64,
+      "sections": 72,
+      "has_brand": true
+    },
+    {
+      "doc_index": 24,
+      "file": "docs\\security_yarrowdale_024.md",
+      "fmt": "md",
+      "org": "Yarrowdale",
+      "kind": "Information Security Policy",
+      "target_pages": 31,
+      "sections": 33,
+      "has_brand": false
+    },
+    {
+      "doc_index": 25,
+      "file": "docs\\hr_zephyrion_025.txt",
+      "fmt": "txt",
+      "org": "Zephyrion",
+      "kind": "People Operations Handbook",
+      "target_pages": 63,
+      "sections": 72,
+      "has_brand": false
+    },
+    {
+      "doc_index": 26,
+      "file": "docs\\eng_aldermont_026.docx",
+      "fmt": "docx",
+      "org": "Aldermont",
+      "kind": "Engineering Handbook",
+      "target_pages": 75,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 27,
+      "file": "docs\\support_brightforge_027.odt",
+      "fmt": "odt",
+      "org": "Brightforge",
+      "kind": "Customer Support SOP",
+      "target_pages": 37,
+      "sections": 43,
+      "has_brand": false
+    },
+    {
+      "doc_index": 28,
+      "file": "docs\\product_cindergate_028.md",
+      "fmt": "md",
+      "org": "Cindergate",
+      "kind": "Product Operations Guide",
+      "target_pages": 32,
+      "sections": 35,
+      "has_brand": false
+    },
+    {
+      "doc_index": 29,
+      "file": "docs\\finance_drayveil_029.txt",
+      "fmt": "txt",
+      "org": "Drayveil",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 49,
+      "sections": 61,
+      "has_brand": false
+    },
+    {
+      "doc_index": 30,
+      "file": "docs\\it_everwynd_030.docx",
+      "fmt": "docx",
+      "org": "Everwynd",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 58,
+      "sections": 67,
+      "has_brand": true
+    },
+    {
+      "doc_index": 31,
+      "file": "docs\\data_fenmark_031.odt",
+      "fmt": "odt",
+      "org": "Fenmark",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 30,
+      "sections": 38,
+      "has_brand": false
+    },
+    {
+      "doc_index": 32,
+      "file": "docs\\security_glasshollow_032.md",
+      "fmt": "md",
+      "org": "Glasshollow",
+      "kind": "Information Security Policy",
+      "target_pages": 35,
+      "sections": 34,
+      "has_brand": false
+    },
+    {
+      "doc_index": 33,
+      "file": "docs\\hr_harrowfield_033.txt",
+      "fmt": "txt",
+      "org": "Harrowfield",
+      "kind": "People Operations Handbook",
+      "target_pages": 74,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 34,
+      "file": "docs\\eng_ironbloom_034.docx",
+      "fmt": "docx",
+      "org": "Ironbloom",
+      "kind": "Engineering Handbook",
+      "target_pages": 43,
+      "sections": 47,
+      "has_brand": false
+    },
+    {
+      "doc_index": 35,
+      "file": "docs\\support_junivault_035.odt",
+      "fmt": "odt",
+      "org": "Junivault",
+      "kind": "Customer Support SOP",
+      "target_pages": 29,
+      "sections": 28,
+      "has_brand": false
+    },
+    {
+      "doc_index": 36,
+      "file": "docs\\product_kesterline_036.md",
+      "fmt": "md",
+      "org": "Kesterline",
+      "kind": "Product Operations Guide",
+      "target_pages": 48,
+      "sections": 47,
+      "has_brand": false
+    },
+    {
+      "doc_index": 37,
+      "file": "docs\\finance_larkspire_037.txt",
+      "fmt": "txt",
+      "org": "Larkspire",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 45,
+      "sections": 45,
+      "has_brand": true
+    },
+    {
+      "doc_index": 38,
+      "file": "docs\\it_morrowgate_038.docx",
+      "fmt": "docx",
+      "org": "Morrowgate",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 15,
+      "sections": 14,
+      "has_brand": false
+    },
+    {
+      "doc_index": 39,
+      "file": "docs\\data_netherby_039.odt",
+      "fmt": "odt",
+      "org": "Netherby",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 31,
+      "sections": 36,
+      "has_brand": false
+    },
+    {
+      "doc_index": 40,
+      "file": "docs\\security_oakmeridian_040.md",
+      "fmt": "md",
+      "org": "Oakmeridian",
+      "kind": "Information Security Policy",
+      "target_pages": 30,
+      "sections": 32,
+      "has_brand": false
+    },
+    {
+      "doc_index": 41,
+      "file": "docs\\hr_pallasvane_041.txt",
+      "fmt": "txt",
+      "org": "Pallasvane",
+      "kind": "People Operations Handbook",
+      "target_pages": 22,
+      "sections": 21,
+      "has_brand": false
+    },
+    {
+      "doc_index": 42,
+      "file": "docs\\eng_quillhaven_042.docx",
+      "fmt": "docx",
+      "org": "Quillhaven",
+      "kind": "Engineering Handbook",
+      "target_pages": 28,
+      "sections": 27,
+      "has_brand": false
+    },
+    {
+      "doc_index": 43,
+      "file": "docs\\support_rampart_043.odt",
+      "fmt": "odt",
+      "org": "Rampart Lyle",
+      "kind": "Customer Support SOP",
+      "target_pages": 59,
+      "sections": 58,
+      "has_brand": false
+    },
+    {
+      "doc_index": 44,
+      "file": "docs\\product_stormfell_044.md",
+      "fmt": "md",
+      "org": "Stormfell",
+      "kind": "Product Operations Guide",
+      "target_pages": 15,
+      "sections": 20,
+      "has_brand": true
+    },
+    {
+      "doc_index": 45,
+      "file": "docs\\finance_tindermere_045.txt",
+      "fmt": "txt",
+      "org": "Tindermere",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 69,
+      "sections": 68,
+      "has_brand": false
+    },
+    {
+      "doc_index": 46,
+      "file": "docs\\it_umberlane_046.docx",
+      "fmt": "docx",
+      "org": "Umberlane",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 30,
+      "sections": 37,
+      "has_brand": false
+    },
+    {
+      "doc_index": 47,
+      "file": "docs\\data_vauxhollow_047.odt",
+      "fmt": "odt",
+      "org": "Vauxhollow",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 77,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 48,
+      "file": "docs\\security_westmarch_048.md",
+      "fmt": "md",
+      "org": "Westmarch",
+      "kind": "Information Security Policy",
+      "target_pages": 31,
+      "sections": 30,
+      "has_brand": false
+    },
+    {
+      "doc_index": 49,
+      "file": "docs\\hr_xanthe_049.txt",
+      "fmt": "txt",
+      "org": "Xanthe Reef",
+      "kind": "People Operations Handbook",
+      "target_pages": 32,
+      "sections": 38,
+      "has_brand": false
+    },
+    {
+      "doc_index": 50,
+      "file": "docs\\eng_yarrowdale_050.docx",
+      "fmt": "docx",
+      "org": "Yarrowdale",
+      "kind": "Engineering Handbook",
+      "target_pages": 26,
+      "sections": 30,
+      "has_brand": false
+    },
+    {
+      "doc_index": 51,
+      "file": "docs\\support_zephyrion_051.odt",
+      "fmt": "odt",
+      "org": "Zephyrion",
+      "kind": "Customer Support SOP",
+      "target_pages": 30,
+      "sections": 39,
+      "has_brand": true
+    },
+    {
+      "doc_index": 52,
+      "file": "docs\\product_aldermont_052.md",
+      "fmt": "md",
+      "org": "Aldermont",
+      "kind": "Product Operations Guide",
+      "target_pages": 71,
+      "sections": 68,
+      "has_brand": false
+    },
+    {
+      "doc_index": 53,
+      "file": "docs\\finance_brightforge_053.txt",
+      "fmt": "txt",
+      "org": "Brightforge",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 57,
+      "sections": 58,
+      "has_brand": false
+    },
+    {
+      "doc_index": 54,
+      "file": "docs\\it_cindergate_054.docx",
+      "fmt": "docx",
+      "org": "Cindergate",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 59,
+      "sections": 64,
+      "has_brand": false
+    },
+    {
+      "doc_index": 55,
+      "file": "docs\\data_drayveil_055.odt",
+      "fmt": "odt",
+      "org": "Drayveil",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 35,
+      "sections": 47,
+      "has_brand": false
+    },
+    {
+      "doc_index": 56,
+      "file": "docs\\security_everwynd_056.md",
+      "fmt": "md",
+      "org": "Everwynd",
+      "kind": "Information Security Policy",
+      "target_pages": 45,
+      "sections": 51,
+      "has_brand": false
+    },
+    {
+      "doc_index": 57,
+      "file": "docs\\hr_fenmark_057.txt",
+      "fmt": "txt",
+      "org": "Fenmark",
+      "kind": "People Operations Handbook",
+      "target_pages": 20,
+      "sections": 23,
+      "has_brand": false
+    },
+    {
+      "doc_index": 58,
+      "file": "docs\\eng_glasshollow_058.docx",
+      "fmt": "docx",
+      "org": "Glasshollow",
+      "kind": "Engineering Handbook",
+      "target_pages": 80,
+      "sections": 73,
+      "has_brand": true
+    },
+    {
+      "doc_index": 59,
+      "file": "docs\\support_harrowfield_059.odt",
+      "fmt": "odt",
+      "org": "Harrowfield",
+      "kind": "Customer Support SOP",
+      "target_pages": 49,
+      "sections": 59,
+      "has_brand": false
+    },
+    {
+      "doc_index": 60,
+      "file": "docs\\product_ironbloom_060.md",
+      "fmt": "md",
+      "org": "Ironbloom",
+      "kind": "Product Operations Guide",
+      "target_pages": 41,
+      "sections": 53,
+      "has_brand": false
+    },
+    {
+      "doc_index": 61,
+      "file": "docs\\finance_junivault_061.txt",
+      "fmt": "txt",
+      "org": "Junivault",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 51,
+      "sections": 58,
+      "has_brand": false
+    },
+    {
+      "doc_index": 62,
+      "file": "docs\\it_kesterline_062.docx",
+      "fmt": "docx",
+      "org": "Kesterline",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 33,
+      "sections": 33,
+      "has_brand": false
+    },
+    {
+      "doc_index": 63,
+      "file": "docs\\data_larkspire_063.odt",
+      "fmt": "odt",
+      "org": "Larkspire",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 63,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 64,
+      "file": "docs\\security_morrowgate_064.md",
+      "fmt": "md",
+      "org": "Morrowgate",
+      "kind": "Information Security Policy",
+      "target_pages": 50,
+      "sections": 47,
+      "has_brand": false
+    },
+    {
+      "doc_index": 65,
+      "file": "docs\\hr_netherby_065.txt",
+      "fmt": "txt",
+      "org": "Netherby",
+      "kind": "People Operations Handbook",
+      "target_pages": 44,
+      "sections": 56,
+      "has_brand": true
+    },
+    {
+      "doc_index": 66,
+      "file": "docs\\eng_oakmeridian_066.docx",
+      "fmt": "docx",
+      "org": "Oakmeridian",
+      "kind": "Engineering Handbook",
+      "target_pages": 62,
+      "sections": 61,
+      "has_brand": false
+    },
+    {
+      "doc_index": 67,
+      "file": "docs\\support_pallasvane_067.odt",
+      "fmt": "odt",
+      "org": "Pallasvane",
+      "kind": "Customer Support SOP",
+      "target_pages": 66,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 68,
+      "file": "docs\\product_quillhaven_068.md",
+      "fmt": "md",
+      "org": "Quillhaven",
+      "kind": "Product Operations Guide",
+      "target_pages": 22,
+      "sections": 24,
+      "has_brand": false
+    },
+    {
+      "doc_index": 69,
+      "file": "docs\\finance_rampart_069.txt",
+      "fmt": "txt",
+      "org": "Rampart Lyle",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 79,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 70,
+      "file": "docs\\it_stormfell_070.docx",
+      "fmt": "docx",
+      "org": "Stormfell",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 66,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 71,
+      "file": "docs\\data_tindermere_071.odt",
+      "fmt": "odt",
+      "org": "Tindermere",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 31,
+      "sections": 34,
+      "has_brand": false
+    },
+    {
+      "doc_index": 72,
+      "file": "docs\\security_umberlane_072.md",
+      "fmt": "md",
+      "org": "Umberlane",
+      "kind": "Information Security Policy",
+      "target_pages": 28,
+      "sections": 35,
+      "has_brand": true
+    },
+    {
+      "doc_index": 73,
+      "file": "docs\\hr_vauxhollow_073.txt",
+      "fmt": "txt",
+      "org": "Vauxhollow",
+      "kind": "People Operations Handbook",
+      "target_pages": 79,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 74,
+      "file": "docs\\eng_westmarch_074.docx",
+      "fmt": "docx",
+      "org": "Westmarch",
+      "kind": "Engineering Handbook",
+      "target_pages": 60,
+      "sections": 70,
+      "has_brand": false
+    },
+    {
+      "doc_index": 75,
+      "file": "docs\\support_xanthe_075.odt",
+      "fmt": "odt",
+      "org": "Xanthe Reef",
+      "kind": "Customer Support SOP",
+      "target_pages": 31,
+      "sections": 33,
+      "has_brand": false
+    },
+    {
+      "doc_index": 76,
+      "file": "docs\\product_yarrowdale_076.md",
+      "fmt": "md",
+      "org": "Yarrowdale",
+      "kind": "Product Operations Guide",
+      "target_pages": 78,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 77,
+      "file": "docs\\finance_zephyrion_077.txt",
+      "fmt": "txt",
+      "org": "Zephyrion",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 22,
+      "sections": 21,
+      "has_brand": false
+    },
+    {
+      "doc_index": 78,
+      "file": "docs\\it_aldermont_078.docx",
+      "fmt": "docx",
+      "org": "Aldermont",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 15,
+      "sections": 16,
+      "has_brand": false
+    },
+    {
+      "doc_index": 79,
+      "file": "docs\\data_brightforge_079.odt",
+      "fmt": "odt",
+      "org": "Brightforge",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 24,
+      "sections": 25,
+      "has_brand": true
+    },
+    {
+      "doc_index": 80,
+      "file": "docs\\security_cindergate_080.md",
+      "fmt": "md",
+      "org": "Cindergate",
+      "kind": "Information Security Policy",
+      "target_pages": 58,
+      "sections": 71,
+      "has_brand": false
+    },
+    {
+      "doc_index": 81,
+      "file": "docs\\hr_drayveil_081.txt",
+      "fmt": "txt",
+      "org": "Drayveil",
+      "kind": "People Operations Handbook",
+      "target_pages": 32,
+      "sections": 36,
+      "has_brand": false
+    },
+    {
+      "doc_index": 82,
+      "file": "docs\\eng_everwynd_082.docx",
+      "fmt": "docx",
+      "org": "Everwynd",
+      "kind": "Engineering Handbook",
+      "target_pages": 43,
+      "sections": 44,
+      "has_brand": false
+    },
+    {
+      "doc_index": 83,
+      "file": "docs\\support_fenmark_083.odt",
+      "fmt": "odt",
+      "org": "Fenmark",
+      "kind": "Customer Support SOP",
+      "target_pages": 51,
+      "sections": 61,
+      "has_brand": false
+    },
+    {
+      "doc_index": 84,
+      "file": "docs\\product_glasshollow_084.md",
+      "fmt": "md",
+      "org": "Glasshollow",
+      "kind": "Product Operations Guide",
+      "target_pages": 17,
+      "sections": 17,
+      "has_brand": false
+    },
+    {
+      "doc_index": 85,
+      "file": "docs\\finance_harrowfield_085.txt",
+      "fmt": "txt",
+      "org": "Harrowfield",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 66,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 86,
+      "file": "docs\\it_ironbloom_086.docx",
+      "fmt": "docx",
+      "org": "Ironbloom",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 43,
+      "sections": 41,
+      "has_brand": true
+    },
+    {
+      "doc_index": 87,
+      "file": "docs\\data_junivault_087.odt",
+      "fmt": "odt",
+      "org": "Junivault",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 48,
+      "sections": 52,
+      "has_brand": false
+    },
+    {
+      "doc_index": 88,
+      "file": "docs\\security_kesterline_088.md",
+      "fmt": "md",
+      "org": "Kesterline",
+      "kind": "Information Security Policy",
+      "target_pages": 65,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 89,
+      "file": "docs\\hr_larkspire_089.txt",
+      "fmt": "txt",
+      "org": "Larkspire",
+      "kind": "People Operations Handbook",
+      "target_pages": 35,
+      "sections": 37,
+      "has_brand": false
+    },
+    {
+      "doc_index": 90,
+      "file": "docs\\eng_morrowgate_090.docx",
+      "fmt": "docx",
+      "org": "Morrowgate",
+      "kind": "Engineering Handbook",
+      "target_pages": 63,
+      "sections": 61,
+      "has_brand": false
+    },
+    {
+      "doc_index": 91,
+      "file": "docs\\support_netherby_091.odt",
+      "fmt": "odt",
+      "org": "Netherby",
+      "kind": "Customer Support SOP",
+      "target_pages": 34,
+      "sections": 33,
+      "has_brand": false
+    },
+    {
+      "doc_index": 92,
+      "file": "docs\\product_oakmeridian_092.md",
+      "fmt": "md",
+      "org": "Oakmeridian",
+      "kind": "Product Operations Guide",
+      "target_pages": 34,
+      "sections": 34,
+      "has_brand": false
+    },
+    {
+      "doc_index": 93,
+      "file": "docs\\finance_pallasvane_093.txt",
+      "fmt": "txt",
+      "org": "Pallasvane",
+      "kind": "Finance and Procurement Policy",
+      "target_pages": 34,
+      "sections": 42,
+      "has_brand": true
+    },
+    {
+      "doc_index": 94,
+      "file": "docs\\it_quillhaven_094.docx",
+      "fmt": "docx",
+      "org": "Quillhaven",
+      "kind": "IT and Infrastructure Policy",
+      "target_pages": 26,
+      "sections": 26,
+      "has_brand": false
+    },
+    {
+      "doc_index": 95,
+      "file": "docs\\data_rampart_095.odt",
+      "fmt": "odt",
+      "org": "Rampart Lyle",
+      "kind": "Data Governance and Privacy",
+      "target_pages": 76,
+      "sections": 73,
+      "has_brand": false
+    },
+    {
+      "doc_index": 96,
+      "file": "docs\\security_stormfell_096.md",
+      "fmt": "md",
+      "org": "Stormfell",
+      "kind": "Information Security Policy",
+      "target_pages": 42,
+      "sections": 49,
+      "has_brand": false
+    },
+    {
+      "doc_index": 97,
+      "file": "docs\\hr_tindermere_097.txt",
+      "fmt": "txt",
+      "org": "Tindermere",
+      "kind": "People Operations Handbook",
+      "target_pages": 66,
+      "sections": 70,
+      "has_brand": false
+    },
+    {
+      "doc_index": 98,
+      "file": "docs\\eng_umberlane_098.docx",
+      "fmt": "docx",
+      "org": "Umberlane",
+      "kind": "Engineering Handbook",
+      "target_pages": 44,
+      "sections": 50,
+      "has_brand": false
+    },
+    {
+      "doc_index": 99,
+      "file": "docs\\support_vauxhollow_099.odt",
+      "fmt": "odt",
+      "org": "Vauxhollow",
+      "kind": "Customer Support SOP",
+      "target_pages": 38,
+      "sections": 40,
+      "has_brand": false
+    }
+  ],
+  "anchors": [
+    {
+      "kind": "remove_named",
+      "file": "docs\\finance_fenmark_005.txt",
+      "fmt": "txt",
+      "doc_index": 5,
+      "section_heading": "SECTION 35. PAGER DUTY CARBON-COPY RULE",
+      "topic": "Pager Duty Carbon-Copy Rule",
+      "old_value": null,
+      "new_value": null,
+      "transcript": "In the Fenmark finance and procurement policy, remove the pager duty carbon-copy rule section."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\security_ironbloom_008.md",
+      "fmt": "md",
+      "doc_index": 8,
+      "section_heading": "Audit and Compliance",
+      "topic": "cold-storage archival window",
+      "old_value": "47 days",
+      "new_value": "30 days",
+      "transcript": "For the Ironbloom information security policy, change the cold-storage archival window from 47 days to 30 days.",
+      "transcript_blind": "We need to change the cold-storage archival window from 47 days to 30 days."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\hr_junivault_009.txt",
+      "fmt": "txt",
+      "doc_index": 9,
+      "section_heading": "SECTION 18. SICK LEAVE (PART 2)",
+      "topic": "incident bridge auto-timeout",
+      "old_value": "53 minutes",
+      "new_value": "20 minutes",
+      "transcript": "For the Junivault people operations handbook, change the incident bridge auto-timeout from 53 minutes to 20 minutes.",
+      "transcript_blind": "We need to change the incident bridge auto-timeout from 53 minutes to 20 minutes."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\eng_kesterline_010.docx",
+      "fmt": "docx",
+      "doc_index": 10,
+      "section_heading": "Source Control (Part 3)",
+      "topic": "privileged session recording limit",
+      "old_value": "236 gigabytes",
+      "new_value": "500 gigabytes",
+      "transcript": "For the Kesterline engineering handbook, change the privileged session recording limit from 236 gigabytes to 500 gigabytes.",
+      "transcript_blind": "We need to change the privileged session recording limit from 236 gigabytes to 500 gigabytes."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\support_larkspire_011.odt",
+      "fmt": "odt",
+      "doc_index": 11,
+      "section_heading": "Response SLA (Part 4)",
+      "topic": "vendor reassessment interval",
+      "old_value": "19 months",
+      "new_value": "12 months",
+      "transcript": "For the Larkspire customer support sop, change the vendor reassessment interval from 19 months to 12 months.",
+      "transcript_blind": "We need to change the vendor reassessment interval from 19 months to 12 months."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\product_morrowgate_012.md",
+      "fmt": "md",
+      "doc_index": 12,
+      "section_heading": "Accessibility",
+      "topic": "refund auto-approval ceiling",
+      "old_value": "418 dollars",
+      "new_value": "250 dollars",
+      "transcript": "For the Morrowgate product operations guide, change the refund auto-approval ceiling from 418 dollars to 250 dollars.",
+      "transcript_blind": "We need to change the refund auto-approval ceiling from 418 dollars to 250 dollars."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\finance_netherby_013.txt",
+      "fmt": "txt",
+      "doc_index": 13,
+      "section_heading": "SECTION 21. CORPORATE CARDS (PART 2)",
+      "topic": "beta cohort size cap",
+      "old_value": "1,740 participants",
+      "new_value": "5,000 participants",
+      "transcript": "For the Netherby finance and procurement policy, change the beta cohort size cap from 1,740 participants to 5,000 participants.",
+      "transcript_blind": "We need to change the beta cohort size cap from 1,740 participants to 5,000 participants."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\it_oakmeridian_014.docx",
+      "fmt": "docx",
+      "doc_index": 14,
+      "section_heading": "Asset Inventory (Part 3)",
+      "topic": "learning stipend",
+      "old_value": "2,360 dollars",
+      "new_value": "3,000 dollars",
+      "transcript": "For the Oakmeridian it and infrastructure policy, change the learning stipend from 2,360 dollars to 3,000 dollars.",
+      "transcript_blind": "We need to change the learning stipend from 2,360 dollars to 3,000 dollars."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\data_pallasvane_015.odt",
+      "fmt": "odt",
+      "doc_index": 15,
+      "section_heading": "Privacy by Design (Part 2)",
+      "topic": "purchase order fast-track threshold",
+      "old_value": "7,950 dollars",
+      "new_value": "10,000 dollars",
+      "transcript": "For the Pallasvane data governance and privacy, change the purchase order fast-track threshold from 7,950 dollars to 10,000 dollars.",
+      "transcript_blind": "We need to change the purchase order fast-track threshold from 7,950 dollars to 10,000 dollars."
+    },
+    {
+      "kind": "remove_named",
+      "file": "docs\\data_xanthe_023.odt",
+      "fmt": "odt",
+      "doc_index": 23,
+      "section_heading": "On-Site Smoking Shelter Policy",
+      "topic": "On-Site Smoking Shelter Policy",
+      "old_value": null,
+      "new_value": null,
+      "transcript": "In the Xanthe Reef data governance and privacy, get rid of the on-site smoking shelter policy section."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\product_cindergate_028.md",
+      "fmt": "md",
+      "doc_index": 28,
+      "section_heading": "Deprecation Policy (Part 2)",
+      "topic": "warm standby failover budget",
+      "old_value": "73 seconds",
+      "new_value": "30 seconds",
+      "transcript": "For the Cindergate product operations guide, change the warm standby failover budget from 73 seconds to 30 seconds.",
+      "transcript_blind": "We need to change the warm standby failover budget from 73 seconds to 30 seconds."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\finance_drayveil_029.txt",
+      "fmt": "txt",
+      "doc_index": 29,
+      "section_heading": "SECTION 31. CAPITAL EXPENDITURE (PART 3)",
+      "topic": "data subject request deadline",
+      "old_value": "27 days",
+      "new_value": "30 days",
+      "transcript": "For the Drayveil finance and procurement policy, change the data subject request deadline from 27 days to 30 days.",
+      "transcript_blind": "We need to change the data subject request deadline from 27 days to 30 days."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\it_everwynd_030.docx",
+      "fmt": "docx",
+      "doc_index": 30,
+      "section_heading": "Remote Access (Part 3)",
+      "topic": "artifact retention depth",
+      "old_value": "184 builds",
+      "new_value": "50 builds",
+      "transcript": "For the Everwynd it and infrastructure policy, change the artifact retention depth from 184 builds to 50 builds.",
+      "transcript_blind": "We need to change the artifact retention depth from 184 builds to 50 builds."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\data_fenmark_031.odt",
+      "fmt": "odt",
+      "doc_index": 31,
+      "section_heading": "Breach Notification (Part 2)",
+      "topic": "on-call acknowledgement window",
+      "old_value": "11 minutes",
+      "new_value": "5 minutes",
+      "transcript": "For the Fenmark data governance and privacy, change the on-call acknowledgement window from 11 minutes to 5 minutes.",
+      "transcript_blind": "We need to change the on-call acknowledgement window from 11 minutes to 5 minutes."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\security_oakmeridian_040.md",
+      "fmt": "md",
+      "doc_index": 40,
+      "section_heading": "Audit and Compliance",
+      "topic": "badge re-enrollment grace",
+      "old_value": "62 hours",
+      "new_value": "24 hours",
+      "transcript": "For the Oakmeridian information security policy, change the badge re-enrollment grace from 62 hours to 24 hours.",
+      "transcript_blind": "We need to change the badge re-enrollment grace from 62 hours to 24 hours."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\hr_pallasvane_041.txt",
+      "fmt": "txt",
+      "doc_index": 41,
+      "section_heading": "SECTION 11. GRIEVANCE PROCEDURE",
+      "topic": "telemetry sampling rate",
+      "old_value": "3.7 percent",
+      "new_value": "10 percent",
+      "transcript": "For the Pallasvane people operations handbook, change the telemetry sampling rate from 3.7 percent to 10 percent.",
+      "transcript_blind": "We need to change the telemetry sampling rate from 3.7 percent to 10 percent."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\eng_quillhaven_042.docx",
+      "fmt": "docx",
+      "doc_index": 42,
+      "section_heading": "Dependency Policy",
+      "topic": "snapshot replication lag ceiling",
+      "old_value": "94 seconds",
+      "new_value": "30 seconds",
+      "transcript": "For the Quillhaven engineering handbook, change the snapshot replication lag ceiling from 94 seconds to 30 seconds.",
+      "transcript_blind": "We need to change the snapshot replication lag ceiling from 94 seconds to 30 seconds."
+    },
+    {
+      "kind": "edit",
+      "file": "docs\\support_rampart_043.odt",
+      "fmt": "odt",
+      "doc_index": 43,
+      "section_heading": "Refund and Credit Policy (Part 3)",
+      "topic": "contractor access expiry",
+      "old_value": "208 days",
+      "new_value": "90 days",
+      "transcript": "For the Rampart Lyle customer support sop, change the contractor access expiry from 208 days to 90 days.",
+      "transcript_blind": "We need to change the contractor access expiry from 208 days to 90 days."
+    },
+    {
+      "kind": "remove_named",
+      "file": "docs\\product_stormfell_044.md",
+      "fmt": "md",
+      "doc_index": 44,
+      "section_heading": "Legacy Fax Intake Procedure",
+      "topic": "Legacy Fax Intake Procedure",
+      "old_value": null,
+      "new_value": null,
+      "transcript": "In the Stormfell product operations guide, drop the legacy fax intake procedure section."
+    },
+    {
+      "kind": "remove_named",
+      "file": "docs\\it_umberlane_046.docx",
+      "fmt": "docx",
+      "doc_index": 46,
+      "section_heading": "Floppy Disk Archival Standard",
+      "topic": "Floppy Disk Archival Standard",
+      "old_value": null,
+      "new_value": null,
+      "transcript": "In the Umberlane it and infrastructure policy, delete the floppy disk archival standard section."
+    }
+  ],
+  "rename_test": {
+    "kind": "rename",
+    "brand": "Vantcorex Robotics",
+    "new_value": "Helios Automata",
+    "doc_count": 14,
+    "transcript": "Company-wide announcement: we are renaming Vantcorex Robotics to Helios Automata. Update the documents to reflect the new name."
+  }
+}
