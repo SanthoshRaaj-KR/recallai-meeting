@@ -80,6 +80,19 @@ def chunk_document(file_path: str) -> list[ChunkRecord]:
             return []
         return _markdown_to_chunks(raw, file_path, ext)
 
+    # ODT: docling does NOT support OpenDocument Text (.odt is not in its allowed
+    # input formats), so a docling convert raises and the document yields zero
+    # chunks — i.e. .odt files would be silently invisible to the pipeline. Read
+    # them structurally via odfpy instead (headings + paragraphs in document
+    # order), which is already the write-back backend for .odt.
+    if ext == "odt":
+        try:
+            markdown = _read_odt_markdown(file_path)
+        except Exception as exc:
+            logger.warning("odfpy ODT read failed for %s: %s", file_path, exc)
+            return []
+        return _markdown_to_chunks(markdown, file_path, ext)
+
     # All other formats: docling single-API conversion
     try:
         result = _CONVERTER.convert(str(path))
@@ -132,6 +145,44 @@ def _split_oversized_section(text: str, max_tokens: int = 800) -> list[str]:
 def _file_hash(path: str) -> str:
     """Return first 8 hex chars of the MD5 of the file's bytes."""
     return hashlib.md5(Path(path).read_bytes()).hexdigest()[:8]
+
+
+def _read_odt_markdown(file_path: str) -> str:
+    """Convert an .odt file to Markdown by walking its body in document order.
+
+    Headings (text:h) become ``# heading`` lines and paragraphs (text:p) become
+    body lines, preserving order so :func:`_markdown_to_chunks` can split the
+    document into heading-delimited sections. Mirrors the node walk that
+    SafeApply.apply_odt uses for write-back, so read and write stay symmetric.
+    """
+    from odf import teletype
+    from odf.opendocument import load
+
+    doc = load(file_path)
+    lines: list[str] = []
+
+    def _local(child) -> str:
+        # Loaded odfpy elements are generic ``Element`` instances; the reliable
+        # type signal is the qualified name's local part (text:h -> "h").
+        qn = getattr(child, "qname", None)
+        return qn[1] if qn else child.__class__.__name__.lower()
+
+    def _walk(node) -> None:
+        for child in getattr(node, "childNodes", []):
+            local = _local(child)
+            if local == "h":
+                text = teletype.extractText(child).strip()
+                if text:
+                    lines.append(f"# {text}")
+            elif local == "p":
+                text = teletype.extractText(child).strip()
+                if text:
+                    lines.append(text)
+            elif local in ("list", "section", "table", "table-cell", "list-item"):
+                _walk(child)  # recurse into common containers
+
+    _walk(doc.text)
+    return "\n\n".join(lines)
 
 
 def _handle_rtf(file_path: str, ext: str) -> list[ChunkRecord]:

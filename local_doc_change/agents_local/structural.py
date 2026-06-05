@@ -50,6 +50,26 @@ _NAME_VERB_RE = re.compile(
 )
 
 
+_CROSS_CUTTING_RE = re.compile(
+    r"\b(everywhere|every document|every doc|every file|every policy|"
+    r"all documents|all docs|all files|all policies|all of (our|the) (docs|documents|policies)|"
+    r"across all|across the board|company[- ]wide|org[- ]wide|globally|throughout|"
+    r"wherever (it|they) (appear|appears|is|are) (mentioned|referenced)?|"
+    r"in every (document|doc|file|policy))\b",
+    re.IGNORECASE,
+)
+
+
+def is_cross_cutting(intent: LocalDocIntent) -> bool:
+    """True if a change is meant to propagate across MANY documents at once.
+
+    A normal edit targets a single section; a cross-cutting edit ("change X to Y
+    in every document", "update this across all policies") must reach every
+    section that documents the same thing.
+    """
+    return bool(_CROSS_CUTTING_RE.search(_intent_text(intent)))
+
+
 def _intent_text(intent: LocalDocIntent) -> str:
     """Flatten the human-meaningful fields of an intent into one string."""
     parts = [
@@ -84,6 +104,16 @@ def classify_kind(intent: LocalDocIntent) -> str:
     if _REMOVAL_RE.search(text):
         return "removal"
     if re.match(r"^\s*no\s+\w", intent.new_value or "", re.IGNORECASE):
+        return "removal"
+    # "no benefits will be there", "no more X", "there will be no X" anywhere.
+    if re.search(
+        r"\bno\s+(more\s+)?\w+(\s+\w+)?\s+(will|under|anymore|left|offered|"
+        r"available|going forward)",
+        text,
+        re.IGNORECASE,
+    ):
+        return "removal"
+    if re.search(r"\b(will be|there('s| is| will be)) no\s+\w", text, re.IGNORECASE):
         return "removal"
 
     return "edit"
@@ -148,19 +178,52 @@ def infer_replacement_target(chunks: list[ChunkRecord]) -> str | None:
     return best
 
 
+# Verbs / filler that signal an INSTRUCTION phrase rather than a real name —
+# guards against an over-eager extractor turning "update everywhere" into a
+# rename target.
+_NOT_A_NAME_LEADING = {
+    "update", "updating", "change", "changing", "reflect", "apply", "use",
+    "make", "ensure", "keep", "remove", "rename", "rebrand", "call", "set",
+    "everything", "everywhere", "all", "the", "our", "a", "an", "new",
+}
+
+
+def looks_like_name(value: str) -> bool:
+    """True if *value* plausibly is a proper name (company/brand/team).
+
+    A real name is short and contains a capitalized word; an instruction phrase
+    like "update everywhere" or "reflect the new name" is not a rename target.
+    """
+    value = (value or "").strip()
+    if not value:
+        return False
+    tokens = value.split()
+    if len(tokens) > 5:
+        return False
+    if tokens[0].lower() in _NOT_A_NAME_LEADING:
+        return False
+    has_capitalized = any(t[:1].isupper() for t in tokens if t[:1].isalpha())
+    return has_capitalized
+
+
 def find_rename_targets(
     old_value: str,
     chunks: list[ChunkRecord],
-    max_targets: int = 12,
+    max_targets: int = 200,
+    per_doc: int = 8,
 ) -> list[tuple[ChunkRecord, str]]:
-    """Find every section whose body contains *old_value* (case-insensitive).
+    """Find sections whose body contains *old_value* (case-insensitive).
 
-    Returns a list of (chunk, new_body) pairs where new_body is the section
-    content with all occurrences of old_value replaced — preserving the original
-    casing pattern is not attempted; the caller's new_value is inserted verbatim.
+    A rename must reach EVERY document that mentions the old value. A flat cap
+    iterated in chunk order exhausts the budget on the first few documents, so
+    matches are grouped per document and taken round-robin (one section per doc
+    per round, up to *per_doc* rounds). This guarantees coverage across the whole
+    corpus before adding extra sections within any single document.
+
+    Returns (chunk, original_content) pairs; the caller substitutes the new value.
     """
     pattern = re.compile(re.escape(old_value), re.IGNORECASE)
-    targets: list[tuple[ChunkRecord, str]] = []
+    by_doc: dict[str, list[ChunkRecord]] = {}
     seen: set[tuple[str, str]] = set()
     for c in chunks:
         if not pattern.search(c.content):
@@ -169,13 +232,79 @@ def find_rename_targets(
         if key in seen:
             continue
         seen.add(key)
-        targets.append((c, c.content))  # new_body filled in by caller
-        if len(targets) >= max_targets:
-            break
+        by_doc.setdefault(c.source_path, []).append(c)
+
+    targets: list[tuple[ChunkRecord, str]] = []
+    for r in range(per_doc):
+        for secs in by_doc.values():
+            if r < len(secs):
+                targets.append((secs[r], secs[r].content))
+                if len(targets) >= max_targets:
+                    return targets
     return targets
 
 
 # ── Removal helper (which whole sections to delete) ───────────────────────────
+
+
+# Generic structural / filler words that must not drive a named-removal match
+# (every doc has "Policy"/"Section" headings; removal verbs are not subjects).
+_NAMED_STOPWORDS = {
+    "the", "a", "an", "of", "and", "or", "for", "to", "in", "on", "at", "is",
+    "are", "be", "will", "under", "this", "that", "new", "company", "our",
+    "policy", "policies", "section", "sections", "procedure", "procedures",
+    "standard", "standards", "sop", "guide", "handbook", "overview",
+    "remove", "removing", "removal", "removed", "delete", "deleting", "drop",
+    "dropping", "no", "longer", "anymore", "whole", "entire", "bit", "part",
+    "stuff", "thing", "things", "get", "rid", "out", "take", "scrap",
+    "eliminate", "discontinue", "everything", "else",
+}
+
+
+def subject_keywords(intent: LocalDocIntent) -> set[str]:
+    """The content words that name WHAT a removal targets (minus filler/verbs)."""
+    text = (
+        f"{intent.affected_topic} {intent.new_value} "
+        f"{' '.join(intent.verbatim_snippets or [])}"
+    )
+    toks = re.findall(r"[a-zA-Z]{3,}", text.lower())
+    return {t for t in toks if t not in _NAMED_STOPWORDS}
+
+
+def heading_match_score(heading: str, keywords: set[str]) -> int:
+    """How many subject keywords appear in a section heading."""
+    htoks = set(re.findall(r"[a-zA-Z]{3,}", heading.lower()))
+    return len(htoks & keywords)
+
+
+def best_named_removal_target(
+    intent: LocalDocIntent, chunks: list[ChunkRecord]
+) -> ChunkRecord | None:
+    """Pick the section a named removal targets by heading-keyword overlap.
+
+    Scans EVERY section across all documents (not just retrieved ones) so the
+    deletion lands on the section actually named — e.g. "deprecation policy" ->
+    the "Deprecation Policy" heading, never a semantically-near "Deprovisioning"
+    section. Returns None when no heading shares a subject keyword.
+    """
+    keywords = subject_keywords(intent)
+    if not keywords:
+        return None
+    best: ChunkRecord | None = None
+    best_score = 0
+    seen: set[tuple[str, str]] = set()
+    for c in chunks:
+        if c.section_index == 0:
+            continue  # never delete a document's title/intro on a topical match
+        key = (c.source_path, c.section_heading)
+        if key in seen:
+            continue
+        seen.add(key)
+        score = heading_match_score(c.section_heading, keywords)
+        if score > best_score:
+            best_score = score
+            best = c
+    return best if best_score > 0 else None
 
 
 class _RemovalPlan(BaseModel):

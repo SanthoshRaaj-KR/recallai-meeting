@@ -341,21 +341,9 @@ class SafeApply:
         heading_idx: Optional[int] = None
 
         for i, node in enumerate(nodes):
-            node_text = node.getAttribute("text:outline-level") if hasattr(node, "getAttribute") else None
-            # Get text content of node
-            try:
-                text_val = str(node) if node.nodeType == node.TEXT_NODE else ""
-            except Exception:
-                text_val = ""
-
-            # Check if this is a heading with matching text
-            if node.__class__.__name__ == "H":
-                # odfpy heading element
-                heading_text = "".join(
-                    str(child) for child in node.childNodes
-                    if hasattr(child, "data") or child.nodeType == child.TEXT_NODE
-                )
-                # Flatten to plain string
+            # Loaded odfpy nodes are generic Element instances; identify headings
+            # by the qualified-name local part (text:h -> "h"), NOT by class name.
+            if _odf_localname(node) == "h":
                 heading_text_plain = _odf_node_text(node)
                 if heading_text_plain.strip() == section_heading:
                     heading_idx = i
@@ -367,10 +355,10 @@ class SafeApply:
             complex_warning = False
             for i in range(heading_idx + 1, len(nodes)):
                 node = nodes[i]
-                cls_name = node.__class__.__name__
-                if cls_name == "H":
+                local = _odf_localname(node)
+                if local == "h":
                     break
-                if cls_name in ("Table", "Frame"):
+                if local in ("table", "frame"):
                     complex_warning = True
                 body_indices.append(i)
 
@@ -455,6 +443,8 @@ class SafeApply:
             before_content = self._delete_markdown(file_path, section_heading)
         elif suffix == ".txt":
             before_content = self._delete_txt(file_path, section_heading)
+        elif suffix == ".odt":
+            before_content = self._delete_odt(file_path, section_heading)
         else:
             raise ValueError(f"Unsupported format for delete: {suffix}")
         return before_content  # the format-specific helpers handle backup + audit
@@ -521,6 +511,36 @@ class SafeApply:
         doc.save(file_path)
         return before_content
 
+    def _delete_odt(self, file_path: str, section_heading: str) -> str:
+        from odf.opendocument import load
+
+        doc = load(file_path)
+        text_body = doc.text
+        nodes = list(text_body.childNodes)
+        heading_idx: Optional[int] = None
+        for i, node in enumerate(nodes):
+            if _odf_localname(node) == "h" and _odf_node_text(node).strip() == section_heading:
+                heading_idx = i
+                break
+        if heading_idx is None:
+            self._backup(file_path)
+            return ""
+
+        to_remove = [nodes[heading_idx]]
+        removed = [_odf_node_text(nodes[heading_idx])]
+        for i in range(heading_idx + 1, len(nodes)):
+            if _odf_localname(nodes[i]) == "h":
+                break
+            to_remove.append(nodes[i])
+            removed.append(_odf_node_text(nodes[i]))
+        before_content = "\n".join(removed)
+
+        self._backup(file_path)
+        for node in to_remove:
+            text_body.removeChild(node)
+        doc.save(file_path)
+        return before_content
+
     def apply(
         self,
         file_path: str,
@@ -570,6 +590,16 @@ class SafeApply:
             raise ValueError("PDF is read-only; no write-back supported")
         else:
             raise ValueError(f"Unsupported format: {suffix}")
+
+
+def _odf_localname(node) -> str:
+    """Return the local part of an odfpy node's qualified name (text:h -> 'h').
+
+    Loaded odfpy elements are generic ``Element`` instances, so ``__class__``
+    is unreliable; the qname local part is the stable type signal.
+    """
+    qn = getattr(node, "qname", None)
+    return qn[1] if qn else node.__class__.__name__.lower()
 
 
 def _odf_node_text(node) -> str:

@@ -55,13 +55,26 @@ class EvaluationAgent:
 
         Returns a float in [0.0, 1.0]. Returns 0.0 on any exception.
         """
+        # Show enough of the section that the relevant sentence is visible. The
+        # old 800-char cap dropped the change target on long sections (a value to
+        # edit often sits in a middle paragraph past 800 chars), making the
+        # evaluator score the CORRECT section 0.0. Sections are bounded by the
+        # chunker (~800 words), so ~4000 chars covers essentially all of them.
+        content = chunk.content
+        if len(content) > 4000:
+            # Keep the head plus a window around any old_value match so the
+            # decisive text is never truncated away on very long sections.
+            content = content[:4000]
+            if intent.old_value and intent.old_value not in content and intent.old_value in chunk.content:
+                pos = chunk.content.find(intent.old_value)
+                content = chunk.content[:2000] + "\n...\n" + chunk.content[max(0, pos - 500):pos + 500]
         prompt = (
             f"Intent:\n"
             f"  topic: {intent.affected_topic}\n"
             f"  old_value: {intent.old_value}\n"
             f"  new_value: {intent.new_value}\n\n"
             f"Section heading: {chunk.section_heading}\n"
-            f"Section content:\n{chunk.content[:800]}"
+            f"Section content:\n{content}"
         )
         try:
             result = await Runner.run(self._agent, prompt)

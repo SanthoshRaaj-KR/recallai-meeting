@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 IntentType = Literal[
     "policy_update",
@@ -24,6 +24,11 @@ IntentType = Literal[
 
 class LocalDocIntent(BaseModel):
     """A single actionable document-change intent extracted from a meeting transcript."""
+
+    # The LLM frequently returns numeric old/new values as JSON numbers (e.g.
+    # 2360 instead of "2360"); without coercion the whole extraction batch fails
+    # validation and every change in it is silently dropped. Coerce to str.
+    model_config = ConfigDict(coerce_numbers_to_str=True)
 
     intent_type: IntentType
     affected_topic: str
