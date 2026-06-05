@@ -829,6 +829,10 @@ async def execute_local_doc_changes(session_id: str, body: LocalDocExecuteBody) 
         # Honor a user edit from the card's textarea, if provided.
         override = body.edited_content.get(pid)
         content = override if override is not None else proposal.get("after_content", "")
+        # A user edit always means "write this text" — never a section delete.
+        edit_type = proposal.get("edit_type", "replace")
+        if override is not None:
+            edit_type = "replace"
         try:
             backup_path = await asyncio.to_thread(
                 applier.apply,
@@ -837,6 +841,7 @@ async def execute_local_doc_changes(session_id: str, body: LocalDocExecuteBody) 
                 new_content=content,
                 session_id=session_id,
                 proposal_id=pid,
+                edit_type=edit_type,
             )
             proposal["status"] = "accepted"
             if override is not None:

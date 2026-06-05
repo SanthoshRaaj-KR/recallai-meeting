@@ -27,6 +27,7 @@ class LocalDocProposal(BaseModel):
     source_chunk: ChunkRecord
     before_content: str
     after_content: str
+    edit_type: str = "replace"  # "replace" | "append" | "delete_section"
     confidence: float  # 0.0–1.0 from VerifierAgent
     factual_consistency: float  # 0.0–1.0
     formatting_integrity: float
