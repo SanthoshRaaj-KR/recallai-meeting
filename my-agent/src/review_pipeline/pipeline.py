@@ -264,10 +264,15 @@ class ProposalPipeline:
             for page in style_pages[:4]
         ]
         prompt = (
-            "Draft a complete new Confluence page from a meeting and user request. "
-            "First infer the writing style from existing same-space page samples: heading depth, "
-            "section order, tone, bullets vs paragraphs, tables, panels, status/color conventions, "
-            "and how concise the pages are. Then write a new page in that style.\n\n"
+            "Draft a new Confluence page strictly about the topic specified in user_request. "
+            "The user_request defines the EXACT topic and scope — do not document anything from the "
+            "meeting that is not directly related to it. The transcript is a source to extract "
+            "relevant details from, not a dump to document wholesale.\n\n"
+            "Step 1 — Identify the topic: read user_request carefully. That topic is the ONLY subject "
+            "of this page. Everything else discussed in the meeting is irrelevant and must be omitted.\n\n"
+            "Step 2 — Infer style from same_space_style_samples: heading depth, section order, tone, "
+            "bullets vs paragraphs, tables, and how concise the pages are. Write the new page in that style.\n\n"
+            "Step 3 — Extract only on-topic facts from the transcript. Ignore off-topic segments entirely.\n\n"
             "Return JSON only with: title, body_markdown, rationale. body_markdown must be publishable "
             "page content using markdown-ish syntax: ## headings, ### subheadings, bullet lists, "
             "numbered steps, and simple tables if useful. If an image/diagram would help, insert a "
@@ -277,6 +282,10 @@ class ProposalPipeline:
         )
         payload = {
             "user_request": query,
+            "page_topic_scope": (
+                f"This page must ONLY cover: {query}. "
+                "Ignore all meeting content that is not directly about this topic."
+            ),
             "title_hint": title_hint,
             "meeting": {
                 "title": meeting.title,
