@@ -83,6 +83,10 @@ class ProposalPipeline:
 
         await _emit({"type": "stage_start", "stage": "fact_extraction"})
         meeting = await self._extract_meeting(transcript, transcript_text, query=query)
+        # Supplement change_intents with action items the LLM may not have converted.
+        fallback = self._intents_from_action_items(meeting)
+        if fallback:
+            meeting.change_intents = self._merge_intents(meeting.change_intents, fallback)[:30]
 
         await _emit({"type": "stage_start", "stage": "rag_retrieval"})
         rovo_intents = await self._generate_page_grounded_candidates(meeting, transcript_text, query=query)
@@ -99,7 +103,10 @@ class ProposalPipeline:
         intent_pages = await self._retrieve_pages(meeting.change_intents)
 
         await _emit({"type": "stage_start", "stage": "drafting"})
-        proposals = self._draft_proposals(
+        # _draft_proposals contains blocking sync LLM calls (_section_level_draft_sync).
+        # Run it in a thread so it doesn't stall the event loop.
+        proposals = await asyncio.to_thread(
+            self._draft_proposals,
             session_id=session_id,
             meeting=meeting,
             intent_pages=intent_pages,
@@ -108,8 +115,36 @@ class ProposalPipeline:
 
         await _emit({"type": "stage_start", "stage": "verification"})
         verified = self._verify_and_dedupe(proposals)
-        verified = await self._adversarial_verify(meeting, verified, transcript_text)
-        verified = await self._rovo_independent_critic(meeting, verified, transcript_text, query=query)
+        # Run the two independent verifiers in parallel — each makes one LLM call.
+        # Both operate on separate copies so neither blocks waiting for the other.
+        av_result, rc_result = await asyncio.gather(
+            self._adversarial_verify(meeting, [dict(p) for p in verified], transcript_text),
+            self._rovo_independent_critic(meeting, [dict(p) for p in verified], transcript_text, query=query),
+        )
+        # Merge: a proposal survives only if both verifiers kept it; take conservative side.
+        _risk_rank = {"safe": 0, "review": 1, "risky": 2}
+        _conf_rank = {"high": 2, "medium": 1, "low": 0}
+        av_by_id = {str(p.get("id")): p for p in av_result}
+        rc_by_id = {str(p.get("id")): p for p in rc_result}
+        merged: list[dict[str, Any]] = []
+        for p in verified:
+            pid = str(p.get("id"))
+            av_p = av_by_id.get(pid)
+            rc_p = rc_by_id.get(pid)
+            if av_p is None or rc_p is None:
+                continue  # rejected by at least one verifier
+            worst_risk = max(av_p.get("risk", "review"), rc_p.get("risk", "review"), key=lambda r: _risk_rank.get(r, 1))
+            worst_conf = min(av_p.get("confidence", "medium"), rc_p.get("confidence", "medium"), key=lambda c: _conf_rank.get(c, 1))
+            av_p["risk"] = worst_risk
+            av_p["confidence"] = worst_conf
+            av_p["confidence_bin"] = worst_conf
+            av_p["confidence_score"] = {"high": 0.9, "medium": 0.7, "low": 0.4}[worst_conf]
+            rc_note = rc_p.get("verifier_note") or ""
+            av_note = av_p.get("verifier_note") or ""
+            if rc_note and rc_note not in av_note:
+                av_p["verifier_note"] = f"{av_note} {rc_note}".strip()
+            merged.append(av_p)
+        verified = merged
         verified = await self._coverage_audit(meeting, verified, transcript_text)
         if self.last_diagnostics:
             await _emit(
@@ -363,21 +398,76 @@ class ProposalPipeline:
             logger.warning("LLM meeting extraction failed; using heuristic fallback: %s", exc)
             return self._heuristic_meeting(transcript, transcript_text)
 
+    def _intents_from_action_items(self, meeting: ExtractedMeeting) -> list[ChangeIntent]:
+        """Return ChangeIntents for action items not already covered by an existing intent.
+
+        Every action item from a meeting is a concrete fact that could be reflected in
+        Confluence documentation. The page retrieval pipeline will naturally filter out
+        ones that have no matching page — no keyword filtering needed here.
+        """
+        existing_subjects = {
+            normalize_for_match(i.subject or i.target_hint or i.instruction)
+            for i in meeting.change_intents
+            if i.subject or i.target_hint or i.instruction
+        }
+        new_intents: list[ChangeIntent] = []
+        for item in meeting.action_items:
+            if isinstance(item, dict):
+                desc = str(item.get("description") or "").strip()
+                owner = str(item.get("owner") or "").strip()
+                due = str(item.get("due") or "").strip()
+            else:
+                desc = str(item).strip()
+                owner = ""
+                due = ""
+            if not desc:
+                continue
+            desc_norm = normalize_for_match(desc)
+            already_covered = any(
+                existing and (desc_norm in existing or existing in desc_norm)
+                for existing in existing_subjects
+            )
+            if already_covered:
+                continue
+            rationale = f"Action item from meeting: {desc}"
+            if owner:
+                rationale += f" (owner: {owner})"
+            if due:
+                rationale += f" (due: {due})"
+            new_intents.append(
+                ChangeIntent(
+                    instruction=desc,
+                    subject=desc[:120],
+                    target_hint=desc[:120],
+                    new_value=desc,
+                    action="add",
+                    rationale=rationale,
+                    source="action_item",
+                )
+            )
+        return new_intents
+
     def _extract_meeting_sync(self, transcript_text: str, query: str) -> dict[str, Any]:
         client = self._get_openai()
         prompt = (
-            "You extract documentation changes from meeting transcripts. "
-            "Return JSON only. Capture the FINAL agreed state, not intermediate suggestions. "
-            "Create one atomic change_intent per distinct documentation update. "
-            "Prefer precise old_value/new_value pairs when the transcript says a page has an outdated value. "
-            "Also extract indirect state changes that imply a documentation update, including items "
-            "being completed, shipped, cancelled, deferred, blocked, unblocked, approved, rejected, "
-            "renamed, owned by someone else, or moved to a different date/status. "
+            "You extract structured facts from meeting transcripts that may need to be reflected in "
+            "Confluence documentation. The participants will NEVER explicitly say 'update the docs' — "
+            "you must proactively identify every concrete fact, decision, metric change, status update, "
+            "ownership change, date change, completed/reopened task, or agreed action that could already "
+            "be documented somewhere in Confluence and therefore needs updating.\n\n"
+            "Return JSON only. Capture the FINAL agreed state of every fact, not intermediate suggestions. "
+            "Create one atomic change_intent per distinct fact or update. "
+            "Prefer precise old_value/new_value pairs (e.g. old_value='0.91', new_value='0.98'). "
+            "If a metric, threshold, status, date, or owner is stated in the meeting, extract it as a "
+            "change_intent with the best page/title hint — even with no old_value. "
             "For checklist/task updates use action='complete_task' when the meeting says an item is done "
             "and action='reopen_task' when it is no longer done. For general status fields use action='replace' "
-            "with old_value only when stated or inferable from the current wording. "
-            "Changes may target multiple pages; keep each intent atomic and include the best page/title hint. "
-            "Do not invent facts. If no Confluence/doc change is needed, return change_intents: [].\n\n"
+            "with old_value only when stated or inferable. "
+            "One fact may appear on MULTIPLE Confluence pages — still emit one intent per fact; the retrieval "
+            "pipeline will fan it out to all matching pages. "
+            "Do NOT invent facts beyond what was stated. "
+            "SKIP ONLY: social niceties (greetings, farewells, thanks), vague filler with no concrete "
+            "information, and pure process meta-comments. Everything else is fair game.\n\n"
             "JSON shape:\n"
             "{"
             '"title": string, "summary": string, "key_topics": string[], "decisions": string[], '
@@ -509,28 +599,36 @@ class ProposalPipeline:
         if not search_terms:
             return []
 
-        pages_by_id: dict[str, PageCandidate] = {}
-        for term in search_terms:
-            try:
-                results = await self._hybrid_search_pages(term, limit=5)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Page-grounded candidate search failed for %r: %s", term, exc)
+        # Search all terms in parallel, then fetch unique pages in parallel.
+        search_results = await asyncio.gather(
+            *[self._hybrid_search_pages(term, limit=5) for term in search_terms],
+            return_exceptions=True,
+        )
+        page_meta: dict[str, dict] = {}  # page_id → result metadata
+        for results in search_results:
+            if isinstance(results, Exception):
                 continue
             for result in results:
                 page_id = str(result.get("page_id") or result.get("id") or "")
-                if not page_id or page_id in pages_by_id:
-                    continue
-                try:
-                    page = await self._fetch_page_for_retrieval(page_id, str(result.get("source") or "hybrid_search"))
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("Page-grounded candidate fetch failed for %s: %s", page_id, exc)
-                    continue
-                page.score = float(result.get("retrieval_score") or 0.0)
-                pages_by_id[page_id] = page
-                if len(pages_by_id) >= self.max_candidate_pages:
-                    break
-            if len(pages_by_id) >= self.max_candidate_pages:
+                if page_id and page_id not in page_meta:
+                    page_meta[page_id] = result
+                    if len(page_meta) >= self.max_candidate_pages:
+                        break
+            if len(page_meta) >= self.max_candidate_pages:
                 break
+
+        fetch_results = await asyncio.gather(
+            *[self._fetch_page_for_retrieval(pid, str(meta.get("source") or "hybrid_search"))
+              for pid, meta in page_meta.items()],
+            return_exceptions=True,
+        )
+        pages_by_id: dict[str, PageCandidate] = {}
+        for (pid, meta), page in zip(page_meta.items(), fetch_results):
+            if isinstance(page, Exception):
+                logger.debug("Page-grounded candidate fetch failed for %s: %s", pid, page)
+                continue
+            page.score = float(meta.get("retrieval_score") or 0.0)
+            pages_by_id[pid] = page
 
         pages = list(pages_by_id.values())
         if not pages:
@@ -600,17 +698,22 @@ class ProposalPipeline:
             for p in pages[: self.max_candidate_pages]
         ]
         prompt = (
-            "You are a strict Confluence change candidate generator. "
+            "You are an aggressive Confluence change candidate generator. "
             "You receive a meeting transcript and live Confluence page excerpts. "
-            "Return candidate changes ONLY when the transcript says something should change "
-            "and the page excerpt shows where it belongs or what old value exists. "
+            "Your job: find every place where a concrete meeting fact (metric, decision, date, owner, "
+            "status, threshold, task completion, etc.) matches or relates to content in the page excerpts, "
+            "and emit a change_intent for each — even if the meeting participants never said 'update the docs'. "
             "Treat page lines like '[task: incomplete] Q2 plan' as Confluence checkboxes/tasks; "
             "if the transcript says the task is complete, done, shipped, closed, or fully finished, "
             "return action='complete_task' with new_value='complete'. "
             "If the transcript says it is reopened or no longer complete, return action='reopen_task'. "
-            "For non-checkbox status or text updates, infer replace/add changes when the page excerpt "
-            "contains the relevant section or current status. "
-            "Do not make general documentation improvements. Do not invent page IDs. "
+            "For metrics, thresholds, dates, owners, and statuses: if the meeting states a new value and "
+            "a page excerpt shows the same field with any value, emit action='replace'. "
+            "If a page excerpt contains a section or field relevant to a meeting fact but no exact old value "
+            "is visible, emit action='add'. "
+            "The same fact may appear in MULTIPLE page excerpts — emit one change_intent per page where it "
+            "belongs. Do not deduplicate across pages. "
+            "Do not make vague documentation improvements. Do not invent page IDs. "
             "If an old value appears in a page excerpt, copy it exactly into old_value. "
             "Return JSON only: {\"change_intents\": [{\"instruction\": string, \"subject\": string, "
             "\"target_hint\": string, \"old_value\": string, \"new_value\": string, "
@@ -736,46 +839,61 @@ class ProposalPipeline:
         self,
         intents: list[ChangeIntent],
     ) -> list[tuple[ChangeIntent, list[PageCandidate]]]:
+        """Retrieve candidate pages for ALL intents in parallel."""
+        ranked_lists = await asyncio.gather(
+            *[self._retrieve_pages_for_intent(intent) for intent in intents],
+            return_exceptions=True,
+        )
         out: list[tuple[ChangeIntent, list[PageCandidate]]] = []
-        for intent in intents:
-            queries = self._queries_for_intent(intent)
-            pages_by_id: dict[str, PageCandidate] = {}
-            if intent.page_id:
-                try:
-                    page = await self._fetch_page_for_retrieval(intent.page_id, intent.source or "page_hint")
-                    page.source = intent.source or "page_hint"
-                    page.score = self._score_page(intent, page) + 5.0
-                    pages_by_id[intent.page_id] = page
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("Could not fetch hinted candidate page %s: %s", intent.page_id, exc)
-            for query in queries:
-                try:
-                    results = await self._hybrid_search_pages(query, limit=6)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Hybrid Confluence search failed for %r: %s", query, exc)
-                    continue
-                for result in results:
-                    page_id = result.get("page_id") or result.get("id")
-                    if not page_id or page_id in pages_by_id:
-                        continue
-                    try:
-                        page = await self._fetch_page_for_retrieval(str(page_id), str(result.get("source") or "hybrid_search"))
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("Could not fetch candidate page %s: %s", page_id, exc)
-                        continue
-                    page.source = result.get("source") or page.source or "search"
-                    page.score = self._score_page(intent, page) + float(result.get("retrieval_score") or 0.0)
-                    pages_by_id[str(page_id)] = page
-            ranked = sorted(pages_by_id.values(), key=lambda p: p.score, reverse=True)
-            if not ranked and (intent.instruction or intent.subject or intent.new_value):
-                self._add_diagnostic(
-                    intent,
-                    "no_matching_page_found",
-                    "No Confluence page matched this extracted meeting intent.",
-                    severity="review",
-                )
-            out.append((intent, ranked[: self.max_candidate_pages]))
+        for intent, ranked in zip(intents, ranked_lists):
+            if isinstance(ranked, Exception):
+                logger.warning("Page retrieval failed for intent %r: %s", intent.subject, ranked)
+                if intent.instruction or intent.subject or intent.new_value:
+                    self._add_diagnostic(intent, "no_matching_page_found", "Page retrieval raised an exception.", severity="review")
+                out.append((intent, []))
+            else:
+                out.append((intent, ranked))
         return out
+
+    async def _retrieve_pages_for_intent(self, intent: ChangeIntent) -> list[PageCandidate]:
+        """Retrieve and score candidate pages for a single intent."""
+        queries = self._queries_for_intent(intent)
+        pages_by_id: dict[str, PageCandidate] = {}
+        if intent.page_id:
+            try:
+                page = await self._fetch_page_for_retrieval(intent.page_id, intent.source or "page_hint")
+                page.source = intent.source or "page_hint"
+                page.score = self._score_page(intent, page) + 5.0
+                pages_by_id[intent.page_id] = page
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Could not fetch hinted candidate page %s: %s", intent.page_id, exc)
+        for query in queries:
+            try:
+                results = await self._hybrid_search_pages(query, limit=6)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Hybrid Confluence search failed for %r: %s", query, exc)
+                continue
+            for result in results:
+                page_id = result.get("page_id") or result.get("id")
+                if not page_id or page_id in pages_by_id:
+                    continue
+                try:
+                    page = await self._fetch_page_for_retrieval(str(page_id), str(result.get("source") or "hybrid_search"))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Could not fetch candidate page %s: %s", page_id, exc)
+                    continue
+                page.source = result.get("source") or page.source or "search"
+                page.score = self._score_page(intent, page) + float(result.get("retrieval_score") or 0.0)
+                pages_by_id[str(page_id)] = page
+        ranked = sorted(pages_by_id.values(), key=lambda p: p.score, reverse=True)
+        if not ranked and (intent.instruction or intent.subject or intent.new_value):
+            self._add_diagnostic(
+                intent,
+                "no_matching_page_found",
+                "No Confluence page matched this extracted meeting intent.",
+                severity="review",
+            )
+        return ranked[: self.max_candidate_pages]
 
     async def _hybrid_search_pages(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
         """Search both live Confluence/Rovo and vector RAG, then merge by page."""
@@ -1060,8 +1178,17 @@ class ProposalPipeline:
         intent_pages: list[tuple[ChangeIntent, list[PageCandidate]]],
         query: str | None,
     ) -> list[dict[str, Any]]:
+        """Phase 1 (sync): deterministic drafting — skip section-level LLM refinements.
+        Phase 2 (sync, parallel-ready): run collected section-level drafts and apply.
+        Runs inside asyncio.to_thread so the event loop stays free throughout.
+        """
+        import concurrent.futures
+
         proposals: list[Proposal] = []
+        # Collect (proposal_index, intent, page, heading, after, mode) for section drafts
+        pending_refinements: list[tuple[int, ChangeIntent, PageCandidate, str | None, str, str | None]] = []
         now = _utcnow()
+
         for intent, pages in intent_pages:
             action = (intent.action or "replace").lower()
             if action == "create" or (not pages and action in {"create", "add"}):
@@ -1070,14 +1197,10 @@ class ProposalPipeline:
 
             drafted_for_intent = 0
             for page in pages:
-                proposal = self._draft_for_page(session_id, intent, page, now, query)
+                proposal = self._draft_for_page_no_refine(session_id, intent, page, now, query, pending_refinements, len(proposals))
                 if proposal:
                     proposals.append(proposal)
                     drafted_for_intent += 1
-                    # Exact old-value matches are the highest-signal path. One good page
-                    # is enough unless retrieval finds another exact duplicate later.
-                    if intent.old_value and proposal.before_content:
-                        break
             if drafted_for_intent == 0 and pages:
                 reason = "old_value_not_found" if intent.old_value else "unsupported_by_page_content"
                 detail = (
@@ -1089,7 +1212,116 @@ class ProposalPipeline:
                     reason = "ambiguous_multiple_pages"
                     detail = "Multiple pages matched loosely, but no single page was safe enough for a proposal."
                 self._add_diagnostic(intent, reason, detail, severity="review")
+
+        # Phase 2: run all section-level LLM drafts in parallel using a thread pool
+        if pending_refinements:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(pending_refinements))) as pool:
+                futures = {
+                    pool.submit(self._section_level_draft_sync, intent, page, heading, after, mode): idx
+                    for idx, intent, page, heading, after, mode in pending_refinements
+                }
+                for future, idx in futures.items():
+                    try:
+                        refined = future.result(timeout=30)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("Section-level draft failed for proposal %d: %s", idx, exc)
+                        continue
+                    if not refined or idx >= len(proposals):
+                        continue
+                    p = proposals[idx]
+                    p.after_content = refined.get("after_content") or p.after_content
+                    p.edit_mode = refined.get("edit_mode") or p.edit_mode  # type: ignore[assignment]
+                    p.section_heading = refined.get("section_heading") or p.section_heading
+
         return [p.to_dict() for p in proposals]
+
+    def _draft_for_page_no_refine(
+        self,
+        session_id: str,
+        intent: ChangeIntent,
+        page: PageCandidate,
+        timestamp: str,
+        query: str | None,
+        pending_refinements: list,
+        proposal_index: int,
+    ) -> Proposal | None:
+        """Like _draft_for_page but defers section-level LLM calls to pending_refinements."""
+        action = (intent.action or "replace").lower()
+        task_status = self._desired_task_status(intent)
+        if task_status:
+            task_proposal = self._draft_task_status_proposal(session_id, intent, page, timestamp, query, task_status)
+            if task_proposal:
+                return task_proposal
+
+        text_norm = normalize_for_match(f"{page.title}\n{page.text}\n{page.html}")
+        old_norm = normalize_for_match(intent.old_value)
+        subject_norm = normalize_for_match(intent.subject)
+        target_norm = normalize_for_match(intent.target_hint)
+
+        old_found = bool(old_norm and old_norm in text_norm)
+        subject_found = bool((subject_norm and subject_norm in text_norm) or (target_norm and target_norm in text_norm))
+        title_change = action == "rename"
+        remove = action == "remove"
+
+        if action == "replace" and not old_found and not subject_found:
+            return None
+        if action == "add" and not subject_found and page.score < 2:
+            return None
+
+        change_type = "title" if title_change else "delete" if remove else "edit"
+        before = intent.old_value if old_found and not title_change else None
+        after = None if remove else (intent.new_value or intent.instruction or intent.subject)
+        metric_replacement = None
+        if change_type == "edit" and not before and action in {"replace", "update", "add"}:
+            metric_replacement = self._metric_inline_replacement(intent, page)
+            if metric_replacement:
+                before, after = metric_replacement
+        edit_mode: str | None = None
+        if change_type == "edit":
+            edit_mode = "replace" if before else "append"
+            if not after:
+                return None
+            if self._looks_like_instruction_text(after):
+                self._add_diagnostic(intent, "instruction_text_after_content",
+                    "Draft after_content looked like an editing instruction rather than publishable page content.",
+                    severity="review", page_title=page.title)
+                return None
+        if change_type == "title" and not after:
+            return None
+        section_heading = best_section_heading(page.html, before or intent.old_value, intent.subject, intent.target_hint, intent.new_value)
+
+        # Defer section-level LLM refinement to Phase 2 instead of calling inline.
+        if change_type == "edit" and edit_mode != "replace":
+            pending_refinements.append((proposal_index, intent, page, section_heading, after, edit_mode))
+            # Proposal is created now with fallback values; Phase 2 will refine it.
+
+        anchored = old_found or metric_replacement is not None
+        confidence = "high" if anchored and intent.evidence else "medium" if anchored or subject_found else "low"
+        risk = "review" if change_type in {"title", "delete"} else "safe" if confidence == "high" else "review"
+        score = 0.9 if confidence == "high" else 0.72 if confidence == "medium" else 0.45
+
+        return Proposal(
+            id=str(uuid.uuid4()),
+            change_type=change_type,  # type: ignore[arg-type]
+            page_id=page.page_id,
+            page_title=page.title,
+            section_heading=section_heading,
+            before_content=before,
+            after_content=after,
+            timestamp=timestamp,
+            session_id=session_id,
+            rationale=intent.rationale or intent.instruction,
+            generation_query=query,
+            transcript_evidence=intent.evidence[:3],
+            confidence=confidence,  # type: ignore[arg-type]
+            risk=risk,  # type: ignore[arg-type]
+            verifier_note=self._verifier_note(intent, page, old_found),
+            edit_mode=edit_mode,  # type: ignore[arg-type]
+            change_summary=self._change_summary(intent, page.title, change_type, before, after),
+            page_url=page.url,
+            confidence_score=score,
+            confidence_bin=confidence,  # type: ignore[arg-type]
+        )
 
     async def _coverage_audit(
         self,
@@ -1430,6 +1662,7 @@ class ProposalPipeline:
         )
 
     def _verify_and_dedupe(self, proposals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Pass 1: exact-key dedup (same page, same change_type, same before/after)
         seen: set[str] = set()
         out: list[dict[str, Any]] = []
         for proposal in proposals:
@@ -1447,7 +1680,41 @@ class ProposalPipeline:
                 continue
             seen.add(key)
             out.append(proposal)
-        return out
+
+        # Pass 2: fuzzy dedup — same page + section, near-identical after_content.
+        # Groups proposals by (page_id, section_heading, change_type) and within each
+        # group keeps only the highest-confidence representative when token overlap > 85%.
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for proposal in out:
+            gk = "|".join([
+                str(proposal.get("page_id") or proposal.get("page_title") or "").lower(),
+                str(proposal.get("section_heading") or "").lower(),
+                str(proposal.get("change_type") or ""),
+            ])
+            groups.setdefault(gk, []).append(proposal)
+
+        final: list[dict[str, Any]] = []
+        for group in groups.values():
+            if len(group) == 1:
+                final.append(group[0])
+                continue
+            kept: list[dict[str, Any]] = []
+            for proposal in group:
+                after_p = normalize_for_match(str(proposal.get("after_content") or ""))
+                absorbed = False
+                for existing in kept:
+                    after_e = normalize_for_match(str(existing.get("after_content") or ""))
+                    if _token_overlap(after_p, after_e) >= 0.85:
+                        # Near-duplicate: keep the higher-confidence one
+                        if (proposal.get("confidence_score") or 0) > (existing.get("confidence_score") or 0):
+                            kept.remove(existing)
+                            kept.append(proposal)
+                        absorbed = True
+                        break
+                if not absorbed:
+                    kept.append(proposal)
+            final.extend(kept)
+        return final
 
     async def _adversarial_verify(
         self,
@@ -1637,27 +1904,34 @@ class ProposalPipeline:
         """
         try:
             terms = self._candidate_search_terms(meeting, transcript_text, query=query)[:8]
-            pages_by_id: dict[str, PageCandidate] = {}
-            for term in terms:
-                try:
-                    results = await self._hybrid_search_pages(term, limit=4)
-                except Exception:
+            search_results = await asyncio.gather(
+                *[self._hybrid_search_pages(term, limit=4) for term in terms],
+                return_exceptions=True,
+            )
+            page_meta: dict[str, dict] = {}
+            for results in search_results:
+                if isinstance(results, Exception):
                     continue
                 for result in results:
                     page_id = str(result.get("page_id") or result.get("id") or "")
-                    if not page_id or page_id in pages_by_id:
-                        continue
-                    try:
-                        pages_by_id[page_id] = await self._fetch_page_for_retrieval(
-                            page_id,
-                            str(result.get("source") or "hybrid_search"),
-                        )
-                    except Exception:
-                        continue
-                    if len(pages_by_id) >= 12:
-                        break
-                if len(pages_by_id) >= 12:
+                    if page_id and page_id not in page_meta:
+                        page_meta[page_id] = result
+                        if len(page_meta) >= 12:
+                            break
+                if len(page_meta) >= 12:
                     break
+            if not page_meta:
+                return proposals
+            fetch_results = await asyncio.gather(
+                *[self._fetch_page_for_retrieval(pid, str(meta.get("source") or "hybrid_search"))
+                  for pid, meta in page_meta.items()],
+                return_exceptions=True,
+            )
+            pages_by_id: dict[str, PageCandidate] = {
+                pid: page
+                for (pid, _), page in zip(page_meta.items(), fetch_results)
+                if not isinstance(page, Exception)
+            }
             if not pages_by_id:
                 return proposals
             data = await asyncio.to_thread(
@@ -1912,6 +2186,17 @@ class ProposalPipeline:
 
 def _utcnow() -> str:
     return dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+
+
+def _token_overlap(a: str, b: str) -> float:
+    """Jaccard-style token overlap between two normalized strings."""
+    if not a or not b:
+        return 0.0
+    ta = set(a.split())
+    tb = set(b.split())
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / max(len(ta), len(tb))
 
 
 def _storage_html(markdownish: str) -> str:

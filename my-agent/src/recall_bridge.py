@@ -669,9 +669,11 @@ async def propose_changes(session_id: str, body: ProposeBody) -> dict:
     s.summary = pipeline.summary_response(session_id, meeting, s.transcript)
     s.summary["proposal_diagnostics"] = pipeline.last_diagnostics
     s.pipeline_diagnostics = pipeline.last_diagnostics
-    s.changes = proposals
+    existing_ids = {str(ch.get("id")) for ch in s.changes}
+    new_proposals = [p for p in proposals if str(p.get("id")) not in existing_ids]
+    s.changes.extend(new_proposals)
     s._touch()
-    return {"changes": s.changes, "generated_count": len(proposals)}
+    return {"changes": s.changes, "generated_count": len(new_proposals)}
 
 
 # ── Endpoints: review — summary ────────────────────────────────────────────────
@@ -781,7 +783,9 @@ async def _run_pipeline_job(job_id: str) -> None:
         s.summary = pipeline.summary_response(session_id, meeting, s.transcript)
         s.summary["proposal_diagnostics"] = pipeline.last_diagnostics
         s.pipeline_diagnostics = pipeline.last_diagnostics
-        s.changes = proposals
+        existing_ids = {str(ch.get("id")) for ch in s.changes}
+        new_proposals = [p for p in proposals if str(p.get("id")) not in existing_ids]
+        s.changes.extend(new_proposals)
         s._touch()
         job["status"] = "completed"
         job["stage"] = None
