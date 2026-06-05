@@ -80,6 +80,11 @@ class PipelineConfig(BaseModel):
     # from fanning one edit across sections. Raise this only for corpora where a
     # single rule is intentionally duplicated across several sections.
     max_targets_per_intent: int = 1
+    # Cross-cutting edits ("change X to Y in every document") must propagate to
+    # every section that documents the same thing, so they use a wider retrieval
+    # net and a much higher target cap than a normal single-section edit.
+    cross_cutting_top_k: int = 40
+    cross_cutting_max_targets: int = 30
     # Drafts below this intent-fulfilment score are dropped as failed (no-op /
     # unfulfilled) rather than shown as a misleading accept-able card.
     min_fulfillment: float = 0.4
@@ -215,7 +220,9 @@ async def run_pipeline(
     retriever = HybridRetriever(index, rerank=config.rerank)
 
     # Edit intents: collect candidate sections (wide net for recall).
-    intent_candidates: list[tuple] = []
+    from agents_local.structural import is_cross_cutting  # noqa: PLC0415
+
+    intent_candidates: list[tuple] = []  # (intent, chunks, max_targets)
     for intent in edit_intents:
         # Include the verbatim quote so BM25 gets the exact terms the speaker
         # used — critical for needle-in-haystack retrieval on large corpora where
@@ -226,8 +233,14 @@ async def run_pipeline(
                 " ".join(intent.verbatim_snippets or []),
             ) if p
         ).strip()
-        results = retriever.query(query_text, top_k=config.retrieval_top_k)
-        intent_candidates.append((intent, [r.chunk for r in results]))
+        cross_cutting = is_cross_cutting(intent)
+        top_k = config.cross_cutting_top_k if cross_cutting else config.retrieval_top_k
+        max_targets = (
+            config.cross_cutting_max_targets if cross_cutting
+            else config.max_targets_per_intent
+        )
+        results = retriever.query(query_text, top_k=top_k)
+        intent_candidates.append((intent, [r.chunk for r in results], max_targets))
 
     # Removal intents: pick the target document, resolve which sections to drop.
     removal_targets: list[tuple] = []  # (intent, chunk) per section to delete
@@ -301,7 +314,7 @@ async def run_pipeline(
 
     eval_agent = EvaluationAgent()
 
-    async def _score_candidates(intent, chunks: list[ChunkRecord]) -> list[tuple]:
+    async def _score_candidates(intent, chunks: list[ChunkRecord], max_targets: int) -> list[tuple]:
         """Keep EVERY section that scores above threshold (deduped, capped)."""
         if not chunks:
             return []
@@ -317,12 +330,12 @@ async def run_pipeline(
                 continue
             seen.add(key)
             kept.append((intent, chunk))
-            if len(kept) >= config.max_targets_per_intent:
+            if len(kept) >= max_targets:
                 break
         return kept
 
     eval_results = await asyncio.gather(
-        *[_score_candidates(intent, chunks) for intent, chunks in intent_candidates]
+        *[_score_candidates(intent, chunks, mt) for intent, chunks, mt in intent_candidates]
     )
     qualified: list[tuple] = [pair for rl in eval_results for pair in rl]
 

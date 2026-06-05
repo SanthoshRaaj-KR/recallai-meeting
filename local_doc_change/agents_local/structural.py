@@ -50,6 +50,26 @@ _NAME_VERB_RE = re.compile(
 )
 
 
+_CROSS_CUTTING_RE = re.compile(
+    r"\b(everywhere|every document|every doc|every file|every policy|"
+    r"all documents|all docs|all files|all policies|all of (our|the) (docs|documents|policies)|"
+    r"across all|across the board|company[- ]wide|org[- ]wide|globally|throughout|"
+    r"wherever (it|they) (appear|appears|is|are) (mentioned|referenced)?|"
+    r"in every (document|doc|file|policy))\b",
+    re.IGNORECASE,
+)
+
+
+def is_cross_cutting(intent: LocalDocIntent) -> bool:
+    """True if a change is meant to propagate across MANY documents at once.
+
+    A normal edit targets a single section; a cross-cutting edit ("change X to Y
+    in every document", "update this across all policies") must reach every
+    section that documents the same thing.
+    """
+    return bool(_CROSS_CUTTING_RE.search(_intent_text(intent)))
+
+
 def _intent_text(intent: LocalDocIntent) -> str:
     """Flatten the human-meaningful fields of an intent into one string."""
     parts = [

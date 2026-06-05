@@ -225,6 +225,20 @@ REMOVE_NAMED_ANCHORS = [
 
 RENAME_BRAND = "Vantcorex Robotics"   # planted across a subset; renamed corpus-wide
 
+# A single cross-cutting EDIT: one distinctive sentence planted IDENTICALLY in
+# many documents, so one meeting instruction must propagate the change to all of
+# them. The phrase is distinctive ("mandatory security re-attestation") so it is
+# unambiguous and does not collide with the random filler prose.
+CROSS_CUTTING = dict(
+    distinctive="mandatory security re-attestation",
+    old_value="27 days",
+    new_value="90 days",
+    sentence="The mandatory security re-attestation window is 27 days from the date of assignment.",
+    transcript="One more compliance item before we wrap — legal wants the mandatory "
+               "security re-attestation window changed from 27 days to 90 days in every "
+               "document that mentions it, across all of our policies.",
+)
+
 
 def fmt_for(i: int) -> str:
     return ["md", "txt", "docx", "odt"][i % 4]
@@ -245,6 +259,8 @@ def build_corpus():
     edit_doc_ids = [8, 9, 10, 11, 12, 13, 14, 15, 28, 29, 30, 31, 40, 41, 42, 43][:len(EDIT_ANCHORS)]
     remove_doc_ids = [44, 5, 46, 23][:len(REMOVE_NAMED_ANCHORS)]  # md, txt, docx, odt
     rename_doc_ids = set(range(2, 100, 7))  # ~14 docs share the brand
+    cross_doc_ids = set(range(50, 68))      # 18 docs share the cross-cutting line
+    cross_files: list[str] = []
 
     docs_meta = []
     for i in range(100):
@@ -302,6 +318,10 @@ def build_corpus():
                 transcript=f"In the {org} {meta['title_suffix'].lower()}, {instr}.",
             ))
         brand_in_doc = i in rename_doc_ids
+        if i in cross_doc_ids:
+            # Inject the identical cross-cutting sentence into a section ~1/3 in.
+            ch = headings[max(1, len(headings) // 3)]
+            anchor_specs.append((ch, CROSS_CUTTING["sentence"]))
 
         # Render body text.
         sections = []  # (heading, body)
@@ -325,6 +345,8 @@ def build_corpus():
 
         path = write_document(fmt, meta, title, sections)
         rel = str(path.relative_to(HERE))
+        if i in cross_doc_ids:
+            cross_files.append(rel)
         # backfill file path into manifest anchors for this doc
         for a in manifest["anchors"]:
             if a["doc_index"] == i:
@@ -350,6 +372,17 @@ def build_corpus():
             a["section_heading"] = sec.section_heading
         else:
             print(f"  WARN: could not resolve anchor heading in {a['file']}")
+
+    # Cross-cutting edit record (one change -> many files)
+    manifest["cross_cutting"] = dict(
+        kind="cross_cutting_edit",
+        distinctive=CROSS_CUTTING["distinctive"],
+        old_value=CROSS_CUTTING["old_value"],
+        new_value=CROSS_CUTTING["new_value"],
+        files=cross_files,
+        doc_count=len(cross_files),
+        transcript=CROSS_CUTTING["transcript"],
+    )
 
     # Rename test record
     manifest["rename_test"] = dict(

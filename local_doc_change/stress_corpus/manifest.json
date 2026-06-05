@@ -1239,6 +1239,34 @@
       "transcript": "In the Umberlane it and infrastructure policy, delete the floppy disk archival standard section."
     }
   ],
+  "cross_cutting": {
+    "kind": "cross_cutting_edit",
+    "distinctive": "mandatory security re-attestation",
+    "old_value": "27 days",
+    "new_value": "90 days",
+    "files": [
+      "docs\\eng_yarrowdale_050.docx",
+      "docs\\support_zephyrion_051.odt",
+      "docs\\product_aldermont_052.md",
+      "docs\\finance_brightforge_053.txt",
+      "docs\\it_cindergate_054.docx",
+      "docs\\data_drayveil_055.odt",
+      "docs\\security_everwynd_056.md",
+      "docs\\hr_fenmark_057.txt",
+      "docs\\eng_glasshollow_058.docx",
+      "docs\\support_harrowfield_059.odt",
+      "docs\\product_ironbloom_060.md",
+      "docs\\finance_junivault_061.txt",
+      "docs\\it_kesterline_062.docx",
+      "docs\\data_larkspire_063.odt",
+      "docs\\security_morrowgate_064.md",
+      "docs\\hr_netherby_065.txt",
+      "docs\\eng_oakmeridian_066.docx",
+      "docs\\support_pallasvane_067.odt"
+    ],
+    "doc_count": 18,
+    "transcript": "One more compliance item before we wrap \u2014 legal wants the mandatory security re-attestation window changed from 27 days to 90 days in every document that mentions it, across all of our policies."
+  },
   "rename_test": {
     "kind": "rename",
     "brand": "Vantcorex Robotics",

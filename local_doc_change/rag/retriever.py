@@ -186,12 +186,14 @@ class HybridRetriever:
 
         # ── Step 3: RRF fusion ────────────────────────────────────────────────
         fused = _rrf(bm25_ids, dense_ids, k=60)
-        candidates_10 = fused[:10]  # top-10 for reranking
+        # Rerank pool is capped (the cross-encoder is expensive), but must be at
+        # least top_k so large requests (e.g. cross-cutting edits) aren't starved.
+        rerank_pool = fused[: max(10, top_k)]
 
         # ── Step 4: Optional cross-encoder reranking ──────────────────────────
-        if self.rerank and self._sentence_transformers_available and len(candidates_10) >= 2:
+        if self.rerank and self._sentence_transformers_available and len(rerank_pool) >= 2:
             try:
-                reranked = self._rerank(text, candidates_10)
+                reranked = self._rerank(text, rerank_pool)
                 # Build RetrievalResult from reranked list
                 results: list[RetrievalResult] = []
                 for final_rank, (cid, rrf_score, rerank_score) in enumerate(
@@ -216,7 +218,7 @@ class HybridRetriever:
 
         # ── Step 5: Top-k from RRF (no reranking) ─────────────────────────────
         results = []
-        for final_rank, (cid, rrf_score) in enumerate(candidates_10[:top_k]):
+        for final_rank, (cid, rrf_score) in enumerate(fused[:top_k]):
             chunk = self._index.id_to_chunk.get(cid)
             if chunk is None:
                 continue
