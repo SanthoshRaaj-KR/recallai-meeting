@@ -71,8 +71,14 @@ class PipelineConfig(BaseModel):
     # How many candidate sections to pull per edit intent before evaluation.
     # Wider than top_k so cross-section / cross-document changes can surface.
     retrieval_top_k: int = 8
-    # Cap on how many sections a single edit intent may change (scalability).
-    max_targets_per_intent: int = 4
+    # Cap on how many sections a single edit intent may change. Default 1: an
+    # edit ("change X from A to B") almost always targets one specific section,
+    # and selecting only the single best-matching section avoids drafting onto a
+    # different section that merely shares the same number or theme. Recall comes
+    # from extracting MORE intents and from the rename/removal branches — not
+    # from fanning one edit across sections. Raise this only for corpora where a
+    # single rule is intentionally duplicated across several sections.
+    max_targets_per_intent: int = 1
     # Drafts below this intent-fulfilment score are dropped as failed (no-op /
     # unfulfilled) rather than shown as a misleading accept-able card.
     min_fulfillment: float = 0.4
@@ -241,8 +247,11 @@ async def run_pipeline(
                 f"Topic: {intent.affected_topic}. "
                 f"Intended change: {intent.new_value}."
             )
+            # Enrich the doc-selection query with the snippet so a removal that
+            # only names its document in the surrounding sentence still routes to
+            # the right file.
             results = retriever.query(
-                f"{intent.affected_topic} {intent.new_value}".strip(),
+                f"{intent.affected_topic} {intent.new_value} {snippet}".strip(),
                 top_k=config.retrieval_top_k,
             )
             if not results:
@@ -255,20 +264,24 @@ async def run_pipeline(
             text = f"{instruction} {snippet}"
             is_positional = bool(_POSITIONAL_RE.search(text))
 
-            to_delete = await resolver.resolve(instruction, headings)
-            if to_delete:
+            # Positional removal ("the last 4", "sections 5-8"): resolve position
+            # against the ordered heading list of the strongest-matching doc.
+            if is_positional:
+                to_delete = await resolver.resolve(instruction, headings)
                 return [(intent, by_heading[h]) for h in to_delete if h in by_heading]
 
-            # Named removal with no resolver hit: delete the strongest matching
-            # content section in the target document (skip a leading title/intro).
-            if not is_positional:
-                for r in results:
-                    if r.chunk.source_path != target_path:
-                        continue
-                    if r.chunk.section_index == 0 and len(sections) > 1:
-                        continue  # avoid deleting the document title/intro
-                    return [(intent, r.chunk)]
-            return []
+            # Named / topical removal: match the SUBJECT to a heading across all
+            # documents (deterministic) so the delete lands on the section
+            # actually named, not a semantically-near one.
+            from agents_local.structural import best_named_removal_target  # noqa: PLC0415
+
+            target = best_named_removal_target(intent, all_chunks)
+            if target is not None:
+                return [(intent, target)]
+
+            # Last resort: let the resolver try the strongest doc's heading list.
+            to_delete = await resolver.resolve(instruction, headings)
+            return [(intent, by_heading[h]) for h in to_delete if h in by_heading]
 
         removal_plans = await asyncio.gather(
             *[_plan_removal(i) for i in removal_intents]
@@ -366,12 +379,17 @@ async def run_pipeline(
         from agents_local.structural import (  # noqa: PLC0415
             find_rename_targets,
             infer_replacement_target,
+            looks_like_name,
         )
 
         inferred: Optional[str] = None
+        rename_seen: set[tuple[str, str]] = set()
         for intent in rename_intents:
             new_value = (intent.new_value or "").strip()
-            if not new_value:
+            # Guard: only act on rename targets that actually look like a name —
+            # an over-eager extractor can mistake "update everywhere" for one.
+            if not looks_like_name(new_value):
+                logger.info("run_pipeline: skipping implausible rename target %r", new_value)
                 continue
             old_value = (intent.old_value or "").strip()
             # If the transcript gave no old value (or one that isn't in the
@@ -383,12 +401,18 @@ async def run_pipeline(
             if not old_value:
                 continue
             pattern = re.compile(re.escape(old_value), re.IGNORECASE)
+            # A rename must reach every section that mentions the old value across
+            # the whole corpus — independent of the per-edit-intent cap.
             for chunk, original in find_rename_targets(
-                old_value, all_chunks, max_targets=config.max_targets_per_intent * 3
+                old_value, all_chunks, max_targets=30
             ):
+                seen_key = (chunk.source_path, chunk.section_heading)
+                if seen_key in rename_seen:
+                    continue
                 new_body = pattern.sub(new_value, original)
                 if new_body == original:
                     continue
+                rename_seen.add(seen_key)
                 proposals.append(
                     _make_proposal(
                         config, intent, chunk, original, new_body,

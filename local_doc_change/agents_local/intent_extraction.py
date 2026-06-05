@@ -33,7 +33,7 @@ Intent types:
 
 Completeness is critical — capture EVERY distinct change, not just the obvious ones:
 - Extract one separate intent per distinct change. Never merge two unrelated changes into one intent.
-- Removals / deletions count ("remove the last 4 security points", "no benefits anymore", "drop the carryover clause"). For a removal, set new_value to a short phrase describing what is removed (e.g. "remove the last 4 security sections") and put the removed scope in affected_topic.
+- Removals / deletions count ("remove the last 4 security points", "no benefits anymore", "drop the carryover clause"). For a removal, set new_value to a short phrase describing what is removed (e.g. "remove the last 4 security sections"). affected_topic MUST name the specific document or subject area the removal applies to — carry forward the document or topic named earlier in the same discussion point. For example, if the speaker is discussing the support SOP and then says "trim the last two sections", affected_topic is "support SOP sections", NOT just "sections". When the removal sentence itself does not name the document, also include the earlier sentence that names it in verbatim_snippets.
 - Renames / rebrands count ("we are renaming the company to X", "the team is now called Y"). For a rename, old_value is the current name if stated (else null) and new_value is the new name; affected_topic should say what is being renamed (e.g. "company name").
 - Numeric and policy changes count even when phrased loosely ("only 3 days a month", "increased by 3 days", "extend retention to a year").
 - Product / strategy pivots count ("we're switching the product to X", "web app first, then mobile").

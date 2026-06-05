@@ -85,6 +85,16 @@ def classify_kind(intent: LocalDocIntent) -> str:
         return "removal"
     if re.match(r"^\s*no\s+\w", intent.new_value or "", re.IGNORECASE):
         return "removal"
+    # "no benefits will be there", "no more X", "there will be no X" anywhere.
+    if re.search(
+        r"\bno\s+(more\s+)?\w+(\s+\w+)?\s+(will|under|anymore|left|offered|"
+        r"available|going forward)",
+        text,
+        re.IGNORECASE,
+    ):
+        return "removal"
+    if re.search(r"\b(will be|there('s| is| will be)) no\s+\w", text, re.IGNORECASE):
+        return "removal"
 
     return "edit"
 
@@ -148,6 +158,34 @@ def infer_replacement_target(chunks: list[ChunkRecord]) -> str | None:
     return best
 
 
+# Verbs / filler that signal an INSTRUCTION phrase rather than a real name —
+# guards against an over-eager extractor turning "update everywhere" into a
+# rename target.
+_NOT_A_NAME_LEADING = {
+    "update", "updating", "change", "changing", "reflect", "apply", "use",
+    "make", "ensure", "keep", "remove", "rename", "rebrand", "call", "set",
+    "everything", "everywhere", "all", "the", "our", "a", "an", "new",
+}
+
+
+def looks_like_name(value: str) -> bool:
+    """True if *value* plausibly is a proper name (company/brand/team).
+
+    A real name is short and contains a capitalized word; an instruction phrase
+    like "update everywhere" or "reflect the new name" is not a rename target.
+    """
+    value = (value or "").strip()
+    if not value:
+        return False
+    tokens = value.split()
+    if len(tokens) > 5:
+        return False
+    if tokens[0].lower() in _NOT_A_NAME_LEADING:
+        return False
+    has_capitalized = any(t[:1].isupper() for t in tokens if t[:1].isalpha())
+    return has_capitalized
+
+
 def find_rename_targets(
     old_value: str,
     chunks: list[ChunkRecord],
@@ -176,6 +214,66 @@ def find_rename_targets(
 
 
 # ── Removal helper (which whole sections to delete) ───────────────────────────
+
+
+# Generic structural / filler words that must not drive a named-removal match
+# (every doc has "Policy"/"Section" headings; removal verbs are not subjects).
+_NAMED_STOPWORDS = {
+    "the", "a", "an", "of", "and", "or", "for", "to", "in", "on", "at", "is",
+    "are", "be", "will", "under", "this", "that", "new", "company", "our",
+    "policy", "policies", "section", "sections", "procedure", "procedures",
+    "standard", "standards", "sop", "guide", "handbook", "overview",
+    "remove", "removing", "removal", "removed", "delete", "deleting", "drop",
+    "dropping", "no", "longer", "anymore", "whole", "entire", "bit", "part",
+    "stuff", "thing", "things", "get", "rid", "out", "take", "scrap",
+    "eliminate", "discontinue", "everything", "else",
+}
+
+
+def subject_keywords(intent: LocalDocIntent) -> set[str]:
+    """The content words that name WHAT a removal targets (minus filler/verbs)."""
+    text = (
+        f"{intent.affected_topic} {intent.new_value} "
+        f"{' '.join(intent.verbatim_snippets or [])}"
+    )
+    toks = re.findall(r"[a-zA-Z]{3,}", text.lower())
+    return {t for t in toks if t not in _NAMED_STOPWORDS}
+
+
+def heading_match_score(heading: str, keywords: set[str]) -> int:
+    """How many subject keywords appear in a section heading."""
+    htoks = set(re.findall(r"[a-zA-Z]{3,}", heading.lower()))
+    return len(htoks & keywords)
+
+
+def best_named_removal_target(
+    intent: LocalDocIntent, chunks: list[ChunkRecord]
+) -> ChunkRecord | None:
+    """Pick the section a named removal targets by heading-keyword overlap.
+
+    Scans EVERY section across all documents (not just retrieved ones) so the
+    deletion lands on the section actually named — e.g. "deprecation policy" ->
+    the "Deprecation Policy" heading, never a semantically-near "Deprovisioning"
+    section. Returns None when no heading shares a subject keyword.
+    """
+    keywords = subject_keywords(intent)
+    if not keywords:
+        return None
+    best: ChunkRecord | None = None
+    best_score = 0
+    seen: set[tuple[str, str]] = set()
+    for c in chunks:
+        if c.section_index == 0:
+            continue  # never delete a document's title/intro on a topical match
+        key = (c.source_path, c.section_heading)
+        if key in seen:
+            continue
+        seen.add(key)
+        score = heading_match_score(c.section_heading, keywords)
+        if score > best_score:
+            best_score = score
+            best = c
+    return best if best_score > 0 else None
 
 
 class _RemovalPlan(BaseModel):
