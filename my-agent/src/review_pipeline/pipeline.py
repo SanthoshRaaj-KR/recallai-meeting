@@ -47,6 +47,9 @@ class ProposalPipeline:
     older confluence_logic package.
     """
 
+    _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+    _CEREBRAS_MODEL = "gpt-oss-120b"
+
     def __init__(self) -> None:
         self.model = os.getenv("MY_AGENT_REVIEW_MODEL", os.getenv("JARVIS_REVIEW_MODEL", "gpt-4o-mini")).strip()
         self.max_candidate_pages = int(os.getenv("MY_AGENT_PIPELINE_MAX_PAGES", "16"))
@@ -55,6 +58,7 @@ class ProposalPipeline:
         self._client: HybridConfluenceClient | None = None
         self._rag: ConfluenceVectorIndex | None = None
         self._openai: OpenAI | None = None
+        self._cerebras: OpenAI | None = None
         self.last_diagnostics: list[dict[str, Any]] = []
 
     async def run(
@@ -2147,6 +2151,169 @@ class ProposalPipeline:
             sections=extract_sections(html_content),
         )
 
+    # ── Post-meeting summary generation (4 parallel LLM calls) ──────────────────
+
+    def _llm_opts(self, max_tokens: int) -> dict[str, Any]:
+        opts: dict[str, Any] = {"model": self.model, "response_format": {"type": "json_object"}}
+        if self.model.startswith(("gpt-5", "o1", "o3", "o4")):
+            opts["max_completion_tokens"] = max_tokens
+        else:
+            opts["max_tokens"] = max_tokens
+            opts["temperature"] = 0.1
+        return opts
+
+    def _summary_llm_sync(self, transcript_text: str) -> dict[str, Any]:
+        client = self._get_cerebras()
+        response = client.chat.completions.create(
+            **self._llm_opts_cerebras(600),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract a concise executive summary from this meeting transcript. "
+                        "Return JSON only: {\"title\": string, \"summary\": string, \"key_topics\": string[]}. "
+                        "title: 4-8 word meeting title. "
+                        "summary: 2-4 sentences capturing the main outcome. "
+                        "key_topics: up to 8 short topic labels."
+                    ),
+                },
+                {"role": "user", "content": transcript_text},
+            ],
+        )
+        return json.loads(response.choices[0].message.content or "{}")
+
+    def _decisions_llm_sync(self, transcript_text: str) -> list[str]:
+        client = self._get_cerebras()
+        response = client.chat.completions.create(
+            **self._llm_opts_cerebras(400),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "List every concrete decision made in this meeting transcript. "
+                        "Return JSON only: {\"decisions\": string[]}. "
+                        "Each decision is one clear sentence. Omit vague discussion."
+                    ),
+                },
+                {"role": "user", "content": transcript_text},
+            ],
+        )
+        data = json.loads(response.choices[0].message.content or "{}")
+        return [str(d) for d in (data.get("decisions") or []) if d]
+
+    def _action_items_llm_sync(self, transcript_text: str) -> list[dict[str, Any]]:
+        client = self._get_cerebras()
+        response = client.chat.completions.create(
+            **self._llm_opts_cerebras(500),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract every action item from this meeting transcript. "
+                        "Return JSON only: {\"action_items\": [{\"description\": string, \"owner\": string|null, \"due\": string|null}]}. "
+                        "description: what needs to be done. owner: person responsible (null if unassigned). due: deadline if mentioned (null otherwise)."
+                    ),
+                },
+                {"role": "user", "content": transcript_text},
+            ],
+        )
+        data = json.loads(response.choices[0].message.content or "{}")
+        return [
+            {
+                "description": str(item.get("description") or ""),
+                "owner": item.get("owner") or None,
+                "due": item.get("due") or None,
+            }
+            for item in (data.get("action_items") or [])
+            if item.get("description")
+        ]
+
+    def _mom_llm_sync(self, transcript_text: str) -> list[dict[str, Any]]:
+        client = self._get_cerebras()
+        response = client.chat.completions.create(
+            **self._llm_opts_cerebras(700),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate minutes of meeting from this transcript. "
+                        "Return JSON only: {\"mom\": [{\"topic\": string, \"summary\": string}]}. "
+                        "Each entry covers one distinct topic discussed. "
+                        "summary: 1-3 sentences capturing what was said and decided."
+                    ),
+                },
+                {"role": "user", "content": transcript_text},
+            ],
+        )
+        data = json.loads(response.choices[0].message.content or "{}")
+        return [
+            {"topic": str(item.get("topic") or ""), "summary": str(item.get("summary") or "")}
+            for item in (data.get("mom") or [])
+            if item.get("topic")
+        ]
+
+    async def generate_meeting_summary(
+        self,
+        session_id: str,
+        transcript: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Fire 4 parallel OpenAI calls immediately after meeting ends.
+
+        Runs summary, decisions, action items, and MOM extraction concurrently
+        so the summary page is populated as fast as a single call would take.
+        """
+        transcript_text = format_transcript(transcript)
+        if not transcript_text:
+            return self.summary_response(session_id, None, transcript)
+
+        summary_result, decisions_result, action_items_result, mom_result = await asyncio.gather(
+            asyncio.to_thread(self._summary_llm_sync, transcript_text),
+            asyncio.to_thread(self._decisions_llm_sync, transcript_text),
+            asyncio.to_thread(self._action_items_llm_sync, transcript_text),
+            asyncio.to_thread(self._mom_llm_sync, transcript_text),
+            return_exceptions=True,
+        )
+
+        summary_data: dict[str, Any] = summary_result if not isinstance(summary_result, BaseException) else {}
+        decisions: list[str] = decisions_result if not isinstance(decisions_result, BaseException) else []
+        action_items: list[dict] = action_items_result if not isinstance(action_items_result, BaseException) else []
+        mom: list[dict] = mom_result if not isinstance(mom_result, BaseException) else []
+
+        if isinstance(summary_result, BaseException):
+            logger.warning("Summary LLM call failed: %s", summary_result)
+        if isinstance(decisions_result, BaseException):
+            logger.warning("Decisions LLM call failed: %s", decisions_result)
+        if isinstance(action_items_result, BaseException):
+            logger.warning("Action items LLM call failed: %s", action_items_result)
+        if isinstance(mom_result, BaseException):
+            logger.warning("MOM LLM call failed: %s", mom_result)
+
+        participants = sorted({
+            str(entry.get("participant") or entry.get("speaker") or "").strip()
+            for entry in transcript
+            if str(entry.get("participant") or entry.get("speaker") or "").strip()
+        })
+
+        today = dt.datetime.now(dt.UTC).strftime("%B %d, %Y")
+        return {
+            "title": summary_data.get("title") or f"Meeting {session_id[:8]}",
+            "session_id": session_id,
+            "date": today,
+            "summary": summary_data.get("summary") or "",
+            "key_topics": summary_data.get("key_topics") or [],
+            "action_items": action_items,
+            "decisions": decisions,
+            "participants": participants,
+            "mom": mom,
+            "transcript_highlights": transcript_highlights(transcript),
+            "stats": {
+                "transcript_entries": len(transcript),
+                "topic_count": len(summary_data.get("key_topics") or []),
+                "decision_count": len(decisions),
+                "action_item_count": len(action_items),
+            },
+        }
+
     def summary_response(
         self,
         session_id: str,
@@ -2179,6 +2346,20 @@ class ProposalPipeline:
         if self._openai is None:
             self._openai = OpenAI()
         return self._openai
+
+    def _get_cerebras(self) -> OpenAI:
+        if self._cerebras is None:
+            api_key = os.getenv("CEREBRAS_API_KEY", "")
+            self._cerebras = OpenAI(api_key=api_key, base_url=self._CEREBRAS_BASE_URL)
+        return self._cerebras
+
+    def _llm_opts_cerebras(self, max_tokens: int) -> dict[str, Any]:
+        return {
+            "model": self._CEREBRAS_MODEL,
+            "response_format": {"type": "json_object"},
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+        }
 
     @property
     def client(self) -> HybridConfluenceClient:

@@ -262,37 +262,58 @@ class Assistant(Agent):
         # LiveKit re-enters the agent, triggering on_enter() again — causing the agent
         # to answer without a wake word. Overriding with a no-op disables this.
 
-        # One-time opening greeting. LiveKit can re-trigger on_enter() after an
-        # interruption, so the flag ensures we only greet once per session.
+        # One-time opening greeting. Run it in parallel with GitHub MCP setup so
+        # both finish before the user can speak — preventing the first LLM call
+        # from blocking on an unready toolset.
         if not self._greeted:
             self._greeted = True
             greeting = self._build_greeting()
             self._opening_greeting_task = asyncio.create_task(
-                self._play_opening_greeting(greeting),
+                self._play_opening_greeting_and_warmup(greeting),
                 name="opening_greeting",
             )
 
-        # Pre-warm the GitHub MCP server the moment the session opens so the
-        # npx/Node subprocess is fully connected before the user's first question.
-        # Runs in the background — does not block the agent from being ready.
-        if self._github_toolset:
-            asyncio.create_task(
-                self._github_toolset.setup(), name="github_mcp_prewarm"
-            )
+    async def _play_opening_greeting_and_warmup(self, greeting: str) -> None:
+        """Play the opening greeting and warm up the GitHub MCP subprocess in parallel.
 
-    async def _play_opening_greeting(self, greeting: str) -> None:
-        """Delay first speech so the Recall browser has time to attach playback."""
-        if _OPENING_GREETING_DELAY_S > 0:
-            await asyncio.sleep(_OPENING_GREETING_DELAY_S)
-        try:
-            handle = self.session.say(
-                greeting,
-                add_to_chat_ctx=False,
-                allow_interruptions=False,
-            )
-            await handle.wait_for_playout()
-        except Exception as exc:
-            logger.warning("Opening greeting failed: %s", exc)
+        Both tasks run concurrently so the npx cold-start happens during the
+        greeting audio — by the time the user can speak, the toolset is ready
+        and the first LLM call doesn't block waiting for it.
+        """
+        async def _greet() -> None:
+            if _OPENING_GREETING_DELAY_S > 0:
+                await asyncio.sleep(_OPENING_GREETING_DELAY_S)
+            try:
+                # Send a silent pre-roll first. This warms up the TTS HTTP
+                # connection and pre-fills the audio buffer so the Recall
+                # browser's audio pipeline is stable before the first audible
+                # word. Without this, the cold TTS connection + thin initial
+                # buffer causes the first 2-3 words to sound choppy.
+                pre_roll = self.session.say(
+                    "...",
+                    add_to_chat_ctx=False,
+                    allow_interruptions=False,
+                )
+                await pre_roll.wait_for_playout()
+                handle = self.session.say(
+                    greeting,
+                    add_to_chat_ctx=False,
+                    allow_interruptions=False,
+                )
+                await handle.wait_for_playout()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Opening greeting failed: %s", exc)
+
+        async def _warmup_mcp() -> None:
+            if not self._github_toolset:
+                return
+            try:
+                await self._github_toolset.setup()
+                logger.info("GitHub MCP toolset ready")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GitHub MCP prewarm failed: %s", exc)
+
+        await asyncio.gather(_greet(), _warmup_mcp())
 
     async def stt_node(
         self,
@@ -424,7 +445,11 @@ class Assistant(Agent):
         if reply:
             labelled = f"Jarvis: {reply}"
             self._transcript.append(labelled)
-            self._transcript_memory.observe_utterance(labelled)
+            # observe_utterance can trigger a blocking LLM compaction call; run it
+            # in a thread so it never stalls the event loop between turns.
+            asyncio.create_task(
+                asyncio.to_thread(self._transcript_memory.observe_utterance, labelled)
+            )
             self._post_transcript(reply, speaker="Jarvis")
 
     def _refresh_transcript_in_ctx(

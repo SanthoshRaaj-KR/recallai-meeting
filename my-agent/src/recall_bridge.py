@@ -97,6 +97,11 @@ _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if
 
 _BOT_HTML_PATH = Path(__file__).parent / "bot.html"
 
+# Cerebras — same model as the live Jarvis agent, OpenAI-compatible API.
+_CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+_CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+_CHAT_MODEL = "gpt-oss-120b"
+
 # ── App setup ──────────────────────────────────────────────────────────────────
 app = FastAPI(title="Recall.ai Bridge for my-agent")
 
@@ -443,6 +448,23 @@ def _session_for_bot(bot_id: str) -> "_SessionRecord | None":
     return next((s for s in _sessions.values() if s.bot_id == bot_id), None)
 
 
+async def _auto_generate_summary(session_id: str) -> None:
+    """Fire 4 parallel OpenAI calls immediately after the meeting ends.
+
+    Triggered by both the Recall webhook and the manual stop-bot endpoint so
+    the summary page is populated before the user even navigates to it.
+    """
+    s = _sessions.get(session_id)
+    if s is None or s.summary or not s.transcript:
+        return
+    logger.info("Auto-generating meeting summary for session %s (%d transcript entries)", session_id, len(s.transcript))
+    try:
+        s.summary = await _pipeline().generate_meeting_summary(session_id, s.transcript)
+        logger.info("Summary ready for session %s", session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Background summary generation failed for %s: %s", session_id, exc)
+
+
 @app.post("/recall-webhook")
 async def recall_webhook(request: Request) -> dict:
     """Receive Recall.ai project-level webhook events.
@@ -476,6 +498,8 @@ async def recall_webhook(request: Request) -> dict:
                     s.ended_at = _utcnow()
                 s._touch()
                 logger.info("Recall webhook %s → session %s status=%s", event, s.session_id, new_status)
+                if new_status == "ended":
+                    asyncio.create_task(_auto_generate_summary(s.session_id))
         return {"ok": True}
 
     # bot.participant_events: track current speaker for per-participant transcript attribution
@@ -691,29 +715,54 @@ async def get_summary(session_id: str) -> dict:
 
 @app.post("/sessions/{session_id}/review/chat")
 async def chat_with_meeting(session_id: str, body: ChatBody) -> dict:
-    """
-    Answer a question about the meeting using its transcript + summary.
+    """Answer a question about the meeting using Cerebras (same model as live Jarvis)."""
+    from openai import AsyncOpenAI
 
-    Lightweight transcript-grounded chat endpoint.
-    """
     s = _require_session(session_id)
-    last_user = next(
-        (m.get("content", "") for m in reversed(body.messages) if m.get("role") == "user"),
-        "",
+
+    # Build full transcript text so the model has complete context.
+    transcript_lines = [
+        f"{e.get('participant') or e.get('speaker') or 'Speaker'}: {e.get('text', '')}"
+        for e in s.transcript
+        if e.get('text', '').strip()
+    ]
+    transcript_text = "\n".join(transcript_lines) or "No transcript captured yet."
+
+    # Include summary context if already generated.
+    summary_ctx = ""
+    if s.summary:
+        summary_ctx = (
+            f"\nMeeting summary: {s.summary.get('summary', '')}"
+            f"\nKey decisions: {'; '.join(s.summary.get('decisions', []))}"
+            f"\nAction items: {'; '.join(item.get('description', '') for item in s.summary.get('action_items', []))}"
+        )
+
+    system_prompt = (
+        "You are a meeting assistant. Answer questions about the meeting below. "
+        "Be concise and accurate. Only use information from the transcript."
+        f"{summary_ctx}"
+        f"\n\n[Full transcript]\n{transcript_text}"
     )
-    recent = "\n".join(f"{e.get('participant', 'Speaker')}: {e.get('text', '')}" for e in s.transcript[-20:])
-    return {
-        "answer": (
-            f"I found {len(s.transcript)} transcript entries for this meeting. "
-            f"Most recent context: {recent[-600:] or 'no transcript captured yet.'}"
-        ),
-        "session_id": session_id,
-        "context": {
-            "transcript_entries": len(s.transcript),
-            "has_summary": s.summary is not None,
-            "last_question": last_user,
-        },
-    }
+
+    # Prepend system message; pass through the user's conversation history.
+    messages = [{"role": "system", "content": system_prompt}] + [
+        {"role": m["role"], "content": m["content"]}
+        for m in body.messages
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
+
+    if not _CEREBRAS_API_KEY:
+        return {"answer": "Chat is not configured — CEREBRAS_API_KEY is missing.", "session_id": session_id}
+
+    client = AsyncOpenAI(api_key=_CEREBRAS_API_KEY, base_url=_CEREBRAS_BASE_URL)
+    response = await client.chat.completions.create(
+        model=_CHAT_MODEL,
+        messages=messages,
+        max_tokens=512,
+        temperature=0.2,
+    )
+    answer = response.choices[0].message.content or ""
+    return {"answer": answer, "session_id": session_id}
 
 
 # ── Endpoints: review — regenerate proposal ────────────────────────────────────
@@ -884,6 +933,7 @@ async def stop_bot(session_id: str) -> dict:
     if not s.ended_at:
         s.ended_at = _utcnow()
     s._touch()
+    asyncio.create_task(_auto_generate_summary(s.session_id))
     return s.as_session_status()
 
 
