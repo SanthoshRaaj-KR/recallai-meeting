@@ -1,0 +1,7 @@
+fastapi>=0.111
+uvicorn[standard]>=0.29
+requests>=2.31
+python-dotenv
+pydantic[email]>=2.0
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7
