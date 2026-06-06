@@ -1,6 +1,9 @@
 """Team CRUD + member management routes."""
 
 import datetime
+import logging
+import secrets
+
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..auth import get_current_user, verify_admin_secret
@@ -8,9 +11,12 @@ from ..database import select, select_one, insert, update, delete, DBError
 from ..models import (
     TeamCreate, TeamOut, TeamUpdate,
     AddMemberRequest, RemoveMemberRequest, MemberOut, UserOut,
+    TeamInviteCreate, TeamInviteOut,
     OrgRole, TeamRole,
 )
 from ..rbac import require_ceo, require_manager_or_above
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/teams", tags=["teams"])
 
@@ -172,6 +178,60 @@ def remove_member(team_id: str, user_id: str, body: RemoveMemberRequest, claims:
     # Remove from hierarchy
     delete("org_reporting_hierarchy", {"descendant_id": f"eq.{user_id}"})
     delete("org_reporting_hierarchy", {"ancestor_id": f"eq.{user_id}", "depth": "gt.0"})
+
+
+@router.post("/{team_id}/invite", response_model=TeamInviteOut, status_code=status.HTTP_201_CREATED)
+def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(get_current_user)):
+    """CEO or team manager: send an email invite to join this team."""
+    team = select_one("org_teams", {"id": f"eq.{team_id}"})
+    if not team:
+        raise HTTPException(404, "Team not found")
+    if claims["role"] != OrgRole.CEO and not _is_team_manager(team_id, claims["sub"]):
+        raise HTTPException(403, "Only team manager or CEO can invite members")
+    if body.role not in (TeamRole.MANAGER, TeamRole.MEMBER, TeamRole.ASSOCIATE):
+        raise HTTPException(400, f"Invalid team role: {body.role}")
+
+    code = secrets.token_hex(3).upper()  # 6-char hex e.g. "A3F0C2"
+    expires_at = (
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=48)
+    ).isoformat()
+
+    inviter = select_one("org_users", {"id": f"eq.{claims['sub']}"})
+    inviter_name = inviter["name"] if inviter else "A team admin"
+
+    try:
+        row = insert("org_team_invitations", {
+            "team_id": team_id,
+            "email": body.email,
+            "role": body.role,
+            "code": code,
+            "status": "pending",
+            "inviter_id": claims["sub"],
+            "expires_at": expires_at,
+        })
+    except DBError as e:
+        raise HTTPException(500, str(e))
+
+    try:
+        from ..email import send_invite_email
+        send_invite_email(body.email, team["name"], inviter_name, code, body.role)
+    except Exception as exc:
+        logger.warning("[invite] Email delivery failed (invite code still valid): %s", exc)
+
+    existing = select_one("org_users", {"email": f"eq.{body.email}"})
+    return TeamInviteOut(
+        id=row["id"],
+        team_id=team_id,
+        email=body.email,
+        role=body.role,
+        code=code,
+        status="pending",
+        inviter_id=claims["sub"],
+        created_at=row["created_at"],
+        expires_at=expires_at,
+        team_name=team["name"],
+        user_exists=existing is not None,
+    )
 
 
 def _wire_hierarchy(team_id: str, user_id: str, team_role: str) -> None:

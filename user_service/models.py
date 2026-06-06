@@ -136,6 +136,32 @@ class BotOut(BaseModel):
     created_at: str
 
 
+# ── Invite models ─────────────────────────────────────────────────────────────
+
+class TeamInviteCreate(BaseModel):
+    email: str
+    role: str = TeamRole.MEMBER
+
+
+class TeamInviteOut(BaseModel):
+    id: str
+    team_id: str
+    email: str
+    role: str
+    code: str
+    status: str
+    inviter_id: Optional[str]
+    created_at: str
+    expires_at: str
+    team_name: Optional[str] = None
+    user_exists: bool = False
+
+
+class AcceptInviteRequest(BaseModel):
+    name: Optional[str] = None
+    password: Optional[str] = None
+
+
 # ── Hierarchy models ───────────────────────────────────────────────────────────
 
 class HierarchyNode(BaseModel):

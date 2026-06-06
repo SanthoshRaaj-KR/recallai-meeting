@@ -62,6 +62,7 @@ from .routes.users import router as users_router
 from .routes.teams import router as teams_router
 from .routes.hierarchy import router as hierarchy_router
 from .routes.bots import router as bots_router
+from .routes.invites import router as invites_router
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 
@@ -88,6 +89,7 @@ app.include_router(users_router)
 app.include_router(teams_router)
 app.include_router(hierarchy_router)
 app.include_router(bots_router)
+app.include_router(invites_router)
 
 
 @app.get("/health")
