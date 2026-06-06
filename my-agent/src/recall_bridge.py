@@ -101,6 +101,7 @@ _BOT_HTML_PATH = Path(__file__).parent / "bot.html"
 _CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
 _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 _CHAT_MODEL = "gpt-oss-120b"
+_OPENAI_FALLBACK_MODEL = os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini")
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 app = FastAPI(title="Recall.ai Bridge for my-agent")
@@ -704,10 +705,20 @@ async def propose_changes(session_id: str, body: ProposeBody) -> dict:
 
 @app.get("/sessions/{session_id}/review/summary")
 async def get_summary(session_id: str) -> dict:
-    """Return the meeting summary (MoM, decisions, action items, etc.)."""
+    """Return the meeting summary (MoM, decisions, action items, etc.).
+
+    If no LLM-generated summary exists yet but a transcript is available,
+    generates it on-demand (same 4 parallel Cerebras calls as the background task).
+    """
     s = _require_session(session_id)
     if s.summary:
         return s.summary
+    if s.transcript:
+        try:
+            s.summary = await _pipeline().generate_meeting_summary(session_id, s.transcript)
+            return s.summary
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("On-demand summary generation failed for %s: %s", session_id, exc)
     return _pipeline().summary_response(session_id, None, s.transcript)
 
 
@@ -754,15 +765,38 @@ async def chat_with_meeting(session_id: str, body: ChatBody) -> dict:
     if not _CEREBRAS_API_KEY:
         return {"answer": "Chat is not configured — CEREBRAS_API_KEY is missing.", "session_id": session_id}
 
-    client = AsyncOpenAI(api_key=_CEREBRAS_API_KEY, base_url=_CEREBRAS_BASE_URL)
-    response = await client.chat.completions.create(
-        model=_CHAT_MODEL,
-        messages=messages,
-        max_tokens=512,
-        temperature=0.2,
-    )
-    answer = response.choices[0].message.content or ""
-    return {"answer": answer, "session_id": session_id}
+    last_exc: Exception | None = None
+    cerebras_client = AsyncOpenAI(api_key=_CEREBRAS_API_KEY, base_url=_CEREBRAS_BASE_URL)
+    for attempt in range(3):
+        try:
+            response = await cerebras_client.chat.completions.create(
+                model=_CHAT_MODEL,
+                messages=messages,
+                max_tokens=512,
+                temperature=0.2,
+            )
+            answer = response.choices[0].message.content or ""
+            return {"answer": answer, "session_id": session_id}
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+
+    # Cerebras unavailable — fall back to OpenAI.
+    logger.warning("Cerebras chat failed after 3 attempts (%s); falling back to OpenAI for session %s", last_exc, session_id)
+    try:
+        openai_client = AsyncOpenAI()  # uses OPENAI_API_KEY from env
+        response = await openai_client.chat.completions.create(
+            model=_OPENAI_FALLBACK_MODEL,
+            messages=messages,
+            max_tokens=512,
+            temperature=0.2,
+        )
+        answer = response.choices[0].message.content or ""
+        return {"answer": answer, "session_id": session_id}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("OpenAI fallback also failed for session %s: %s", session_id, exc)
+        return {"answer": "Both Cerebras and OpenAI are unavailable right now. Please try again shortly.", "session_id": session_id}
 
 
 # ── Endpoints: review — regenerate proposal ────────────────────────────────────

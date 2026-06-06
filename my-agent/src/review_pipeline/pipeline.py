@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from memory_compaction import add_memory_context
 
@@ -115,6 +115,7 @@ class ProposalPipeline:
             meeting=meeting,
             intent_pages=intent_pages,
             query=query,
+            allow_new_pages=False,
         )
 
         await _emit({"type": "stage_start", "stage": "verification"})
@@ -268,28 +269,28 @@ class ProposalPipeline:
             for page in style_pages[:4]
         ]
         prompt = (
-            "Draft a new Confluence page strictly about the topic specified in user_request. "
-            "The user_request defines the EXACT topic and scope — do not document anything from the "
-            "meeting that is not directly related to it. The transcript is a source to extract "
-            "relevant details from, not a dump to document wholesale.\n\n"
-            "Step 1 — Identify the topic: read user_request carefully. That topic is the ONLY subject "
-            "of this page. Everything else discussed in the meeting is irrelevant and must be omitted.\n\n"
+            "You are drafting a new Confluence page from a meeting transcript.\n\n"
+            "Step 1 — Determine the page subject:\n"
+            "  • If user_request names a SPECIFIC topic (e.g. 'Nova framework', 'Q3 roadmap', "
+            "'onboarding checklist') — that topic is the sole subject of the page.\n"
+            "  • If user_request is a GENERIC instruction (e.g. 'create a page from the meeting', "
+            "'document what we discussed', 'propose updates') — ignore the instruction wording and "
+            "instead derive the subject from the meeting's actual content: its decisions, key topics, "
+            "and action items. Do NOT write a page about the act of requesting a page.\n\n"
             "Step 2 — Infer style from same_space_style_samples: heading depth, section order, tone, "
             "bullets vs paragraphs, tables, and how concise the pages are. Write the new page in that style.\n\n"
-            "Step 3 — Extract only on-topic facts from the transcript. Ignore off-topic segments entirely.\n\n"
+            "Step 3 — Extract relevant facts from the transcript. Include decisions made, action items "
+            "assigned, and key conclusions. Do NOT document process meta-commentary or the discussion "
+            "about creating this page.\n\n"
             "Return JSON only with: title, body_markdown, rationale. body_markdown must be publishable "
             "page content using markdown-ish syntax: ## headings, ### subheadings, bullet lists, "
             "numbered steps, and simple tables if useful. If an image/diagram would help, insert a "
             "placeholder line like '[IMAGE PLACEHOLDER: describe the exact image needed]'. "
-            "Do not invent facts beyond the transcript/request. If details are missing, include a "
-            "short 'Open questions' section instead of guessing."
+            "Do not invent facts beyond the transcript. If details are missing, include a short "
+            "'Open questions' section instead of guessing."
         )
         payload = {
             "user_request": query,
-            "page_topic_scope": (
-                f"This page must ONLY cover: {query}. "
-                "Ignore all meeting content that is not directly about this topic."
-            ),
             "title_hint": title_hint,
             "meeting": {
                 "title": meeting.title,
@@ -1190,6 +1191,7 @@ class ProposalPipeline:
         meeting: ExtractedMeeting,
         intent_pages: list[tuple[ChangeIntent, list[PageCandidate]]],
         query: str | None,
+        allow_new_pages: bool = True,
     ) -> list[dict[str, Any]]:
         """Phase 1 (sync): deterministic drafting — skip section-level LLM refinements.
         Phase 2 (sync, parallel-ready): run collected section-level drafts and apply.
@@ -1205,6 +1207,8 @@ class ProposalPipeline:
         for intent, pages in intent_pages:
             action = (intent.action or "replace").lower()
             if action == "create" or (not pages and action in {"create", "add"}):
+                if not allow_new_pages:
+                    continue
                 proposals.append(self._create_page_proposal(session_id, intent, now, query))
                 continue
 
@@ -2261,36 +2265,124 @@ class ProposalPipeline:
         session_id: str,
         transcript: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Fire 4 parallel OpenAI calls immediately after meeting ends.
+        """Fire 4 parallel Cerebras calls immediately after meeting ends.
 
-        Runs summary, decisions, action items, and MOM extraction concurrently
-        so the summary page is populated as fast as a single call would take.
+        Uses AsyncOpenAI directly (same pattern as the chat interface) so calls
+        are native async — no thread pool overhead or sync-client quirks.
         """
         transcript_text = format_transcript(transcript)
         if not transcript_text:
             return self.summary_response(session_id, None, transcript)
 
+        api_key = os.getenv("CEREBRAS_API_KEY", "")
+        if not api_key:
+            logger.warning("CEREBRAS_API_KEY not set — falling back to heuristic summary for session %s", session_id)
+            return self.summary_response(session_id, None, transcript)
+
+        cerebras_client = AsyncOpenAI(api_key=api_key, base_url=self._CEREBRAS_BASE_URL)
+        openai_fallback = AsyncOpenAI()  # uses OPENAI_API_KEY from env
+        openai_fallback_model = os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini")
+
+        async def _call(system: str, max_tokens: int) -> str:
+            msgs = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": transcript_text},
+            ]
+            last_exc: Exception | None = None
+            for attempt in range(3):
+                try:
+                    resp = await cerebras_client.chat.completions.create(
+                        model=self._CEREBRAS_MODEL,
+                        temperature=0.1,
+                        max_tokens=max_tokens,
+                        messages=msgs,
+                    )
+                    content = resp.choices[0].message.content or ""
+                    # If empty or unparseable, retry — don't surface a parse error.
+                    if content.strip():
+                        try:
+                            json.loads(content)
+                            return content
+                        except json.JSONDecodeError:
+                            pass
+                    logger.warning("Cerebras returned empty/invalid JSON on attempt %d; retrying", attempt + 1)
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+
+            # Cerebras failed — fall back to OpenAI.
+            logger.warning("Cerebras summary call failed (%s); falling back to OpenAI", last_exc)
+            resp = await openai_fallback.chat.completions.create(
+                model=openai_fallback_model,
+                temperature=0.1,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                messages=msgs,
+            )
+            return resp.choices[0].message.content or ""
+
         summary_result, decisions_result, action_items_result, mom_result = await asyncio.gather(
-            asyncio.to_thread(self._summary_llm_sync, transcript_text),
-            asyncio.to_thread(self._decisions_llm_sync, transcript_text),
-            asyncio.to_thread(self._action_items_llm_sync, transcript_text),
-            asyncio.to_thread(self._mom_llm_sync, transcript_text),
+            _call(
+                "You are an expert meeting analyst. Produce an executive summary from the meeting transcript below.\n\n"
+                "Return JSON only: {\"title\": string, \"summary\": string, \"key_topics\": string[]}.\n\n"
+                "title: a crisp 4-8 word title that captures the meeting's core purpose.\n\n"
+                "summary: exactly 2 paragraphs, each 2-3 sentences. "
+                "Paragraph 1 — context and objective: what the meeting was about and why it was called. "
+                "Paragraph 2 — outcomes and next steps: the main decisions reached, agreements made, and immediate actions committed to. "
+                "Write in plain, professional prose. No bullet points. No headers. No fluff. "
+                "Separate the two paragraphs with a single blank line (\\n\\n).\n\n"
+                "key_topics: up to 8 short noun-phrase labels for the main topics discussed.",
+                800,
+            ),
+            _call(
+                "List every concrete decision made in this meeting transcript. "
+                "Return JSON only: {\"decisions\": string[]}. "
+                "Each decision is one clear sentence. Omit vague discussion.",
+                400,
+            ),
+            _call(
+                "Extract every action item from this meeting transcript. "
+                "Return JSON only: {\"action_items\": [{\"description\": string, \"owner\": string|null, \"due\": string|null}]}. "
+                "description: what needs to be done. owner: person responsible (null if unassigned). due: deadline if mentioned (null otherwise).",
+                500,
+            ),
+            _call(
+                "Generate minutes of meeting from this transcript. "
+                "Return JSON only: {\"mom\": [{\"topic\": string, \"summary\": string}]}. "
+                "Each entry covers one distinct topic discussed. "
+                "summary: 1-3 sentences capturing what was said and decided.",
+                700,
+            ),
             return_exceptions=True,
         )
 
-        summary_data: dict[str, Any] = summary_result if not isinstance(summary_result, BaseException) else {}
-        decisions: list[str] = decisions_result if not isinstance(decisions_result, BaseException) else []
-        action_items: list[dict] = action_items_result if not isinstance(action_items_result, BaseException) else []
-        mom: list[dict] = mom_result if not isinstance(mom_result, BaseException) else []
+        def _parse(result: Any, label: str) -> Any:
+            if isinstance(result, BaseException):
+                logger.error("%s Cerebras call failed: %s", label, result, exc_info=result)
+                return None
+            try:
+                return json.loads(result)
+            except Exception as exc:
+                logger.error("%s JSON parse failed: %s — raw: %.200s", label, exc, result)
+                return None
 
-        if isinstance(summary_result, BaseException):
-            logger.warning("Summary LLM call failed: %s", summary_result)
-        if isinstance(decisions_result, BaseException):
-            logger.warning("Decisions LLM call failed: %s", decisions_result)
-        if isinstance(action_items_result, BaseException):
-            logger.warning("Action items LLM call failed: %s", action_items_result)
-        if isinstance(mom_result, BaseException):
-            logger.warning("MOM LLM call failed: %s", mom_result)
+        summary_data: dict[str, Any] = _parse(summary_result, "Summary") or {}
+        decisions_data = _parse(decisions_result, "Decisions") or {}
+        action_items_data = _parse(action_items_result, "Action items") or {}
+        mom_data = _parse(mom_result, "MOM") or {}
+
+        decisions: list[str] = [str(d) for d in (decisions_data.get("decisions") or []) if d]
+        action_items: list[dict] = [
+            {"description": str(item.get("description") or ""), "owner": item.get("owner") or None, "due": item.get("due") or None}
+            for item in (action_items_data.get("action_items") or [])
+            if item.get("description")
+        ]
+        mom: list[dict] = [
+            {"topic": str(item.get("topic") or ""), "summary": str(item.get("summary") or "")}
+            for item in (mom_data.get("mom") or [])
+            if item.get("topic")
+        ]
 
         participants = sorted({
             str(entry.get("participant") or entry.get("speaker") or "").strip()
@@ -2358,9 +2450,9 @@ class ProposalPipeline:
         return self._cerebras
 
     def _llm_opts_cerebras(self, max_tokens: int) -> dict[str, Any]:
+        # Cerebras does not support response_format; JSON is enforced via the prompt.
         return {
             "model": self._CEREBRAS_MODEL,
-            "response_format": {"type": "json_object"},
             "max_tokens": max_tokens,
             "temperature": 0.1,
         }

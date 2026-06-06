@@ -43,12 +43,42 @@ def format_transcript(transcript: list[dict[str, Any]], max_chars: int = 60000) 
     return f"{head}\n[... middle of transcript omitted ...]\n{tail}"
 
 
-def transcript_highlights(transcript: list[dict[str, Any]], limit: int = 6) -> list[dict[str, str]]:
+def _format_relative_time(seconds: float) -> str:
+    """Convert elapsed seconds into a human-readable meeting-relative label."""
+    total = max(0, int(seconds))
+    minutes, secs = divmod(total, 60)
+    if minutes == 0:
+        return f"{secs}s"
+    return f"{minutes}m {secs:02d}s"
+
+
+def transcript_highlights(transcript: list[dict[str, Any]], limit: int = 500) -> list[dict[str, str]]:
+    # Determine meeting start from the earliest timestamp in the full transcript.
+    start_ts: float | None = None
+    for entry in transcript:
+        ts = entry.get("timestamp")
+        try:
+            ts_f = float(ts)
+            if ts_f > 0 and (start_ts is None or ts_f < start_ts):
+                start_ts = ts_f
+        except (TypeError, ValueError):
+            pass
+
     highlights = []
     for idx, entry in enumerate(transcript[-limit:]):
+        ts = entry.get("timestamp")
+        try:
+            ts_f = float(ts)
+            if ts_f > 0 and start_ts is not None:
+                time_label = _format_relative_time(ts_f - start_ts)
+            else:
+                time_label = "--"
+        except (TypeError, ValueError):
+            time_label = "--"
+
         highlights.append(
             {
-                "time": str(entry.get("timestamp") or idx),
+                "time": time_label,
                 "speaker": str(entry.get("participant") or entry.get("speaker") or "Speaker"),
                 "text": normalize_ws(str(entry.get("text") or "")),
             }
