@@ -1,18 +1,14 @@
 """
-Recall.ai Bridge for my-agent LiveKit integration.
+Confluence Service — port 8001.
 
-This FastAPI server bridges Recall.ai meeting bots to the my-agent LiveKit agent
-and exposes all endpoints consumed by the sync-sage-bot frontend.
+Handles all meeting intelligence: proposal generation, Confluence writes,
+meeting summary / MOM, and post-meeting chat.  Bot lifecycle (start/stop/
+status) lives in bot_service.py on port 8000.
 
-Architecture:
-  1. POST /bot/start           → creates a Recall.ai bot that joins the given meeting URL
-  2. Recall bot loads GET /bot-page via output_media.camera.kind=webpage
-  3. bot-page (bot.html) connects to LiveKit in two rooms:
-       Publisher  → joins as "recall-browser-{room_name}", publishes meeting audio
-       Subscriber → plays back agent TTS audio into the meeting via <audio> element
-  4. my-agent AgentSession subscribes ONLY to "recall-browser-{room_name}" for STT,
-     so it hears the mixed meeting audio (all participants combined).
+Session state is read from the shared Supabase store (session_store.py) so
+both services see the same data regardless of which process wrote it.
 
+<<<<<<< HEAD
 Frontend endpoints (sync-sage-bot):
   GET  /health                                      Bridge health check
   POST /bot/start                                   Start Recall bot + dispatch agent
@@ -46,6 +42,15 @@ Optional:
     CONFLUENCE_LOGIC_URL   internal URL of the jarvis_agentic service (default: http://localhost:8001)
                            Set this to the Azure internal service DNS name when deploying on separate pods
                            e.g. http://confluence-logic-service:8001
+=======
+Run:
+    uv run uvicorn src.recall_bridge:app --host 0.0.0.0 --port 8001
+
+Required env vars (.env.local):
+    OPENAI_API_KEY (or CEREBRAS_API_KEY)
+    ATLASSIAN_USER_EMAIL, ATLASSIAN_API_TOKEN, ATLASSIAN_DOMAIN
+    SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  (shared session persistence)
+>>>>>>> confluence
 """
 
 import asyncio
@@ -58,22 +63,18 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Optional
 
-import requests
-from pathlib import Path
-
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
-from livekit import api as livekit_api
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 try:
     from .review_pipeline import ProposalPipeline
-    from .memory_compaction import TranscriptCompactor
-except ImportError:  # Allows `uvicorn recall_bridge:app` from my-agent/src.
+    from . import session_store
+except ImportError:
     from review_pipeline import ProposalPipeline
-    from memory_compaction import TranscriptCompactor
+    import session_store
 
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
@@ -81,23 +82,14 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-RECALL_API_KEY = os.getenv("RECALL_API_KEY", "")
-RECALL_API_REGION = os.getenv("RECALL_API_REGION", "us-west-2")
-RECALL_BASE_URL = f"https://{RECALL_API_REGION}.recall.ai/api/v1"
-
-LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
-LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "")
-LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
-
-# Public HTTPS URL of this server — Recall requires HTTPS for output_media URLs.
-SERVER_URL = os.getenv("BRIDGE_SERVER_URL", "").rstrip("/")
-
-BOT_NAME = os.getenv("BOT_NAME", "Meeting Assistant")
-AGENT_NAME = os.getenv("AGENT_NAME", "my-agent")
-TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "8"))
+_CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+_CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+_CHAT_MODEL = "gpt-oss-120b"
+_OPENAI_FALLBACK_MODEL = os.getenv("JARVIS_GENERAL_MODEL", "gpt-4o-mini")
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 
+<<<<<<< HEAD
 # URL of the jarvis_agentic (confluence logic) service.
 # When both services run on the same host this is http://localhost:8001.
 # In Azure set this to the internal service DNS, e.g. http://confluence-logic:8001.
@@ -107,7 +99,13 @@ _BOT_HTML_PATH = Path(__file__).parent / "bot.html"
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 app = FastAPI(title="Recall.ai Bridge for my-agent")
+=======
+# In-process pipeline job registry (ephemeral — jobs live only for this request).
+_pipelines: dict[str, dict] = {}
+>>>>>>> confluence
 
+# ── App ────────────────────────────────────────────────────────────────────────
+app = FastAPI(title="Jarvis Confluence Service", version="2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
@@ -117,134 +115,25 @@ app.add_middleware(
 )
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
 def _utcnow() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
-
-
-# ── In-memory session store ────────────────────────────────────────────────────
-
-# Maps session_id (== room_name) → _SessionRecord.
-# Lives in process memory; reset on server restart.
-_sessions: dict[str, "_SessionRecord"] = {}
-# Maps pipeline job_id → pipeline state dict.
-_pipelines: dict[str, dict] = {}
-
-# Recall.ai status_changes code → BotStatus
-_RECALL_STATUS_MAP = {
-    "joining": "joining",
-    "in_call_not_recording": "in_meeting",
-    "in_call_recording": "in_meeting",
-    "done": "ended",
-    "call_ended": "ended",
-    "error": "error",
-}
-
-
-class _SessionRecord:
-    """Lightweight in-memory state for one meeting session."""
-
-    def __init__(self, session_id: str, bot_id: str | None, meeting_url: str | None) -> None:
-        self.session_id = session_id
-        self.bot_id = bot_id
-        self.meeting_url = meeting_url
-        self.status: str = "joining"
-        self.error: str | None = None
-        self.changes: list[dict] = []
-        self.transcript: list[dict] = []
-        self.transcript_memory = TranscriptCompactor(
-            window_size=2000,
-            max_memory_chars=int(os.getenv("JARVIS_BRIDGE_COMPACTED_MEMORY_CHARS", "12000")),
-        )
-        self._change_counter: int = 0
-        self.summary: dict | None = None
-        self.extracted_meeting = None
-        self.pipeline_diagnostics: list[dict] = []
-        self.started_at: str = _utcnow()
-        self.ended_at: str | None = None
-        self.updated_at: str = self.started_at
-
-    def _touch(self) -> None:
-        self.updated_at = _utcnow()
-
-    def refresh_recall_status(self) -> None:
-        """Poll Recall.ai for the live bot status and update self.status in-place."""
-        if not self.bot_id or not RECALL_API_KEY:
-            return
-        try:
-            resp = requests.get(
-                f"{RECALL_BASE_URL}/bot/{self.bot_id}/",
-                headers={"Authorization": f"Token {RECALL_API_KEY}"},
-                timeout=5,
-            )
-            if not resp.ok:
-                return
-            data = resp.json()
-            changes = data.get("status_changes") or []
-            code = changes[-1].get("code", "") if changes else ""
-            new_status = _RECALL_STATUS_MAP.get(code, self.status)
-            if new_status != self.status:
-                self.status = new_status
-                if new_status in ("ended", "error") and not self.ended_at:
-                    self.ended_at = _utcnow()
-                self._touch()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Recall status poll error: %s", exc)
-
-    def as_session_status(self) -> dict:
-        return {
-            "status": self.status,
-            "session_id": self.session_id,
-            "bot_id": self.bot_id,
-            "meeting_url": self.meeting_url,
-            "change_count": len(self.changes),
-            "error": self.error,
-            "ended_at": self.ended_at,
-            "end_reason": None,
-            "recall_status_code": None,
-        }
-
-    def as_history_item(self) -> dict:
-        summary_obj = self.summary or {}
-        return {
-            "session_id": self.session_id,
-            "title": summary_obj.get("title") or f"Meeting {self.session_id[:8]}",
-            "meeting_url": self.meeting_url,
-            "status": self.status,
-            "started_at": self.started_at,
-            "ended_at": self.ended_at,
-            "summary": summary_obj.get("summary"),
-            "change_count": len(self.changes),
-            "stats": {
-                "transcript_entries": len(self.transcript),
-                "topic_count": len(summary_obj.get("key_topics", [])),
-                "decision_count": len(summary_obj.get("decisions", [])),
-                "action_item_count": len(summary_obj.get("action_items", [])),
-            },
-            "updated_at": self.updated_at,
-        }
-
-    def compacted_transcript_context(self) -> str:
-        return self.transcript_memory.memory_text()
-
-
-def _require_session(session_id: str) -> _SessionRecord:
-    s = _sessions.get(session_id)
-    if not s:
-        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
-    return s
 
 
 def _pipeline() -> ProposalPipeline:
     return ProposalPipeline()
 
 
+def _require_session(session_id: str) -> dict:
+    try:
+        return session_store.require(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+
+
 async def _execute_change_dict(change: dict) -> dict:
-    """Execute one proposal and fold exceptions into the API response shape."""
     try:
         result = await _pipeline().execute(change)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Proposal execution failed")
         result = {"success": False, "message": str(exc)}
     change["status"] = "executed" if result.get("success") else "failed"
@@ -254,25 +143,6 @@ async def _execute_change_dict(change: dict) -> dict:
 
 
 # ── Request / response models ──────────────────────────────────────────────────
-
-class StartBotRequest(BaseModel):
-    meeting_url: str
-    room_name: Optional[str] = None
-    session_id: Optional[str] = None  # frontend may pass this
-
-
-class StartBotResponse(BaseModel):
-    status: str
-    bot_id: str
-    room_name: str
-    # session_id mirrors room_name — required by the sync-sage-bot frontend's
-    # SessionStatus interface. Without it, MeetingInput cannot pass the session
-    # to MeetingLive via the URL, causing MeetingLive to see status="idle" and
-    # dispatch a second Recall bot into the same meeting.
-    session_id: str
-    meeting_url: str
-    change_count: int = 0
-
 
 class ExecuteBody(BaseModel):
     ids: Optional[list[int]] = None
@@ -293,24 +163,13 @@ class PipelineStartBody(BaseModel):
     session_id: str
 
 
-# ── LiveKit token minting ──────────────────────────────────────────────────────
+# ── Helpers: persist changes back to session store ────────────────────────────
 
-def _mint_token(room_name: str, identity: str, can_publish: bool = True) -> str:
-    return (
-        livekit_api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
-        .with_identity(identity)
-        .with_name(identity)
-        .with_grants(livekit_api.VideoGrants(
-            room_join=True,
-            room=room_name,
-            can_publish=can_publish,
-            can_subscribe=True,
-        ))
-        .with_ttl(datetime.timedelta(hours=TOKEN_TTL_HOURS))
-        .to_jwt()
-    )
+def _save_changes(session_id: str, changes: list[dict]) -> None:
+    session_store.patch(session_id, {"changes": changes})
 
 
+<<<<<<< HEAD
 # ── Recall bot creation ────────────────────────────────────────────────────────
 
 def _create_recall_bot(meeting_url: str, room_name: str) -> str:
@@ -527,12 +386,21 @@ async def recall_webhook(request: Request) -> dict:
         return {"ok": True}
 
     return {"ok": True}
+=======
+def _save_summary(session_id: str, summary: dict, extracted_meeting: object, diagnostics: list) -> None:
+    session_store.patch(session_id, {
+        "summary": summary,
+        "extracted_meeting": extracted_meeting,
+        "pipeline_diagnostics": diagnostics,
+    })
+>>>>>>> confluence
 
 
 # ── Endpoints: health ──────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health() -> dict:
+<<<<<<< HEAD
     """Bridge health check — called by the frontend to verify connectivity."""
     return {
         "status": "ok",
@@ -608,74 +476,65 @@ async def receive_livekit_transcript(session_id: str, request: Request) -> dict:
         )
     )
     return {"ok": True, "transcript_entries": len(session.transcript)}
+=======
+    return {"status": "ok", "service": "confluence-service"}
+>>>>>>> confluence
 
 
 # ── Endpoints: review — changes ────────────────────────────────────────────────
 
 @app.get("/sessions/{session_id}/review/changes")
 async def list_changes(session_id: str) -> list:
-    """Return all proposed Confluence changes for this session."""
-    return _require_session(session_id).changes
+    return _require_session(session_id).get("changes") or []
 
 
 @app.post("/sessions/{session_id}/review/execute")
 async def execute_changes(session_id: str, body: ExecuteBody) -> dict:
-    """
-    Approve / execute one or more proposed changes.
-
-    Accepts three shapes (matching the three callers in api.ts):
-      - {proposal_id: str}        → executeProposal()
-      - {proposal_ids: [str,...]}  → executeProposalsForPage()
-      - {ids: [int,...]}           → executeChanges()
-    """
     s = _require_session(session_id)
+    changes: list[dict] = list(s.get("changes") or [])
 
     if body.proposal_id is not None:
         pid = str(body.proposal_id)
-        for ch in s.changes:
+        for ch in changes:
             if str(ch.get("id")) == pid:
                 ch["status"] = "executing"
                 result = await _execute_change_dict(ch)
-                s._touch()
+                _save_changes(session_id, changes)
                 return result
         raise HTTPException(status_code=404, detail=f"Proposal {pid!r} not found")
 
     if body.proposal_ids is not None:
         results = []
         for pid in body.proposal_ids:
-            matched = next((ch for ch in s.changes if str(ch.get("id")) == pid), None)
+            matched = next((ch for ch in changes if str(ch.get("id")) == pid), None)
             if matched:
                 matched["status"] = "executing"
                 result = await _execute_change_dict(matched)
-                results.append(
-                    {
-                        "page": matched.get("page_title", pid),
-                        "success": bool(result.get("success")),
-                        "message": result.get("message") or result.get("error"),
-                    }
-                )
+                results.append({
+                    "page": matched.get("page_title", pid),
+                    "success": bool(result.get("success")),
+                    "message": result.get("message") or result.get("error"),
+                })
             else:
                 results.append({"page": pid, "success": False, "message": "Not found"})
-        s._touch()
+        _save_changes(session_id, changes)
         return {"results": results}
 
     if body.ids is not None:
         results = []
         for cid in body.ids:
-            matched = next((ch for ch in s.changes if str(ch.get("id")) == str(cid)), None)
+            matched = next((ch for ch in changes if str(ch.get("id")) == str(cid)), None)
             if matched:
                 matched["status"] = "executing"
                 result = await _execute_change_dict(matched)
-                results.append(
-                    {
-                        "id": cid,
-                        "success": bool(result.get("success")),
-                        "error": None if result.get("success") else result.get("message") or result.get("error"),
-                    }
-                )
+                results.append({
+                    "id": cid,
+                    "success": bool(result.get("success")),
+                    "error": None if result.get("success") else result.get("message") or result.get("error"),
+                })
             else:
                 results.append({"id": cid, "success": False, "error": "Not found"})
-        s._touch()
+        _save_changes(session_id, changes)
         return {"results": results}
 
     raise HTTPException(status_code=422, detail="Provide ids, proposal_id, or proposal_ids")
@@ -685,100 +544,153 @@ async def execute_changes(session_id: str, body: ExecuteBody) -> dict:
 
 @app.post("/sessions/{session_id}/review/changes/propose")
 async def propose_changes(session_id: str, body: ProposeBody) -> dict:
-    """
-    Propose new Confluence changes for this session.
-
-    Runs the new my-agent pipeline synchronously and returns generated cards.
-    """
     s = _require_session(session_id)
+    transcript = s.get("transcript") or []
+    memory_context = s.get("transcript_memory_text") or ""
+    changes: list[dict] = list(s.get("changes") or [])
+
     pipeline = _pipeline()
     if body.create_new_page:
         meeting, proposals = await pipeline.propose_custom_new_page(
             session_id=session_id,
-            transcript=s.transcript,
+            transcript=transcript,
             query=body.query or "",
-            memory_context=s.compacted_transcript_context(),
+            memory_context=memory_context,
         )
     else:
         meeting, proposals = await pipeline.run(
             session_id=session_id,
-            transcript=s.transcript,
+            transcript=transcript,
             query=body.query,
-            memory_context=s.compacted_transcript_context(),
+            memory_context=memory_context,
         )
-    s.extracted_meeting = meeting
-    s.summary = pipeline.summary_response(session_id, meeting, s.transcript)
-    s.summary["proposal_diagnostics"] = pipeline.last_diagnostics
-    s.pipeline_diagnostics = pipeline.last_diagnostics
-    existing_ids = {str(ch.get("id")) for ch in s.changes}
+
+    summary = pipeline.summary_response(session_id, meeting, transcript)
+    summary["proposal_diagnostics"] = pipeline.last_diagnostics
+    _save_summary(session_id, summary, meeting, pipeline.last_diagnostics)
+
+    existing_ids = {str(ch.get("id")) for ch in changes}
     new_proposals = [p for p in proposals if str(p.get("id")) not in existing_ids]
-    s.changes.extend(new_proposals)
-    s._touch()
-    return {"changes": s.changes, "generated_count": len(new_proposals)}
+    changes.extend(new_proposals)
+    _save_changes(session_id, changes)
+
+    return {"changes": changes, "generated_count": len(new_proposals)}
 
 
 # ── Endpoints: review — summary ────────────────────────────────────────────────
 
 @app.get("/sessions/{session_id}/review/summary")
 async def get_summary(session_id: str) -> dict:
-    """Return the meeting summary (MoM, decisions, action items, etc.)."""
     s = _require_session(session_id)
-    if s.summary:
-        return s.summary
-    return _pipeline().summary_response(session_id, None, s.transcript)
+    if s.get("summary"):
+        return s["summary"]
+    transcript = s.get("transcript") or []
+    if transcript:
+        try:
+            summary = await _pipeline().generate_meeting_summary(session_id, transcript)
+            session_store.patch(session_id, {"summary": summary})
+            return summary
+        except Exception as exc:
+            logger.warning("On-demand summary generation failed for %s: %s", session_id, exc)
+    return _pipeline().summary_response(session_id, None, transcript)
 
 
 # ── Endpoints: review — chat ───────────────────────────────────────────────────
 
 @app.post("/sessions/{session_id}/review/chat")
 async def chat_with_meeting(session_id: str, body: ChatBody) -> dict:
-    """
-    Answer a question about the meeting using its transcript + summary.
+    from openai import AsyncOpenAI
 
-    Lightweight transcript-grounded chat endpoint.
-    """
     s = _require_session(session_id)
-    last_user = next(
-        (m.get("content", "") for m in reversed(body.messages) if m.get("role") == "user"),
-        "",
+    transcript = s.get("transcript") or []
+
+    transcript_lines = [
+        f"{e.get('participant') or e.get('speaker') or 'Speaker'}: {e.get('text', '')}"
+        for e in transcript
+        if e.get("text", "").strip()
+    ]
+    transcript_text = "\n".join(transcript_lines) or "No transcript captured yet."
+
+    summary_obj = s.get("summary") or {}
+    summary_ctx = ""
+    if summary_obj:
+        summary_ctx = (
+            f"\nMeeting summary: {summary_obj.get('summary', '')}"
+            f"\nKey decisions: {'; '.join(summary_obj.get('decisions', []))}"
+            f"\nAction items: {'; '.join(item.get('description', '') for item in summary_obj.get('action_items', []))}"
+        )
+
+    system_prompt = (
+        "You are a meeting assistant. Answer questions about the meeting below. "
+        "Be concise and accurate. Only use information from the transcript."
+        f"{summary_ctx}\n\n[Full transcript]\n{transcript_text}"
     )
-    recent = "\n".join(f"{e.get('participant', 'Speaker')}: {e.get('text', '')}" for e in s.transcript[-20:])
-    return {
-        "answer": (
-            f"I found {len(s.transcript)} transcript entries for this meeting. "
-            f"Most recent context: {recent[-600:] or 'no transcript captured yet.'}"
-        ),
-        "session_id": session_id,
-        "context": {
-            "transcript_entries": len(s.transcript),
-            "has_summary": s.summary is not None,
-            "last_question": last_user,
-        },
-    }
+    messages = [{"role": "system", "content": system_prompt}] + [
+        {"role": m["role"], "content": m["content"]}
+        for m in body.messages
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
+
+    if not _CEREBRAS_API_KEY:
+        return {"answer": "Chat is not configured — CEREBRAS_API_KEY is missing.", "session_id": session_id}
+
+    last_exc: Exception | None = None
+    cerebras_client = AsyncOpenAI(api_key=_CEREBRAS_API_KEY, base_url=_CEREBRAS_BASE_URL)
+    for attempt in range(3):
+        try:
+            response = await cerebras_client.chat.completions.create(
+                model=_CHAT_MODEL, messages=messages, max_tokens=512, temperature=0.2,
+            )
+            return {"answer": response.choices[0].message.content or "", "session_id": session_id}
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+
+    logger.warning("Cerebras chat failed (%s); falling back to OpenAI for session %s", last_exc, session_id)
+    try:
+        openai_client = AsyncOpenAI()
+        response = await openai_client.chat.completions.create(
+            model=_OPENAI_FALLBACK_MODEL, messages=messages, max_tokens=512, temperature=0.2,
+        )
+        return {"answer": response.choices[0].message.content or "", "session_id": session_id}
+    except Exception as exc:
+        logger.error("OpenAI fallback failed for session %s: %s", session_id, exc)
+        return {"answer": "Both Cerebras and OpenAI are unavailable right now.", "session_id": session_id}
 
 
-# ── Endpoints: review — regenerate proposal ────────────────────────────────────
+# ── Endpoints: review — regenerate / reject ────────────────────────────────────
 
 @app.post("/sessions/{session_id}/review/regenerate/{proposal_id}")
 async def regenerate_proposal(session_id: str, proposal_id: str) -> dict:
-    """Re-draft a single proposal against the current live page."""
     s = _require_session(session_id)
-    for ch in s.changes:
+    changes: list[dict] = list(s.get("changes") or [])
+    for ch in changes:
         if str(ch.get("id")) == proposal_id:
             ch["status"] = "pending"
             ch["regenerate_available"] = True
-            s._touch()
+            _save_changes(session_id, changes)
             return ch
     raise HTTPException(status_code=404, detail=f"Proposal {proposal_id!r} not found")
+
+
+@app.post("/sessions/{session_id}/review/changes/{change_id}/reject")
+async def reject_proposal(session_id: str, change_id: str) -> dict:
+    s = _require_session(session_id)
+    changes: list[dict] = list(s.get("changes") or [])
+    for ch in changes:
+        if str(ch.get("id")) == change_id:
+            ch["status"] = "rejected"
+            _save_changes(session_id, changes)
+            return ch
+    raise HTTPException(status_code=404, detail=f"Proposal {change_id!r} not found")
 
 
 # ── Endpoints: pipeline ────────────────────────────────────────────────────────
 
 @app.post("/review/pipeline/start")
 async def pipeline_start(body: PipelineStartBody) -> dict:
-    """Kick off the post-meeting analysis pipeline for a session."""
-    if body.session_id not in _sessions:
-        raise HTTPException(status_code=404, detail=f"Session {body.session_id!r} not found")
+    _require_session(body.session_id)  # validate session exists before queuing
     job_id = str(uuid.uuid4())
     _pipelines[job_id] = {
         "job_id": job_id,
@@ -807,7 +719,15 @@ def _record_pipeline_event(job_id: str, event: dict) -> None:
 async def _run_pipeline_job(job_id: str) -> None:
     job = _pipelines[job_id]
     session_id = job["session_id"]
-    s = _require_session(session_id)
+    # Use session_store.get directly — _require_session raises HTTPException
+    # which is wrong in a background task context.
+    s = session_store.get(session_id)
+    if s is None:
+        job["status"] = "failed"
+        job["error"] = f"Session {session_id!r} not found"
+        job["completed_at"] = _utcnow()
+        _record_pipeline_event(job_id, {"type": "pipeline_error", "detail": job["error"]})
+        return
     pipeline = _pipeline()
 
     async def emit(event: dict) -> None:
@@ -816,30 +736,29 @@ async def _run_pipeline_job(job_id: str) -> None:
     try:
         meeting, proposals = await pipeline.run(
             session_id=session_id,
-            transcript=s.transcript,
-            memory_context=s.compacted_transcript_context(),
+            transcript=s.get("transcript") or [],
+            memory_context=s.get("transcript_memory_text") or "",
             emit=emit,
         )
-        s.extracted_meeting = meeting
-        s.summary = pipeline.summary_response(session_id, meeting, s.transcript)
-        s.summary["proposal_diagnostics"] = pipeline.last_diagnostics
-        s.pipeline_diagnostics = pipeline.last_diagnostics
-        existing_ids = {str(ch.get("id")) for ch in s.changes}
+        summary = pipeline.summary_response(session_id, meeting, s.get("transcript") or [])
+        summary["proposal_diagnostics"] = pipeline.last_diagnostics
+        _save_summary(session_id, summary, meeting, pipeline.last_diagnostics)
+
+        changes: list[dict] = list(s.get("changes") or [])
+        existing_ids = {str(ch.get("id")) for ch in changes}
         new_proposals = [p for p in proposals if str(p.get("id")) not in existing_ids]
-        s.changes.extend(new_proposals)
-        s._touch()
+        changes.extend(new_proposals)
+        _save_changes(session_id, changes)
+
         job["status"] = "completed"
         job["stage"] = None
         job["completed_at"] = _utcnow()
-        _record_pipeline_event(
-            job_id,
-            {
-                "type": "pipeline_complete",
-                "proposal_count": len(proposals),
-                "diagnostic_count": len(pipeline.last_diagnostics),
-            },
-        )
-    except Exception as exc:  # noqa: BLE001
+        _record_pipeline_event(job_id, {
+            "type": "pipeline_complete",
+            "proposal_count": len(proposals),
+            "diagnostic_count": len(pipeline.last_diagnostics),
+        })
+    except Exception as exc:
         logger.exception("Pipeline failed — job_id=%s", job_id)
         job["status"] = "failed"
         job["stage"] = None
@@ -855,7 +774,6 @@ def _sse(event: dict) -> str:
 
 
 async def _pipeline_sse(job_id: str) -> AsyncGenerator[str, None]:
-    """Stream buffered and live pipeline events."""
     sent = 0
     while True:
         job = _pipelines.get(job_id)
@@ -870,9 +788,9 @@ async def _pipeline_sse(job_id: str) -> AsyncGenerator[str, None]:
             if event.get("type") in {"pipeline_complete", "pipeline_error"}:
                 return
         if job.get("status") in {"completed", "failed"}:
-            # Defensive fallback in case terminal event was not appended.
+            s = session_store.get(job["session_id"]) or {}
             terminal = (
-                {"type": "pipeline_complete", "proposal_count": len(_sessions[job["session_id"]].changes)}
+                {"type": "pipeline_complete", "proposal_count": len(s.get("changes") or [])}
                 if job.get("status") == "completed"
                 else {"type": "pipeline_error", "detail": job.get("error") or "Pipeline failed"}
             )
@@ -883,85 +801,10 @@ async def _pipeline_sse(job_id: str) -> AsyncGenerator[str, None]:
 
 @app.get("/review/pipeline/{job_id}/stream")
 async def pipeline_stream(job_id: str, token: str = "") -> StreamingResponse:
-    """SSE stream for pipeline progress — consumed by PipelinePage."""
     if job_id not in _pipelines:
         raise HTTPException(status_code=404, detail=f"Pipeline job {job_id!r} not found")
     return StreamingResponse(
         _pipeline_sse(job_id),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-# ── Endpoints: stop bot ────────────────────────────────────────────────────────
-
-@app.post("/sessions/{session_id}/bot/stop")
-async def stop_bot(session_id: str) -> dict:
-    """Remove the Recall bot from the meeting and mark the session ended.
-
-    Calls the Recall.ai DELETE /bot/{id}/ endpoint to eject the bot, then
-    updates session status to 'ended' so the frontend poll sees the change
-    immediately without waiting for the webhook.
-    """
-    s = _require_session(session_id)
-    if s.bot_id and RECALL_API_KEY:
-        try:
-            resp = requests.post(
-                f"{RECALL_BASE_URL}/bot/{s.bot_id}/leave_call/",
-                headers={"Authorization": f"Token {RECALL_API_KEY}"},
-                timeout=10,
-            )
-            if not resp.ok:
-                logger.warning(
-                    "Recall bot removal returned %s for bot_id=%s — marking session ended anyway",
-                    resp.status_code, s.bot_id,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to remove Recall bot %s: %s", s.bot_id, exc)
-    s.status = "ended"
-    if not s.ended_at:
-        s.ended_at = _utcnow()
-    s._touch()
-    return s.as_session_status()
-
-
-# ── Endpoints: review — reject proposal ────────────────────────────────────────
-
-@app.post("/sessions/{session_id}/review/changes/{change_id}/reject")
-async def reject_proposal(session_id: str, change_id: str) -> dict:
-    """Mark a single proposal as rejected without executing it.
-
-    Rejected proposals are preserved in the session store so the audit trail
-    is complete, but they are excluded from future execute-all calls.
-    """
-    s = _require_session(session_id)
-    for ch in s.changes:
-        if str(ch.get("id")) == change_id:
-            ch["status"] = "rejected"
-            s._touch()
-            return ch
-    raise HTTPException(status_code=404, detail=f"Proposal {change_id!r} not found")
-
-
-# ── Endpoints: review — transcript ─────────────────────────────────────────────
-
-@app.get("/sessions/{session_id}/review/transcript")
-async def get_transcript(session_id: str) -> list:
-    """Return the full raw transcript captured for this session.
-
-    Each entry has: participant, text, timestamp (epoch float), source.
-    """
-    return _require_session(session_id).transcript
-
-
-# ── Endpoints: history ─────────────────────────────────────────────────────────
-
-@app.get("/history")
-async def list_history() -> list:
-    """Return all sessions as history items (most recent first)."""
-    items = [s.as_history_item() for s in _sessions.values()]
-    items.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
-    return items

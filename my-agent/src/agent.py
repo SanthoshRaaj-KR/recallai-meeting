@@ -146,9 +146,10 @@ def _build_instructions() -> str:
         Draw on both the meeting transcript and your own trained knowledge when answering.
 
         # Handling conflicts between meeting content and your knowledge
-        - If the meeting contains a claim that contradicts your knowledge, acknowledge both sides honestly and politely, like a human colleague would.
-        - Say what was mentioned in the meeting first, then share your own understanding and briefly explain why.
-        - Example: "In the meeting this was described as X, but from what I know it is actually Y, because Z."
+        - Only use this section when the meeting content directly contradicts your knowledge.
+        - Do NOT preface normal answers with "In the meeting..." or any reference to the meeting source. Just answer.
+        - When there IS a conflict: acknowledge both sides honestly, share the meeting claim first, then your own understanding and why.
+        - Example of a conflict response: "In the meeting this was described as X, but from what I know it is actually Y, because Z."
         - Never fabricate meeting content. If the topic was not mentioned, answer from your own knowledge only.
 
         # Output rules
@@ -261,37 +262,58 @@ class Assistant(Agent):
         # LiveKit re-enters the agent, triggering on_enter() again — causing the agent
         # to answer without a wake word. Overriding with a no-op disables this.
 
-        # One-time opening greeting. LiveKit can re-trigger on_enter() after an
-        # interruption, so the flag ensures we only greet once per session.
+        # One-time opening greeting. Run it in parallel with GitHub MCP setup so
+        # both finish before the user can speak — preventing the first LLM call
+        # from blocking on an unready toolset.
         if not self._greeted:
             self._greeted = True
             greeting = self._build_greeting()
             self._opening_greeting_task = asyncio.create_task(
-                self._play_opening_greeting(greeting),
+                self._play_opening_greeting_and_warmup(greeting),
                 name="opening_greeting",
             )
 
-        # Pre-warm the GitHub MCP server the moment the session opens so the
-        # npx/Node subprocess is fully connected before the user's first question.
-        # Runs in the background — does not block the agent from being ready.
-        if self._github_toolset:
-            asyncio.create_task(
-                self._github_toolset.setup(), name="github_mcp_prewarm"
-            )
+    async def _play_opening_greeting_and_warmup(self, greeting: str) -> None:
+        """Play the opening greeting and warm up the GitHub MCP subprocess in parallel.
 
-    async def _play_opening_greeting(self, greeting: str) -> None:
-        """Delay first speech so the Recall browser has time to attach playback."""
-        if _OPENING_GREETING_DELAY_S > 0:
-            await asyncio.sleep(_OPENING_GREETING_DELAY_S)
-        try:
-            handle = self.session.say(
-                greeting,
-                add_to_chat_ctx=False,
-                allow_interruptions=False,
-            )
-            await handle.wait_for_playout()
-        except Exception as exc:
-            logger.warning("Opening greeting failed: %s", exc)
+        Both tasks run concurrently so the npx cold-start happens during the
+        greeting audio — by the time the user can speak, the toolset is ready
+        and the first LLM call doesn't block waiting for it.
+        """
+        async def _greet() -> None:
+            if _OPENING_GREETING_DELAY_S > 0:
+                await asyncio.sleep(_OPENING_GREETING_DELAY_S)
+            try:
+                # Send a silent pre-roll first. This warms up the TTS HTTP
+                # connection and pre-fills the audio buffer so the Recall
+                # browser's audio pipeline is stable before the first audible
+                # word. Without this, the cold TTS connection + thin initial
+                # buffer causes the first 2-3 words to sound choppy.
+                pre_roll = self.session.say(
+                    "...",
+                    add_to_chat_ctx=False,
+                    allow_interruptions=False,
+                )
+                await pre_roll.wait_for_playout()
+                handle = self.session.say(
+                    greeting,
+                    add_to_chat_ctx=False,
+                    allow_interruptions=False,
+                )
+                await handle.wait_for_playout()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Opening greeting failed: %s", exc)
+
+        async def _warmup_mcp() -> None:
+            if not self._github_toolset:
+                return
+            try:
+                await self._github_toolset.setup()
+                logger.info("GitHub MCP toolset ready")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GitHub MCP prewarm failed: %s", exc)
+
+        await asyncio.gather(_greet(), _warmup_mcp())
 
     async def stt_node(
         self,
@@ -377,8 +399,8 @@ class Assistant(Agent):
         new_message.content = [query]
         await self.update_chat_ctx(turn_ctx)
 
-    def _post_transcript(self, text: str) -> None:
-        """Send final STT turns to recall_bridge for post-meeting review.
+    def _post_transcript(self, text: str, speaker: str = "Meeting") -> None:
+        """Send final STT turns (or Jarvis replies) to recall_bridge for post-meeting review.
 
         agent.py and recall_bridge.py usually run in separate processes, so the
         review pipeline cannot read this in-memory transcript directly.
@@ -391,7 +413,7 @@ class Assistant(Agent):
                 requests.post(
                     f"{_BRIDGE_INTERNAL_URL}/livekit-transcript/{self._session_id}",
                     json={
-                        "speaker": "Meeting",
+                        "speaker": speaker,
                         "text": text,
                         "timestamp": time.time(),
                         "source": "livekit",
@@ -402,6 +424,33 @@ class Assistant(Agent):
                 logger.debug("Could not post transcript to bridge: %s", exc)
 
         asyncio.create_task(asyncio.to_thread(_send))
+
+    async def tts_node(
+        self,
+        text: AsyncIterable[str],
+        model_settings: ModelSettings,
+    ) -> AsyncIterable[rtc.AudioFrame]:
+        """Spy on text sent to TTS so Jarvis's spoken replies are added to the transcript."""
+        collected: list[str] = []
+
+        async def _spy(source: AsyncIterable[str]) -> AsyncIterable[str]:
+            async for chunk in source:
+                collected.append(chunk)
+                yield chunk
+
+        async for frame in Agent.default.tts_node(self, _spy(text), model_settings):
+            yield frame
+
+        reply = "".join(collected).strip()
+        if reply:
+            labelled = f"Jarvis: {reply}"
+            self._transcript.append(labelled)
+            # observe_utterance can trigger a blocking LLM compaction call; run it
+            # in a thread so it never stalls the event loop between turns.
+            asyncio.create_task(
+                asyncio.to_thread(self._transcript_memory.observe_utterance, labelled)
+            )
+            self._post_transcript(reply, speaker="Jarvis")
 
     def _refresh_transcript_in_ctx(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage

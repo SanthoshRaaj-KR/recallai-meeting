@@ -40,14 +40,18 @@ class RestConfluenceClient:
         ]
         found: dict[str, dict[str, Any]] = {}
         for cql in cqls:
-            resp = requests.get(
-                f"{self.base_url}/content/search",
-                auth=self.auth,
-                headers={"Accept": "application/json"},
-                params={"cql": cql, "limit": limit, "expand": "space,version,_links"},
-                timeout=15,
-            )
-            resp.raise_for_status()
+            try:
+                resp = requests.get(
+                    f"{self.base_url}/content/search",
+                    auth=self.auth,
+                    headers={"Accept": "application/json"},
+                    params={"cql": cql, "limit": limit, "expand": "space,version,_links"},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+            except requests.HTTPError as exc:
+                logger.warning("Confluence REST search failed for %r: %s", query, exc)
+                continue  # try next CQL variant
             for item in resp.json().get("results", []):
                 page_id = item.get("id")
                 if not page_id or page_id in found:
@@ -194,6 +198,15 @@ class RovoMCPConfluenceClient:
         ).strip()
         self.token = (os.getenv("ROVO_MCP_BEARER_TOKEN") or os.getenv("ATLASSIAN_MCP_BEARER_TOKEN") or "").strip()
         self.enabled = (os.getenv("ROVO_MCP_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"})
+        # Serialize all MCP calls — Atlassian's MCP server rejects concurrent SSE connections
+        # from the same token, causing TaskGroup errors when searches run in parallel.
+        self._semaphore: asyncio.Semaphore | None = None
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        # Lazily created so it binds to the running event loop.
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(1)
+        return self._semaphore
 
     async def search_pages(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         if not self.enabled:
@@ -250,23 +263,36 @@ class RovoMCPConfluenceClient:
         from mcp.client.streamable_http import streamablehttp_client
 
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else None
-        async with streamablehttp_client(self.url, headers=headers, timeout=20) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools = await session.list_tools()
-                available = {tool.name for tool in tools.tools}
-                tool_name = next((name for name in names if name in available), None)
-                if not tool_name:
-                    logger.debug("Rovo MCP tool unavailable. wanted=%s available=%s", names, sorted(available))
-                    return None
-                last_error: Exception | None = None
-                for args in arg_options:
-                    try:
-                        return await session.call_tool(tool_name, args)
-                    except Exception as exc:  # noqa: BLE001
-                        last_error = exc
-                if last_error:
-                    raise last_error
+        async with self._get_semaphore():
+            try:
+                async with streamablehttp_client(self.url, headers=headers, timeout=20) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        tools = await session.list_tools()
+                        available = {tool.name for tool in tools.tools}
+                        tool_name = next((name for name in names if name in available), None)
+                        if not tool_name:
+                            logger.debug("Rovo MCP tool unavailable. wanted=%s available=%s", names, sorted(available))
+                            return None
+                        last_error: Exception | None = None
+                        for args in arg_options:
+                            try:
+                                return await session.call_tool(tool_name, args)
+                            except Exception as exc:  # noqa: BLE001
+                                last_error = exc
+                        if last_error:
+                            raise last_error
+            except (SystemExit, KeyboardInterrupt):
+                raise
+            except BaseException as exc:
+                # anyio TaskGroup failures surface as ExceptionGroup (BaseException subclass).
+                # Unwrap to get the real cause for logging, then re-raise as a plain Exception
+                # so callers with `except Exception` can catch it.
+                cause: BaseException = exc
+                if hasattr(exc, "exceptions") and exc.exceptions:
+                    cause = exc.exceptions[0]
+                logger.warning("Rovo MCP transport error: %s: %s", type(cause).__name__, cause)
+                raise RuntimeError(f"Rovo MCP: {cause}") from exc
         return None
 
     def _coerce_search_results(self, raw: Any) -> list[dict[str, Any]]:
