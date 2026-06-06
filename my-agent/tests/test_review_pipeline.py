@@ -241,6 +241,42 @@ def test_vector_rag_finds_metric_page_and_drafts_inline_replace(monkeypatch):
     assert pipeline._rag.upserted == ["metrics-page"]
 
 
+def test_custom_new_page_workflow_returns_create_proposal(monkeypatch):
+    pipeline = ProposalPipeline()
+
+    async def fake_extract(_transcript, _text, query=None):
+        return ExtractedMeeting(
+            title="Framework Discussion",
+            summary="The team discussed the Nova framework.",
+            key_topics=["Nova framework"],
+            decisions=["Adopt Nova for the pilot."],
+            action_items=[{"description": "Document Nova rollout plan", "owner": "Asha", "due": None}],
+        )
+
+    async def no_style_pages(*_args, **_kwargs):
+        return []
+
+    def fail_styled_draft(*_args, **_kwargs):
+        raise RuntimeError("No LLM in test")
+
+    monkeypatch.setattr(pipeline, "_extract_meeting", fake_extract)
+    monkeypatch.setattr(pipeline, "_sample_style_pages", no_style_pages)
+    monkeypatch.setattr(pipeline, "_draft_styled_new_page_sync", fail_styled_draft)
+
+    _meeting, proposals = asyncio.run(
+        pipeline.propose_custom_new_page(
+            session_id="s1",
+            transcript=[{"participant": "Asha", "text": "We should use Nova for the pilot."}],
+            query="create page for the Nova framework discussed in meeting",
+        )
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0]["change_type"] == "create"
+    assert "Nova Framework" in proposals[0]["page_title"]
+    assert "Adopt Nova for the pilot" in proposals[0]["after_content"]
+
+
 def test_pipeline_returns_empty_without_transcript():
     pipeline = ProposalPipeline()
     meeting, proposals = asyncio.run(pipeline.run(session_id="s1", transcript=[]))
