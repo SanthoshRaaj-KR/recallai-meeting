@@ -37,8 +37,13 @@ import uvicorn
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
+<<<<<<< HEAD
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+=======
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+>>>>>>> confluence
 from gtts import gTTS
 from openai import OpenAI
 
@@ -71,7 +76,7 @@ BOT_NAME = os.getenv("BOT_NAME", "Jarvis")
 LANGUAGE_CODE = os.getenv("LANGUAGE_CODE", "en")
 STREAMING_MODE = os.getenv("STREAMING_MODE", "prioritize_low_latency")
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
-APP_PORT = int(os.getenv("APP_PORT", "8000"))
+APP_PORT = int(os.getenv("APP_PORT", "8001"))
 JARVIS_AGENT_MODEL = os.getenv("JARVIS_AGENT_MODEL", "gpt-5-mini")
 RECALL_TRANSCRIPT_PROVIDER = os.getenv("RECALL_TRANSCRIPT_PROVIDER", "recallai_streaming").strip()
 ASSEMBLY_API = (os.getenv("ASSEMBLY_API") or "").strip()
@@ -118,6 +123,51 @@ _SENTINEL_IDX = sys.maxsize  # Largest int — guarantees the sentinel is sorted
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+async def _pinecone_startup_index() -> None:
+    """Background task: index all Confluence pages into Pinecone on server startup.
+
+    Uses version checks — unchanged pages are skipped in milliseconds.  Runs
+    once per process start so Pinecone is always populated before the first
+    voice query arrives.  Failures are logged but never surface to callers.
+    """
+    try:
+        from confluence_logic.ingestion.doc_pipeline import IngestionPipeline  # noqa: PLC0415
+        from confluence_logic.connectors.confluence import ConfluenceConnector  # noqa: PLC0415
+        from confluence_logic.confluence_page_graph import MAX_INDEX_PAGES  # noqa: PLC0415
+        connector = ConfluenceConnector()
+        pages = await asyncio.to_thread(connector.list_pages, MAX_INDEX_PAGES)
+        pipeline = IngestionPipeline()
+        logger.info("Pinecone startup index: found %d pages to check", len(pages))
+        for page in pages:
+            page_id = page.get("page_id")
+            if not page_id:
+                continue
+            try:
+                await asyncio.to_thread(pipeline.process_page, page_id)
+            except Exception as exc:
+                logger.debug("Pinecone startup index skipped page %s: %s", page_id, exc)
+        logger.info("Pinecone startup index complete")
+    except Exception as exc:
+        logger.warning("Pinecone startup index failed (non-fatal): %s", exc)
+
+
+async def _pinecone_periodic_sync(interval_seconds: int = 1800) -> None:
+    """Background loop: re-index recently changed Confluence pages every 30 minutes.
+
+    Re-uses _sync_recent_pinecone_pages from the review API which checks
+    the 30 most recently modified pages.  Catches any page edited directly
+    in Confluence between pipeline runs.
+    """
+    from confluence_logic.review.api import _sync_recent_pinecone_pages  # noqa: PLC0415
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await _sync_recent_pinecone_pages(limit=30)
+            logger.debug("Pinecone periodic sync complete")
+        except Exception as exc:
+            logger.warning("Pinecone periodic sync failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Bot is started on-demand via POST /bot/start from the review UI.
@@ -127,18 +177,32 @@ async def lifespan(app: FastAPI):
     graph_refresh_task = asyncio.create_task(
         confluence_page_graph.refresh_known_user_graphs_forever(stop_graph_refresh)
     )
+    # Populate Pinecone in the background — voice queries resolve in <1s once indexed.
+    pinecone_startup_task = asyncio.create_task(_pinecone_startup_index())
+    # Re-check recently modified pages every 30 minutes to catch direct Confluence edits.
+    pinecone_sync_task = asyncio.create_task(_pinecone_periodic_sync())
     try:
         yield
     finally:
         stop_graph_refresh.set()
-        graph_refresh_task.cancel()
-        try:
-            await graph_refresh_task
-        except asyncio.CancelledError:
-            pass
+        for task in (graph_refresh_task, pinecone_startup_task, pinecone_sync_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(lifespan=lifespan)
+
+_CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Mount the review API router (GET /review/summary and related endpoints).
 from .review.api import router as _review_router  # noqa: E402
@@ -170,6 +234,8 @@ _DYNAMIC_ACK_FALLBACKS = {
     "switching": "On it, switching now.",
     "error": "Sorry, I hit a snag there.",
 }
+QUEUE_ACK = _DYNAMIC_ACK_FALLBACKS["queued"]
+SWITCH_ACK = _DYNAMIC_ACK_FALLBACKS["switching"]
 
 _INSTANT_ACKS = [
     "On it.",
@@ -268,6 +334,8 @@ def _fresh_meeting_state(session_id: Optional[str] = None) -> dict:
 _DEFAULT_SESSION_ID = "default"
 _meeting_sessions: dict[str, dict] = {_DEFAULT_SESSION_ID: _fresh_meeting_state(_DEFAULT_SESSION_ID)}
 _bot_session_ids: dict[str, str] = {}
+# Tracks the currently-speaking participant per session (updated by Recall speech_on/speech_off webhooks).
+_current_speakers: dict[str, str] = {}  # session_id → participant display name
 _current_meeting_state: ContextVar[dict] = ContextVar(
     "current_meeting_state",
     default=_meeting_sessions[_DEFAULT_SESSION_ID],
@@ -483,65 +551,23 @@ async def _queue_confluence_proposal(task: VoiceTask, prepared_request: str) -> 
     return "I could not find a concrete Confluence change to queue from that request."
 
 
-async def _answer_confluence_question(query: str) -> str:
-    graph_user_id = _current_confluence_graph_user_id()
-    try:
-        await asyncio.wait_for(confluence_page_graph.ensure_user_confluence_graph(graph_user_id), timeout=0.7)
-    except (asyncio.TimeoutError, Exception):
-        asyncio.create_task(confluence_page_graph.ensure_user_confluence_graph(graph_user_id))
+_qa_agent = None
 
-    if re.search(r"\b(?:list|show|what).*(?:pages|documents|docs)\b", query, re.IGNORECASE):
-        pages = await confluence_page_graph.list_user_confluence_pages(graph_user_id, limit=10)
-        if pages:
-            titles = ", ".join(page.get("title") or "Untitled" for page in pages[:10])
-            return f"I found these Confluence pages in the graph: {titles}."
 
-    try:
-        contexts = await asyncio.wait_for(
-            confluence_page_graph.query_user_confluence_graph(graph_user_id, query, limit=6),
-            timeout=0.8,
-        )
-    except (asyncio.TimeoutError, Exception):
-        contexts = []
-
-    if not contexts:
-        return "I could not find a relevant Confluence page for that yet. The workspace graph may still be refreshing."
-
-    context_text = json.dumps(
-        [
-            {
-                "page_title": item.get("title"),
-                "heading": item.get("heading"),
-                "content": item.get("relevant_content"),
-            }
-            for item in contexts
-        ],
-        ensure_ascii=False,
-    )
-    response = await asyncio.to_thread(
-        lambda: get_openai_client().chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You answer questions about Confluence pages using only the retrieved page/section context. "
-                        "Keep the answer concise and useful for spoken delivery. If context is insufficient, say so."
-                    ),
-                },
-                {"role": "user", "content": f"Question: {query}\n\nRetrieved Confluence context:\n{context_text}"},
-            ],
-            max_tokens=220,
-            temperature=0.2,
-        )
-    )
-    return (response.choices[0].message.content or "").strip() or "I could not answer that from the Confluence graph."
+def _get_qa_agent():
+    """Lazy singleton getter for ConfluenceQAAgent. Deferred import avoids circular imports."""
+    global _qa_agent
+    if _qa_agent is None:
+        from confluence_logic.agents.confluence_qa_agent import ConfluenceQAAgent  # noqa: PLC0415
+        _qa_agent = ConfluenceQAAgent()
+    return _qa_agent
 
 
 async def _handle_confluence_question(query: str, bot_id: str) -> None:
     generation = meeting_state["output_generation"]
     try:
-        answer_task = asyncio.create_task(_answer_confluence_question(query))
+        graph_user_id = _current_confluence_graph_user_id()
+        answer_task = asyncio.create_task(_get_qa_agent().run(query, graph_user_id))
         gap_filler_task = asyncio.create_task(_speak_gap_filler(query, bot_id, generation))
         answer = await answer_task
         await gap_filler_task
@@ -810,30 +836,6 @@ def _is_override_request(text: str) -> bool:
 def _is_additive_request(text: str) -> bool:
     return bool(_ADDITIVE_PATTERN.search((text or "").lower()))
 
-
-def build_transcript_provider_config() -> dict:
-    if RECALL_TRANSCRIPT_PROVIDER == "recallai_streaming":
-        return {
-            "recallai_streaming": {
-                "mode": STREAMING_MODE,
-                "language_code": LANGUAGE_CODE,
-            }
-        }
-
-    if RECALL_TRANSCRIPT_PROVIDER in ("assembly_ai_v3", "assembly_ai_v3_streaming"):
-        return {
-            "assembly_ai_v3_streaming": {
-                "language_code": LANGUAGE_CODE,
-                "speech_model": os.getenv("ASSEMBLY_SPEECH_MODEL", "u3-rt-pro"),
-            }
-        }
-
-    return {
-        RECALL_TRANSCRIPT_PROVIDER: {
-            "mode": STREAMING_MODE,
-            "language_code": LANGUAGE_CODE,
-        }
-    }
 
 
 
@@ -2543,7 +2545,17 @@ async def receive_livekit_transcript(session_id: str, request: Request):
     """
     body = await request.json()
     text = (body.get("text") or "").strip()
+<<<<<<< HEAD
     speaker = (body.get("speaker") or "Meeting").strip()
+=======
+    raw_speaker = (body.get("speaker") or "Meeting").strip()
+    # If agent_worker sends "Meeting" (no per-speaker attribution from STT), substitute
+    # the last known speaker from Recall participant_events webhooks.
+    if raw_speaker == "Meeting":
+        speaker = _current_speakers.get(session_id, "Meeting")
+    else:
+        speaker = raw_speaker
+>>>>>>> confluence
     if not text:
         return {"ok": True}
     token = set_current_meeting_session(session_id)
@@ -2565,6 +2577,53 @@ async def receive_livekit_transcript(session_id: str, request: Request):
     return {"ok": True}
 
 
+<<<<<<< HEAD
+=======
+@app.post("/recall-webhook")
+async def receive_recall_webhook(request: Request):
+    """Receive Recall.ai project-level webhook events.
+
+    Register this URL (WEBHOOK_URL/recall-webhook) in the Recall dashboard
+    under Webhooks → subscribe to bot.participant_events.
+
+    Handles speech_on / speech_off to track the current speaker per session,
+    enabling per-participant attribution in the transcript_log.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": True}
+
+    event = body.get("event", "")
+    data = body.get("data", {})
+
+    if event != "bot.participant_events":
+        return {"ok": True}
+
+    bot_id = data.get("bot_id", "")
+    session_id = get_session_id_for_bot(bot_id) if bot_id else None
+
+    if not session_id:
+        logger.debug("recall_webhook: no session for bot_id=%s", bot_id)
+        return {"ok": True}
+
+    for evt in data.get("events", []):
+        etype = evt.get("type", "")
+        participant_name = (evt.get("participant") or {}).get("name", "").strip()
+        if not participant_name:
+            continue
+        if etype == "speech_on":
+            _current_speakers[session_id] = participant_name
+            logger.debug("Speaker ON  [%s] → %s", session_id, participant_name)
+        elif etype == "speech_off":
+            if _current_speakers.get(session_id) == participant_name:
+                _current_speakers.pop(session_id, None)
+            logger.debug("Speaker OFF [%s] → %s", session_id, participant_name)
+
+    return {"ok": True}
+
+
+>>>>>>> confluence
 @app.get("/bot-page")
 async def serve_bot_page():
     """Serve the LiveKit subscriber page that Recall's headless Chrome loads (D-15)."""
@@ -2666,7 +2725,7 @@ async def get_transcript(session_id: str):
 @app.get("/health")
 async def health():
     return {
-        "status": "healthy_agentic",
+        "status": "ok",
         "bot_id": meeting_state["bot_id"],
         "transcript_provider": RECALL_TRANSCRIPT_PROVIDER,
         "tts_provider": JARVIS_TTS_PROVIDER,

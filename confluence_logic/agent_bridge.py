@@ -19,6 +19,10 @@ For Wave 1 this helper returns an in-process lookup; Plan 05 swaps it for IPC.
 from __future__ import annotations
 
 import asyncio
+<<<<<<< HEAD
+=======
+import collections
+>>>>>>> confluence
 import json
 import logging
 import os
@@ -26,7 +30,14 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List
 
+<<<<<<< HEAD
 from livekit.agents import RunContext
+=======
+import httpx
+
+from livekit.agents import RunContext
+from confluence_logic.ipc import transcript_store as _ts
+>>>>>>> confluence
 from livekit.agents.llm import function_tool
 
 # Underlying responders — these are the source of truth for Jarvis voice answers.
@@ -49,15 +60,63 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _JARVIS_API_BASE: str = os.getenv("WEBHOOK_URL", "").rstrip("/")
 
+<<<<<<< HEAD
 
 async def get_transcript_log_for_session(session_id: str) -> List[Dict[str, Any]]:
     """Return the transcript log for session_id by fetching /transcript/{session_id}.
 
     Falls back to in-process lookup when WEBHOOK_URL is not set (dev / test mode).
+=======
+# Persistent async HTTP client — true async, no thread-pool per call (item 12).
+_http_client: httpx.AsyncClient = httpx.AsyncClient(timeout=3.0)
+
+# ---------------------------------------------------------------------------
+# In-process meeting transcript buffer
+# ---------------------------------------------------------------------------
+# Keeps a rolling window of recent utterances per session so that tools can
+# inject meeting context into answers without an HTTP round-trip to the
+# FastAPI server.  Populated by append_to_transcript_buffer(), called from
+# agent_worker._post_transcript for every speaker="Meeting" utterance.
+# ---------------------------------------------------------------------------
+_TRANSCRIPT_BUFFER_MAX: int = int(os.getenv("JARVIS_TRANSCRIPT_BUFFER_MAX", "50"))
+_transcript_buffer: Dict[str, "collections.deque[Dict[str, str]]"] = {}
+
+
+def append_to_transcript_buffer(session_id: str, speaker: str, text: str) -> None:
+    """Append an utterance to the in-process transcript buffer for session_id."""
+    if not session_id or not text.strip():
+        return
+    if session_id not in _transcript_buffer:
+        _transcript_buffer[session_id] = collections.deque(maxlen=_TRANSCRIPT_BUFFER_MAX)
+    _transcript_buffer[session_id].append({"speaker": speaker, "text": text})
+
+
+def _build_meeting_context(session_id: str, last_n: int = 20) -> str:
+    """Return a compact string of recent meeting utterances for use as graph_context.
+
+    Returns empty string if no utterances are buffered (dev/test mode without a live session).
+    """
+    buf = _transcript_buffer.get(session_id)
+    if not buf:
+        return ""
+    recent = list(buf)[-last_n:]
+    lines = [f"{e['speaker']}: {e['text']}" for e in recent]
+    return "\n".join(lines)
+
+
+async def get_transcript_log_for_session(session_id: str) -> List[Dict[str, Any]]:
+    """Return the transcript log for session_id.
+
+    Primary path: read from the shared SQLite DB written by agent_worker (no HTTP).
+    Fallback (when SQLite returns nothing): HTTP GET /transcript/{session_id} from
+    jarvis_agentic, which holds the in-memory transcript_log populated via POST.
+    Dev fallback: same-process import when WEBHOOK_URL is unset.
+>>>>>>> confluence
     """
     if not session_id:
         return []
 
+<<<<<<< HEAD
     if _JARVIS_API_BASE:
         try:
             import requests as _req  # noqa: PLC0415
@@ -65,15 +124,38 @@ async def get_transcript_log_for_session(session_id: str) -> List[Dict[str, Any]
                 _req.get,
                 f"{_JARVIS_API_BASE}/transcript/{session_id}",
                 timeout=3,
+=======
+    # SQLite primary path — fast local read, no network round-trip.
+    try:
+        rows = await asyncio.to_thread(_ts.get_utterances, session_id)
+        if rows:
+            logger.debug("transcript sqlite: %d entries for session=%s", len(rows), session_id)
+            return rows
+    except Exception as exc:
+        logger.debug("transcript sqlite read failed (session=%s): %s", session_id, exc)
+
+    # HTTP fallback — jarvis_agentic in-memory log (populated in parallel via POST).
+    if _JARVIS_API_BASE:
+        try:
+            resp = await _http_client.get(
+                f"{_JARVIS_API_BASE}/transcript/{session_id}",
+>>>>>>> confluence
             )
             resp.raise_for_status()
             data = resp.json()
             log = data.get("transcript_log", [])
+<<<<<<< HEAD
             logger.debug("transcript fetch: %d entries for session=%s", len(log), session_id)
             return log
         except Exception as exc:
             logger.warning("get_transcript_log_for_session HTTP failed (session=%s): %s", session_id, exc)
             return []
+=======
+            logger.debug("transcript http: %d entries for session=%s", len(log), session_id)
+            return log
+        except Exception as exc:
+            logger.warning("get_transcript_log_for_session HTTP failed (session=%s): %s", session_id, exc)
+>>>>>>> confluence
 
     # Dev fallback: same-process import (only works when not using a separate worker process)
     try:
@@ -189,6 +271,7 @@ async def answer_general_question_tool(
         force_web_search: True to force Tavily web search (use for current events / live data).
     """
     t0 = time.perf_counter()
+<<<<<<< HEAD
     result = await answer_general_question(
         question,
         conversation_history="",
@@ -198,6 +281,20 @@ async def answer_general_question_tool(
         force_web_search=force_web_search,
     )
     logger.info("⏱️  answer_general_question_tool: %.0fms (web=%s, q=%.50r)", (time.perf_counter() - t0) * 1000, force_web_search, question)
+=======
+    # Inject recent meeting transcript so the LLM can answer referential questions
+    # like "how do we fix this problem?" with awareness of what was just discussed.
+    sid = _session_id_from_context(context)
+    meeting_ctx = _build_meeting_context(sid)
+    result = await answer_general_question(
+        question,
+        conversation_history="",
+        graph_context=meeting_ctx,
+        multiturn_reference=bool(meeting_ctx),
+        force_web_search=force_web_search,
+    )
+    logger.info("⏱️  answer_general_question_tool: %.0fms (web=%s, ctx=%d chars, q=%.50r)", (time.perf_counter() - t0) * 1000, force_web_search, len(meeting_ctx), question)
+>>>>>>> confluence
     return result
 
 

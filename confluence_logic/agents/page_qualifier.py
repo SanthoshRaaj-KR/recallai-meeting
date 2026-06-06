@@ -40,6 +40,15 @@ logger = logging.getLogger(__name__)
 QUALIFIER_MODEL = os.getenv("JARVIS_QUALIFIER_MODEL", "gpt-5.4-nano").strip()
 QUALIFIER_MAX_TOKENS = int(os.getenv("JARVIS_QUALIFIER_MAX_TOKENS", "400"))
 QUALIFIER_FIT_THRESHOLD = int(os.getenv("JARVIS_QUALIFIER_FIT_THRESHOLD", "5"))
+# Plan 08-02 / D-05: operator-tunable LLM-scored fit floor. Default 6 is tighter than the
+# legacy QUALIFIER_FIT_THRESHOLD (5) so weak topical matches are rejected before drafting.
+JARVIS_QUALIFIER_FIT_MIN = int(os.getenv("JARVIS_QUALIFIER_FIT_MIN", "6"))
+
+# Plan 08-02 / D-04: stopwords for deterministic pre-filter token overlap.
+_STOP = {
+    "the", "a", "an", "and", "or", "of", "for", "to", "in", "on",
+    "with", "page", "doc", "documentation",
+}
 
 
 def _norm(text: str) -> str:
@@ -141,6 +150,54 @@ async def _run_page_qualifier(
                 old_value, page_title,
             )
 
+    # ── Phase 1b: deterministic HARD pre-filter (Plan 08-02 / D-04) ───────
+    # Reject without LLM when ALL four conditions hold:
+    #   (1) old_value is non-empty AND missing verbatim from page.full_content
+    #   (2) subject shares zero non-stopword tokens with page.title
+    #   (3) no heading on the page contains any subject token (case-insensitive)
+    #   (4) action != "create" (creates have no old_value to anchor; pages aren't expected to match)
+    # This eliminates the most common false-positive class (loose page-fit drift) cheaply.
+    if action != "create" and old_value and not old_value_found:
+        full_content_lower = full_content.lower() if full_content else ""
+        # (1) already true at this branch: old_value non-empty AND not on page.
+        subject_tokens = {
+            w for w in re.split(r"\W+", subject.lower())
+            if w and len(w) > 2 and w not in _STOP
+        }
+        title_tokens = {
+            w for w in re.split(r"\W+", page_title.lower())
+            if w and len(w) > 2 and w not in _STOP
+        }
+        no_title_overlap = (subject_tokens & title_tokens) == set()
+        no_heading_match = True
+        if subject_tokens:
+            avail_headings = page.get("available_headings") or []
+            for h in avail_headings:
+                h_low = (h or "").lower()
+                if any(tok in h_low for tok in subject_tokens):
+                    no_heading_match = False
+                    break
+        else:
+            # No usable subject tokens — title check already empty so leave no_heading_match True.
+            pass
+        if no_title_overlap and no_heading_match:
+            logger.info(
+                "Page qualifier hard-reject: '%s' for intent '%s' "
+                "(old_value not on page, no title overlap, no heading match)",
+                page_title, subject or "?",
+            )
+            return {
+                "qualified": False,
+                "page_fit_score": 0,
+                "why": "deterministic_pre_filter",
+                "old_value_found": False,
+                "matched_phrase": None,
+                # Tautological at this branch: we only enter when old_value is non-empty
+                # AND not found verbatim on the page. Preserves the legacy contract that
+                # downstream code (and tests) rely on to detect this state.
+                "old_value_missing": True,
+            }
+
     # ── Phase 2: LLM judgment ─────────────────────────────────────────────
     # Build a compact representation of the page for the LLM
     headings = page.get("available_headings") or []
@@ -223,16 +280,22 @@ async def _run_page_qualifier(
         fit = min(fit, 6)
 
     why = (data.get("why") or "").strip() or "no rationale"
-    qualified = fit >= QUALIFIER_FIT_THRESHOLD
+    # Plan 08-02 / D-05: enforce the operator-tunable JARVIS_QUALIFIER_FIT_MIN floor.
+    # The strictest of the two thresholds applies — typically FIT_MIN (default 6) is tighter
+    # than the legacy QUALIFIER_FIT_THRESHOLD (5).
+    effective_floor = max(QUALIFIER_FIT_THRESHOLD, JARVIS_QUALIFIER_FIT_MIN)
+    qualified = fit >= effective_floor
 
-    log_fn = logger.info if qualified else logger.debug
-    log_fn(
-        "Qualifier: '%s' %s for intent '%s' (fit=%d/10) — %s",
-        page_title,
-        "QUALIFIED" if qualified else "rejected",
-        subject or instruction[:40],
-        fit, why,
-    )
+    if not qualified:
+        logger.info(
+            "Page qualifier LLM-reject: '%s' for intent '%s' (fit=%d < min=%d) — %s",
+            page_title, subject or instruction[:40], fit, effective_floor, why,
+        )
+    else:
+        logger.info(
+            "Qualifier: '%s' QUALIFIED for intent '%s' (fit=%d/10) — %s",
+            page_title, subject or instruction[:40], fit, why,
+        )
 
     return {
         "qualified": qualified,

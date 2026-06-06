@@ -31,6 +31,12 @@
 - [ ] **SCHEMA-03**: Pydantic models in `confluence_logic/review/` updated to match new `ChangeItem` schema
 - [ ] **SCHEMA-04**: TypeScript `ChangeItem` interface in `sync-sage-bot/src/types.ts` (or equivalent) updated to match backend schema
 
+### Pipeline — Proposal Quality
+
+- [x] **QUAL-01**: A meeting discussion that first proposes a change and then reverts it ("change Q3 to Q1, actually Q3 is fine") produces ZERO proposals for that topic — final agreed state wins via last-wins dedup in `_merge_facts`
+- [x] **QUAL-02**: The same change mentioned at multiple points in a meeting produces exactly ONE proposal — duplicates are collapsed via `(normalized_subject, action)` key in `_merge_facts`; `DrafterAgent` receives `relevant_transcript_window` so discussions in the middle of long meetings are not lost
+- [x] **QUAL-03**: For add/create proposals, `after_content` contains only the exact items named in the meeting transcript — `verbatim_content` field on `ChangeIntent` captures the quoted text; RULE 0 in `INTENT_DRAFTER_PROMPT` enforces verbatim use with no additions
+
 ### Apply — Safe Execution
 
 - [ ] **APPLY-01**: Before applying an edit card, section anchor pre-flight check confirms `section_heading` still exists in the live page (using `extract_headings` + `difflib.get_close_matches`)
@@ -107,13 +113,16 @@
 | UI-04 | Phase 3 | Complete |
 | UI-05 | Phase 3 | Complete |
 | UI-06 | Phase 3 | Complete |
-| APPLY-01 | Phase 4 | Pending |
-| APPLY-02 | Phase 4 | Pending |
-| APPLY-03 | Phase 4 | Pending |
+| QUAL-01 | Phase 4 | Complete |
+| QUAL-02 | Phase 4 | Complete |
+| QUAL-03 | Phase 4 | Complete |
+| APPLY-01 | Phase 5 | Pending |
+| APPLY-02 | Phase 5 | Pending |
+| APPLY-03 | Phase 5 | Pending |
 
 **Coverage:**
-- v1 requirements: 21 total
-- Mapped to phases: 21
+- v1 requirements: 24 total
+- Mapped to phases: 24
 - Unmapped: 0 ✓
 
 ---

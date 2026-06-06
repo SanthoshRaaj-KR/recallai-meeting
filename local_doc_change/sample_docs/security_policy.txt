@@ -1,0 +1,27 @@
+NIMBUS ROBOTICS INFORMATION SECURITY POLICY
+
+This policy defines the security controls that protect Nimbus Robotics systems, customer data, and intellectual property. It applies to all employees, contractors, and third parties who access company systems. Violations may result in disciplinary action up to and including termination, and where applicable, legal action. The security team reviews this policy annually and after any major security incident.
+
+SECTION 1. DATA RETENTION
+Application logs are retained for 90 days before automatic deletion. Customer records must be retained for 7 years to satisfy regulatory requirements, after which they are securely purged. Backups are kept for 30 days on a rolling basis and are stored in a geographically separate region from production. Personal data that is no longer required for a documented business purpose is deleted in the next scheduled purge cycle. Retention exceptions for legal holds must be approved in writing by the legal team.
+
+SECTION 2. ACCESS CONTROL
+Employee access to production systems requires approval from a single team manager. Access is granted on a least-privilege basis, meaning each person receives only the permissions required for their role. Access is reviewed quarterly, and any access that has gone unused for sixty days is revoked. Service accounts must use rotating credentials that expire every 90 days and may never be shared between services. All privileged actions on production systems are logged to an append-only audit store.
+
+SECTION 3. INCIDENT RESPONSE
+Security incidents must be reported to the security team within 24 hours of discovery. The security team triages every report within one business day and assigns a severity level. Confirmed breaches trigger the formal incident response plan, which includes containment, eradication, recovery, and customer notification where legally required. A post-incident review is conducted within five business days, and lessons learned are folded back into controls. Employees who report incidents in good faith are protected from retaliation.
+
+SECTION 4. PASSWORD AND AUTHENTICATION POLICY
+User passwords must be at least 12 characters long and include a mix of letters, numbers, and symbols. Multi-factor authentication is required for all administrative accounts and for any remote access to production. Passwords are never stored in plaintext and are hashed using an industry-standard algorithm. Shared accounts are prohibited; every action must be attributable to an individual. Compromised credentials must be rotated immediately upon discovery.
+
+SECTION 5. DATA CLASSIFICATION AND HANDLING
+All information is classified as public, internal, confidential, or restricted. Confidential and restricted data must be encrypted both in transit and at rest. Restricted data, such as customer payment details and biometric identifiers, may only be processed by systems specifically approved for that purpose. Data must not be copied to personal devices or unapproved cloud services. Printed confidential material must be stored in locked storage and shredded when no longer needed.
+
+SECTION 6. ENDPOINT AND DEVICE SECURITY
+All company laptops must have full-disk encryption and an active endpoint protection agent. Devices automatically lock after five minutes of inactivity. Lost or stolen devices must be reported to IT within four hours so they can be remotely wiped. Personal devices used to access company email must be enrolled in mobile device management. Unsupported or jailbroken devices are not permitted on the corporate network.
+
+SECTION 7. VENDOR AND THIRD-PARTY RISK
+Every vendor that processes company or customer data undergoes a security review before onboarding. Vendors must contractually commit to security standards equivalent to our own and to timely breach notification. High-risk vendors are reassessed annually. Data shared with vendors is limited to the minimum necessary for the service. Vendor access is revoked immediately at the end of an engagement.
+
+SECTION 8. SECURITY AWARENESS AND TRAINING
+All employees complete security awareness training within their first month and annually thereafter. Training covers phishing recognition, safe data handling, and incident reporting. Simulated phishing campaigns are run quarterly, and employees who repeatedly fail receive additional coaching. Role-specific training is provided for engineers, administrators, and anyone handling restricted data.

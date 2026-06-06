@@ -318,9 +318,9 @@ async def test_execute_changes_uses_existing_editor_agent_logic():
     assert response["results"] == [{"id": 7, "success": True}]
     assert state["pending_changes"][0]["status"] == "executed"
     prepared_query = editor.handle_prepared_query.await_args.args[0]
-    assert "Resolver context:" in prepared_query
-    assert "PAGE_ID: page-1" in prepared_query
-    assert "preview_edit" in prepared_query
+    assert "page-1" in prepared_query
+    assert "SAFETY RULES:" in prepared_query
+    assert "Decisions" in prepared_query
     assert editor.handle_prepared_query.await_args.kwargs["original_query"] == "Approve Confluence change 7"
 
 

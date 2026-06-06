@@ -17,6 +17,25 @@ DRAFTER_MODEL = os.getenv("JARVIS_AGENT_MODEL", "gpt-5-mini").strip()
 DRAFTER_TRANSCRIPT_BUDGET = int(os.getenv("JARVIS_DRAFTER_TRANSCRIPT_BUDGET", "8000"))
 
 
+def _find_relevant_transcript_window(transcript: str, subject: str, window: int = 1500) -> str:
+    """Return up to 1500-char window of the transcript centered on the first mention of subject.
+
+    Used to give the drafter direct access to the relevant discussion even when it falls
+    in the middle of a long transcript (which the head+tail excerpt would miss).
+    Returns empty string if subject is empty or not found.
+    """
+    if not transcript or not subject:
+        return ""
+    needle = subject.strip().lower()[:40]
+    pos = transcript.lower().find(needle)
+    if pos < 0:
+        return ""
+    pre = min(400, pos)
+    start = pos - pre
+    end = min(len(transcript), start + window)
+    return transcript[start:end]
+
+
 def _build_meeting_context(
     transcript_text: str,
     facts: Any = None,
@@ -278,6 +297,9 @@ INTENT_DRAFTER_PROMPT = (
     "Use this to pick the section that ALREADY discusses the intent's subject, not just one whose name matches.\n"
     "- meeting_context: full meeting brief (all decisions, action items, requirements from the entire meeting) "
     "plus a transcript excerpt. Use this to understand the FULL scope of what was discussed.\n\n"
+    "- relevant_transcript_window: a targeted excerpt (~1500 chars) from the part of the transcript "
+    "where `intent.subject` was specifically discussed. Use this as the AUTHORITATIVE source for what "
+    "was said about this intent's subject — it may contain details not visible in meeting_context.\n\n"
 
     "═══════════════════════════════════════════════\n"
     "STEP 1 — Does this intent apply to this page? (STRICT)\n"
@@ -338,6 +360,21 @@ INTENT_DRAFTER_PROMPT = (
     "═══════════════════════════════════════════════\n"
     "QUALITY RULES — read before writing after_content\n"
     "═══════════════════════════════════════════════\n"
+
+    "RULE 0 — VERBATIM CONTENT (HIGHEST PRIORITY — check this first):\n"
+    "If `intent.verbatim_content` is non-empty, it contains EXACT WORDS from the meeting "
+    "describing what to add. You MUST use it as the sole factual source for `after_content`.\n"
+    "- Do NOT add, remove, or change any specific items listed in verbatim_content.\n"
+    "- You MAY format it (markdown bullets, bold key terms) but keep all facts verbatim.\n"
+    "- Do NOT supplement with additional points you infer from the transcript.\n"
+    "WRONG: verbatim_content='A is slow, B crashes' → you write 5 detailed technical concerns\n"
+    "CORRECT: verbatim_content='A is slow, B crashes' → after_content:\n"
+    "  - A is slow\n"
+    "  - B crashes\n"
+    "SELF-CHECK: After drafting after_content, count items: if verbatim_content has N comma-separated "
+    "items and your after_content has fewer than N items OR more than N+1 items, your draft is wrong — "
+    "regenerate after_content using only verbatim_content's items.\n"
+    "If `intent.verbatim_content` is empty, fall through to RULE 1 below.\n\n"
 
     "RULE 1 — TRANSCRIPT GROUNDING (most critical):\n"
     "Every sentence in after_content must be DIRECTLY traceable to a specific statement made in the "
@@ -419,6 +456,41 @@ INTENT_DRAFTER_PROMPT = (
 )
 
 
+def _enforce_verbatim_content(draft: Optional[Dict[str, Any]], intent: Any) -> Optional[Dict[str, Any]]:
+    """Post-LLM guard: for create/add intents with non-empty verbatim_content, ensure
+    after_content contains every verbatim item. If counts mismatch, synthesize after_content
+    directly from verbatim_content. Returns the (possibly modified) draft."""
+    if not draft:
+        return draft
+    action = (getattr(intent, "action", "") or "").strip().lower()
+    if action not in {"create", "add"}:
+        return draft
+    verbatim = (getattr(intent, "verbatim_content", "") or "").strip()
+    if not verbatim:
+        return draft
+    # Split on commas (primary) or semicolons (secondary), drop empties
+    import re as _re
+    items = [s.strip() for s in _re.split(r"[,;]\s+", verbatim) if s.strip()]
+    if len(items) <= 1:
+        return draft
+    after = (draft.get("after_content") or "").lower()
+    # Count items present in after_content via case-insensitive substring match
+    missing = [it for it in items if it.lower() not in after]
+    if not missing and abs(after.count("\n") - len(items)) <= 2:
+        # All items present and bullet count is sane
+        return draft
+    # Mismatch — synthesize after_content from verbatim_content
+    subject = (getattr(intent, "subject", "") or "").strip()
+    intro = f"{subject.capitalize()}:" if subject else "Overview:"
+    bullets = "\n".join(f"- {it}" for it in items)
+    draft["after_content"] = f"{intro}\n\n{bullets}"
+    logger.warning(
+        "Verbatim guard rewrote after_content for intent '%s' (missing items: %s)",
+        subject or "?", missing[:3],
+    )
+    return draft
+
+
 async def _run_intent_drafter(
     intent: Any,  # ChangeIntent
     page: Dict[str, Any],
@@ -448,6 +520,7 @@ async def _run_intent_drafter(
                 "new_value": getattr(intent, "new_value", "") or "",
                 "action": getattr(intent, "action", "replace") or "replace",
                 "rationale": getattr(intent, "rationale", "") or "",
+                "verbatim_content": getattr(intent, "verbatim_content", "") or "",
             },
             "page": {
                 "page_id": page_id,
@@ -457,6 +530,9 @@ async def _run_intent_drafter(
                 "section_content_map": page.get("section_content_map") or {},
             },
             "meeting_context": _build_meeting_context(transcript_text, facts=facts, summary_json=summary_json),
+            "relevant_transcript_window": _find_relevant_transcript_window(
+                transcript_text, getattr(intent, "subject", "") or ""
+            ),
         },
         ensure_ascii=False,
     )
@@ -483,7 +559,9 @@ async def _run_intent_drafter(
         )
         return None
 
-    return _normalize_intent_draft(data, page_id, page_title, intent=intent)
+    draft = _normalize_intent_draft(data, page_id, page_title, intent=intent)
+    draft = _enforce_verbatim_content(draft, intent)
+    return draft
 
 
 def _normalize_intent_draft(

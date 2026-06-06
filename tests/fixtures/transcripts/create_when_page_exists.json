@@ -1,0 +1,23 @@
+{
+  "name": "create_when_page_exists",
+  "description": "User says 'create a page about Inventory Service' but a page with that name already exists. Proposal-level still a create (accept handler will append).",
+  "transcript": [
+    {"participant": "Owen", "text": "We launched the Inventory Service last week and there's nothing about it on Confluence yet.", "timestamp": 1.0},
+    {"participant": "Pam", "text": "Create a page about Inventory Service. Include the API endpoint, the SLO, and the on-call rotation.", "timestamp": 7.0}
+  ],
+  "live_pages": [
+    {
+      "page_id": "pg-inventory",
+      "title": "Inventory Service",
+      "html": "<h2>Overview</h2><p>Empty stub.</p>",
+      "available_headings": ["Overview"]
+    }
+  ],
+  "expected": {
+    "n_proposals_min": 1,
+    "n_proposals_max": 2,
+    "must_have_change_summary": true,
+    "must_have_page_title": "inventory",
+    "must_have_change_type_any": ["create", "edit"]
+  }
+}

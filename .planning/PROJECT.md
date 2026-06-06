@@ -22,18 +22,20 @@ Users never have to manually update Confluence after a meeting — the system pr
 - ✓ FastAPI backend with WebSocket and TTS during meetings — existing
 - ✓ Meeting summary page (MeetingSummary.tsx) as post-meeting destination — existing
 
+### Validated
+
+- ✓ "Generate Confluence Changes" button on MeetingSummary page triggers proposal pipeline — Validated in Phase 3
+- ✓ Structured meeting fact extraction (decisions, action items, requirements, owners, deadlines) — Validated in Phase 2
+- ✓ Automated Confluence page retrieval via merged RAG (Pinecone + Neo4j in parallel) — Validated in Phase 2
+- ✓ Parallel DrafterAgent pool with per-page VerifierAgent enrichment — Validated in Phase 2
+- ✓ Proposal cards with full context: change_type, section, before/after, rationale, evidence, confidence, risk, verifier note — Validated in Phase 2
+- ✓ Review UI with SSE pipeline progress, proposal card groups, per-card accept/reject — Validated in Phase 3
+- ✓ Pipeline produces exactly one proposal per decision — no contradictions, duplicates, or hallucinated content — Validated in Phase 4
+
 ### Active
 
-- [ ] "Generate Confluence Changes" button on MeetingSummary page that triggers the proposal pipeline
-- [ ] Structured meeting fact extraction from transcript (decisions, action items, new/changed requirements, owners, deadlines, doc-worthy updates)
-- [ ] Automated candidate Confluence page retrieval via RAG — no user input required
-- [ ] Worker agents draft proposed edits and new pages per affected section
-- [ ] Verifier/critic agent validates each proposal against transcript evidence and current Confluence content
-- [ ] Proposal cards returned with: change_type, target page/section, before content, after content, rationale, transcript evidence snippets, confidence score, risk level
-- [ ] Review UI in sync-sage-bot showing proposal cards with accept/reject per card
-- [ ] Safe Confluence apply: fetch latest version, verify section anchor still matches, handle version conflicts
-- [ ] Re-index changed Confluence pages into Pinecone + Neo4j after accepted changes are applied
-- [ ] Pipeline progress indicator in UI (proposal generation can take up to 20 minutes)
+- [ ] Safe Confluence apply: fetch latest version, verify section anchor still matches, handle version conflicts (Phase 5)
+- [ ] Re-index changed Confluence pages into Pinecone + Neo4j after accepted changes are applied (Phase 5)
 
 ### Out of Scope
 
@@ -91,4 +93,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-11 after initialization*
+*Last updated: 2026-05-15 — Phase 4 complete*

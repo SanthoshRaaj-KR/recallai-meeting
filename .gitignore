@@ -24,4 +24,7 @@ node_modules
 .next
 .DS_Store
 
+# RAG index cache (generated at runtime by local_doc_change/rag/indexer.py)
+local_doc_change/index/
+
 

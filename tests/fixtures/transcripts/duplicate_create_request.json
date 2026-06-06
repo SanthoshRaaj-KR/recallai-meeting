@@ -1,0 +1,16 @@
+{
+  "name": "duplicate_create_request",
+  "description": "User asks twice in the same meeting for the same 'Architecture Overview' page — only one proposal should result.",
+  "transcript": [
+    {"participant": "Sam", "text": "We should create a page for the Architecture Overview — covers the service boundaries, datastores, and external APIs.", "timestamp": 1.0},
+    {"participant": "Tina", "text": "Yeah, makes sense.", "timestamp": 8.0},
+    {"participant": "Sam", "text": "Actually one more thing — also make a page for the Architecture Overview. It's important.", "timestamp": 30.0}
+  ],
+  "live_pages": [],
+  "expected": {
+    "n_proposals": 1,
+    "change_types": {"create": 1},
+    "must_have_change_summary": true,
+    "must_have_page_title": "architecture"
+  }
+}

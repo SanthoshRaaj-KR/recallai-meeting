@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>my-agent LiveKit Bridge</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0f0f0f; color: #fff; margin: 0; padding: 20px; }
+    h2 { margin: 0 0 16px; font-size: 18px; color: #a78bfa; }
+    .card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    .label { font-size: 11px; text-transform: uppercase; color: #888; margin-bottom: 4px; }
+    .status { font-size: 13px; }
+    .status.ok { color: #4ade80; }
+    .status.err { color: #f87171; }
+    .status.pending { color: #facc15; }
+    .console-link { display: block; margin-top: 8px; color: #60a5fa; word-break: break-all; font-size: 13px; text-decoration: none; }
+    .console-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h2>my-agent Meeting Bridge</h2>
+
+  <div class="card">
+    <div class="label">Agent Console</div>
+    <a class="console-link" id="console-link" href="#" target="_blank">Loading...</a>
+  </div>
+
+  <div class="card">
+    <div class="label">LiveKit Subscriber (agent TTS → meeting)</div>
+    <div class="status pending" id="status-sub">Connecting...</div>
+  </div>
+
+  <div class="card">
+    <div class="label">LiveKit Publisher (meeting audio → agent)</div>
+    <div class="status pending" id="status-pub">Connecting...</div>
+  </div>
+
+  <div class="card">
+    <div class="label">Room</div>
+    <div class="status" id="status-room" style="color:#d1d5db;">—</div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.18.9/dist/livekit-client.umd.min.js"></script>
+
+  <!--
+    ROOM 1 (subscriber) — identity: "recall-listener-{room_name}"
+    Purpose: plays back my-agent TTS audio into the meeting via Recall bot's speakers.
+    Recall's headless Chrome captures audio from <audio> elements and injects it
+    into the meeting, so all meeting participants hear the agent's voice.
+
+    Filters: skips audio from "recall-browser-*" (that's the meeting audio going
+    INTO LiveKit — playing it back would create an echo loop).
+  -->
+  <script>
+  (function () {
+    'use strict';
+
+    var params   = new URLSearchParams(window.location.search);
+    var lkUrl    = params.get('url');
+    var token    = params.get('token');
+    var roomName = params.get('room');
+    var statusEl = document.getElementById('status-sub');
+
+    function setStatus(msg) {
+      if (statusEl) statusEl.textContent = msg;
+      console.log('[bot.html][subscriber]', msg);
+    }
+
+    console.log('[bot.html][subscriber] params: url=' + lkUrl + ' room=' + roomName +
+      ' token=' + (token ? token.substring(0, 20) + '...' : 'MISSING'));
+
+    if (!lkUrl || !token) {
+      setStatus('ERROR: Missing url or token query param');
+      return;
+    }
+
+    var room = new LivekitClient.Room({
+      adaptiveStream: false,
+      dynacast: false,
+    });
+
+    var audioCtx = null;
+    // Maps track.sid → AudioNode (WebAudio) or HTMLAudioElement
+    var audioNodes = new Map();
+
+    function ensureAudioCtx() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+          latencyHint: 'interactive',
+        });
+        console.log('[bot.html][subscriber] AudioContext created, state=' + audioCtx.state);
+      }
+      if (audioCtx.state !== 'running') {
+        audioCtx.resume().catch(function (e) {
+          console.warn('[bot.html][subscriber] AudioContext resume failed:', e);
+        });
+      }
+      return audioCtx;
+    }
+
+    function warmSilentPlaybackPath() {
+      // Warm Chrome/Recall's audio element path without producing meeting sound.
+      // This is intentionally a muted, zero-volume, 10ms silent WAV.
+      var warmup = document.createElement('audio');
+      warmup.muted = true;
+      warmup.volume = 0;
+      warmup.autoplay = false;
+      warmup.src = 'data:audio/wav;base64,UklGRmQBAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YUABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
+      document.body.appendChild(warmup);
+      warmup.play()
+        .then(function () {
+          console.log('[bot.html][subscriber] Silent playback path warmup completed');
+        })
+        .catch(function (e) {
+          console.warn('[bot.html][subscriber] Silent playback path warmup failed:', e);
+        })
+        .finally(function () {
+          setTimeout(function () {
+            warmup.pause();
+            warmup.remove();
+          }, 250);
+        });
+    }
+
+    function playTrack(track, identity) {
+      // Primary path: HTMLAudioElement — reliable in Recall's headless Chrome.
+      // Recall captures audio from <audio> elements and injects it into the meeting.
+      var audioEl = track.attach();
+      audioEl.volume = 1.0;
+      audioEl.autoplay = true;
+      document.body.appendChild(audioEl);
+      audioEl.play().catch(function (e) {
+        console.warn('[bot.html][subscriber] audioEl.play() blocked for ' + identity + ':', e);
+      });
+      audioNodes.set(track.sid, audioEl);
+      console.log('[bot.html][subscriber] <audio> playing from: ' + identity);
+      return audioEl;
+    }
+
+    function attachTrack(track, identity, attempt) {
+      attempt = attempt || 1;
+      var rawTrack = track.mediaStreamTrack;
+      if (!rawTrack) {
+        if (attempt <= 5) {
+          console.warn('[bot.html][subscriber] mediaStreamTrack null for ' + identity +
+            ' — retry ' + attempt + '/5');
+          setTimeout(function () { attachTrack(track, identity, attempt + 1); }, 250);
+        } else {
+          console.warn('[bot.html][subscriber] mediaStreamTrack never arrived for ' + identity);
+          playTrack(track, identity);
+        }
+        return;
+      }
+      playTrack(track, identity);
+    }
+
+    room.on(LivekitClient.RoomEvent.Connected, function () {
+      setStatus('Subscriber connected — room: ' + (roomName || '<unknown>'));
+      ensureAudioCtx();
+      warmSilentPlaybackPath();
+      room.startAudio().catch(function (e) {
+        console.warn('[bot.html][subscriber] room.startAudio() failed (may be normal):', e);
+      });
+    });
+
+    room.on(LivekitClient.RoomEvent.Disconnected, function (reason) {
+      setStatus('Subscriber disconnected: ' + reason);
+    });
+
+    room.on(LivekitClient.RoomEvent.TrackSubscribed, function (track, pub, participant) {
+      console.log('[bot.html][subscriber] TrackSubscribed kind=' + track.kind +
+        ' from=' + participant.identity);
+
+      if (track.kind !== LivekitClient.Track.Kind.Audio) return;
+
+      // Skip the Recall publisher's own track — that's meeting audio going INTO LiveKit.
+      // Playing it back would create an echo loop.
+      if (participant.identity.startsWith('recall-browser-')) {
+        console.log('[bot.html][subscriber] Skipping recall-browser echo: ' + participant.identity);
+        return;
+      }
+
+      // Clean up any stale node for this sid
+      var existing = audioNodes.get(track.sid);
+      if (existing) {
+        if (typeof existing.disconnect === 'function') {
+          try { existing.disconnect(); } catch (_) {}
+        } else if (existing.pause) {
+          existing.pause();
+          existing.remove();
+        }
+        audioNodes.delete(track.sid);
+      }
+
+      attachTrack(track, participant.identity, 1);
+    });
+
+    room.on(LivekitClient.RoomEvent.TrackUnsubscribed, function (track, pub, participant) {
+      if (track.kind !== LivekitClient.Track.Kind.Audio) return;
+      if (participant.identity.startsWith('recall-browser-')) return;
+      var node = audioNodes.get(track.sid);
+      if (node) {
+        if (typeof node.disconnect === 'function') {
+          try { node.disconnect(); } catch (_) {}
+        } else if (node.pause) {
+          node.pause();
+          node.remove();
+        }
+        audioNodes.delete(track.sid);
+      }
+    });
+
+    room.connect(lkUrl, token)
+      .then(function () { setStatus('Subscriber room.connect resolved'); })
+      .catch(function (e) {
+        console.error('[bot.html][subscriber] room.connect failed:', e);
+        setStatus('Connect failed: ' + e.message);
+      });
+
+  })();
+  </script>
+
+  <!--
+    ROOM 2 (publisher) — identity: MUST BE "recall-browser-{room_name}"
+    Purpose: captures meeting audio via getUserMedia() and publishes it to LiveKit.
+
+    IDENTITY CONTRACT:
+      The pub_token minted by recall_bridge.py MUST grant identity = "recall-browser-{room_name}".
+      This identity MUST match the participant_identity in agent.py's RoomOptions.
+      If it doesn't match, my-agent never subscribes to this audio track and is deaf.
+
+    Inside Recall's headless Chrome:
+      getUserMedia() "microphone" = the mixed meeting audio (all participants combined),
+      NOT your laptop's physical microphone. This is how the agent hears the meeting.
+  -->
+  <script>
+  (function () {
+    'use strict';
+
+    var params    = new URLSearchParams(window.location.search);
+    var lkUrl     = params.get('url');
+    var pubToken  = params.get('pub_token');
+    var roomName  = params.get('room');
+
+    if (!lkUrl || !pubToken) {
+      console.warn('[bot.html][publisher] Missing pub_token — meeting audio will NOT reach my-agent');
+      return;
+    }
+
+    var pubRoom = new LivekitClient.Room({
+      adaptiveStream: false,
+      dynacast: false,
+    });
+
+    pubRoom.on(LivekitClient.RoomEvent.Connected, function () {
+      var identity = pubRoom.localParticipant.identity;
+      console.log('[bot.html][publisher] Connected as: ' + identity);
+
+      // Sanity check — warn if identity doesn't match what agent.py expects
+      if (!identity.startsWith('recall-browser-')) {
+        console.error(
+          '[bot.html][publisher] IDENTITY MISMATCH: pub_token grants identity="' + identity +
+          '" but agent.py expects "recall-browser-*". Fix token minting in recall_bridge.py.'
+        );
+      }
+
+      navigator.mediaDevices.getUserMedia({
+        audio: {
+          // Turn off browser DSP — Recall's digital audio stream is not a physical
+          // acoustic signal. These algorithms introduce metallic artifacts on WebRTC.
+          // The LiveKit agent handles its own audio processing.
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      })
+      .then(function (mediaStream) {
+        var meetingTrack = mediaStream.getAudioTracks()[0];
+        if (!meetingTrack) {
+          console.error('[bot.html][publisher] getUserMedia returned no audio tracks');
+          return;
+        }
+        return pubRoom.localParticipant.publishTrack(meetingTrack, {
+          name: 'recall-meeting-audio',
+          source: LivekitClient.Track.Source.Microphone,
+        });
+      })
+      .then(function () {
+        console.log('[bot.html][publisher] Meeting audio published to LiveKit as: ' +
+          pubRoom.localParticipant.identity);
+      })
+      .catch(function (e) {
+        console.error('[bot.html][publisher] getUserMedia or publishTrack failed:', e);
+      });
+    });
+
+    pubRoom.on(LivekitClient.RoomEvent.Disconnected, function (reason) {
+      console.warn('[bot.html][publisher] Disconnected:', reason);
+    });
+
+    pubRoom.connect(lkUrl, pubToken)
+      .catch(function (e) {
+        console.error('[bot.html][publisher] connect failed:', e);
+      });
+
+  })();
+  </script>
+
+</body>
+</html>
