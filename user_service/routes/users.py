@@ -53,6 +53,11 @@ def update_user(user_id: str, body: UserUpdate, claims: dict = Depends(get_curre
     if claims["role"] != OrgRole.CEO and claims["sub"] != user_id:
         raise HTTPException(403, "Not authorised to update this user")
     updates = body.model_dump(exclude_none=True)
+    if "role" in updates:
+        if claims["role"] != OrgRole.CEO:
+            raise HTTPException(403, "Only CEO can change roles")
+        if updates["role"] not in OrgRole.all:
+            raise HTTPException(400, f"Invalid role. Choose from: {OrgRole.all}")
     if not updates:
         raise HTTPException(400, "No fields to update")
     try:
@@ -62,6 +67,17 @@ def update_user(user_id: str, body: UserUpdate, claims: dict = Depends(get_curre
     if not rows:
         raise HTTPException(404, "User not found")
     return _to_user_out(rows[0])
+
+
+@router.get("/by-email/{email}", response_model=UserOut)
+def get_user_by_email(email: str, claims: dict = Depends(get_current_user)):
+    """Look up a user by email. CEO or manager can use this for the invite flow."""
+    if claims["role"] not in OrgRole.managers_and_above:
+        raise HTTPException(403, "Only managers and above can look up users by email")
+    row = select_one("org_users", {"email": f"eq.{email}"})
+    if not row:
+        raise HTTPException(404, f"No user found with email {email}")
+    return _to_user_out(row)
 
 
 @router.get("/{user_id}/reports", response_model=list[UserOut])
