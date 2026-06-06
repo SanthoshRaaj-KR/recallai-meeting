@@ -28,7 +28,7 @@ Frontend endpoints (sync-sage-bot):
   GET  /history                                     All past sessions
 
 Run alongside the agent:
-    uv run uvicorn src.recall_bridge:app --host 0.0.0.0 --port 8001
+    uv run uvicorn src.recall_bridge:app --host 0.0.0.0 --port 8000
 
 Required environment variables (.env.local):
     LIVEKIT_URL            wss://your-project.livekit.cloud
@@ -43,6 +43,9 @@ Optional:
     AGENT_NAME             LiveKit agent name to dispatch (default: my-agent)
     TOKEN_TTL_HOURS        LiveKit token lifetime in hours (default: 8)
     CORS_ORIGINS           comma-separated allowed origins (default: *)
+    CONFLUENCE_LOGIC_URL   internal URL of the jarvis_agentic service (default: http://localhost:8001)
+                           Set this to the Azure internal service DNS name when deploying on separate pods
+                           e.g. http://confluence-logic-service:8001
 """
 
 import asyncio
@@ -94,6 +97,11 @@ AGENT_NAME = os.getenv("AGENT_NAME", "my-agent")
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "8"))
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+
+# URL of the jarvis_agentic (confluence logic) service.
+# When both services run on the same host this is http://localhost:8001.
+# In Azure set this to the internal service DNS, e.g. http://confluence-logic:8001.
+CONFLUENCE_LOGIC_URL = os.getenv("CONFLUENCE_LOGIC_URL", "http://localhost:8001").rstrip("/")
 
 _BOT_HTML_PATH = Path(__file__).parent / "bot.html"
 
@@ -392,7 +400,7 @@ async def start_bot(body: StartBotRequest) -> StartBotResponse:
     Start a Recall.ai bot that joins the given meeting URL and connects it to my-agent.
 
     Example:
-        curl -X POST http://localhost:8001/bot/start \\
+        curl -X POST http://localhost:8000/bot/start \\
              -H "Content-Type: application/json" \\
              -d '{"meeting_url": "https://zoom.us/j/123456789"}'
     """
@@ -443,6 +451,24 @@ def _session_for_bot(bot_id: str) -> "_SessionRecord | None":
     return next((s for s in _sessions.values() if s.bot_id == bot_id), None)
 
 
+def _forward_to_confluence_logic(path: str, body: dict) -> None:
+    """Fire-and-forget HTTP POST to the jarvis_agentic service at CONFLUENCE_LOGIC_URL.
+
+    Called from async endpoints via asyncio.to_thread so it never blocks the event loop.
+    Failures are silently swallowed — the confluence-logic service is optional.
+    """
+    if not CONFLUENCE_LOGIC_URL:
+        return
+    try:
+        requests.post(
+            f"{CONFLUENCE_LOGIC_URL}{path}",
+            json=body,
+            timeout=3,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Confluence-logic forward failed (non-fatal): %s", exc)
+
+
 @app.post("/recall-webhook")
 async def recall_webhook(request: Request) -> dict:
     """Receive Recall.ai project-level webhook events.
@@ -458,6 +484,12 @@ async def recall_webhook(request: Request) -> dict:
         body = await request.json()
     except Exception:
         return {"ok": True}
+
+    # Forward to the confluence-logic service so jarvis_agentic can update its
+    # own session state when running as a separate Azure pod.
+    asyncio.create_task(
+        asyncio.to_thread(_forward_to_confluence_logic, "/recall-webhook", body)
+    )
 
     event = body.get("event", "")
     data = body.get("data", {})
@@ -566,6 +598,15 @@ async def receive_livekit_transcript(session_id: str, request: Request) -> dict:
     if len(session.transcript) > 2000:
         session.transcript = session.transcript[-2000:]
     session._touch()
+    # Forward to confluence-logic service so jarvis_agentic can use the transcript
+    # for its voice pipeline when running as a separate Azure pod.
+    asyncio.create_task(
+        asyncio.to_thread(
+            _forward_to_confluence_logic,
+            f"/livekit-transcript/{session_id}",
+            body,
+        )
+    )
     return {"ok": True, "transcript_entries": len(session.transcript)}
 
 
