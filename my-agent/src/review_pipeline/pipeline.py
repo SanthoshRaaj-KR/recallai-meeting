@@ -2165,16 +2165,20 @@ class ProposalPipeline:
     def _summary_llm_sync(self, transcript_text: str) -> dict[str, Any]:
         client = self._get_cerebras()
         response = client.chat.completions.create(
-            **self._llm_opts_cerebras(600),
+            **self._llm_opts_cerebras(800),
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "Extract a concise executive summary from this meeting transcript. "
-                        "Return JSON only: {\"title\": string, \"summary\": string, \"key_topics\": string[]}. "
-                        "title: 4-8 word meeting title. "
-                        "summary: 2-4 sentences capturing the main outcome. "
-                        "key_topics: up to 8 short topic labels."
+                        "You are an expert meeting analyst. Produce an executive summary from the meeting transcript below.\n\n"
+                        "Return JSON only: {\"title\": string, \"summary\": string, \"key_topics\": string[]}.\n\n"
+                        "title: a crisp 4-8 word title that captures the meeting's core purpose.\n\n"
+                        "summary: exactly 2 paragraphs, each 2-3 sentences. "
+                        "Paragraph 1 — context and objective: what the meeting was about and why it was called. "
+                        "Paragraph 2 — outcomes and next steps: the main decisions reached, agreements made, and immediate actions committed to. "
+                        "Write in plain, professional prose. No bullet points. No headers. No fluff. "
+                        "Separate the two paragraphs with a single blank line (\\n\\n).\n\n"
+                        "key_topics: up to 8 short noun-phrase labels for the main topics discussed."
                     ),
                 },
                 {"role": "user", "content": transcript_text},
