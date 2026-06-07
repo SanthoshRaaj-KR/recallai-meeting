@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAI
+from pydantic import BaseModel, ValidationError
 
 from memory_compaction import add_memory_context
 
@@ -38,6 +39,46 @@ from .text_utils import (
 logger = logging.getLogger(__name__)
 
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+# ── Cerebras response schemas ────────────────────────────────────────────────
+
+class _SummaryResponse(BaseModel):
+    title: str = ""
+    summary: str = ""
+    key_topics: list[str] = []
+
+
+class _DecisionsResponse(BaseModel):
+    decisions: list[str] = []
+
+
+class _ActionItem(BaseModel):
+    description: str
+    owner: str | None = None
+    due: str | None = None
+
+
+class _ActionItemsResponse(BaseModel):
+    action_items: list[_ActionItem] = []
+
+
+class _MOMEntry(BaseModel):
+    topic: str
+    summary: str = ""
+
+
+class _MOMResponse(BaseModel):
+    mom: list[_MOMEntry] = []
+
+
+def _extract_json(raw: str) -> str:
+    """Strip markdown code fences so json.loads can handle LLM output reliably."""
+    stripped = raw.strip()
+    # Remove ```json ... ``` or ``` ... ``` wrappers
+    stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.MULTILINE)
+    stripped = re.sub(r"\s*```\s*$", "", stripped, flags=re.MULTILINE)
+    return stripped.strip()
 
 
 class ProposalPipeline:
@@ -2188,7 +2229,13 @@ class ProposalPipeline:
                 {"role": "user", "content": transcript_text},
             ],
         )
-        return json.loads(response.choices[0].message.content or "{}")
+        raw = response.choices[0].message.content or "{}"
+        try:
+            data = json.loads(_extract_json(raw))
+            return _SummaryResponse.model_validate(data).model_dump()
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("Summary JSON parse failed: %s — raw: %.200s", exc, raw)
+            return _SummaryResponse().model_dump()
 
     def _decisions_llm_sync(self, transcript_text: str) -> list[str]:
         client = self._get_cerebras()
@@ -2206,8 +2253,13 @@ class ProposalPipeline:
                 {"role": "user", "content": transcript_text},
             ],
         )
-        data = json.loads(response.choices[0].message.content or "{}")
-        return [str(d) for d in (data.get("decisions") or []) if d]
+        raw = response.choices[0].message.content or "{}"
+        try:
+            data = json.loads(_extract_json(raw))
+            return [str(d) for d in _DecisionsResponse.model_validate(data).decisions if d]
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("Decisions JSON parse failed: %s — raw: %.200s", exc, raw)
+            return []
 
     def _action_items_llm_sync(self, transcript_text: str) -> list[dict[str, Any]]:
         client = self._get_cerebras()
@@ -2225,16 +2277,18 @@ class ProposalPipeline:
                 {"role": "user", "content": transcript_text},
             ],
         )
-        data = json.loads(response.choices[0].message.content or "{}")
-        return [
-            {
-                "description": str(item.get("description") or ""),
-                "owner": item.get("owner") or None,
-                "due": item.get("due") or None,
-            }
-            for item in (data.get("action_items") or [])
-            if item.get("description")
-        ]
+        raw = response.choices[0].message.content or "{}"
+        try:
+            data = json.loads(_extract_json(raw))
+            parsed = _ActionItemsResponse.model_validate(data)
+            return [
+                {"description": item.description, "owner": item.owner, "due": item.due}
+                for item in parsed.action_items
+                if item.description
+            ]
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("Action items JSON parse failed: %s — raw: %.200s", exc, raw)
+            return []
 
     def _mom_llm_sync(self, transcript_text: str) -> list[dict[str, Any]]:
         client = self._get_cerebras()
@@ -2253,12 +2307,18 @@ class ProposalPipeline:
                 {"role": "user", "content": transcript_text},
             ],
         )
-        data = json.loads(response.choices[0].message.content or "{}")
-        return [
-            {"topic": str(item.get("topic") or ""), "summary": str(item.get("summary") or "")}
-            for item in (data.get("mom") or [])
-            if item.get("topic")
-        ]
+        raw = response.choices[0].message.content or "{}"
+        try:
+            data = json.loads(_extract_json(raw))
+            parsed = _MOMResponse.model_validate(data)
+            return [
+                {"topic": item.topic, "summary": item.summary}
+                for item in parsed.mom
+                if item.topic
+            ]
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("MOM JSON parse failed: %s — raw: %.200s", exc, raw)
+            return []
 
     async def generate_meeting_summary(
         self,
@@ -2362,8 +2422,8 @@ class ProposalPipeline:
                 logger.error("%s Cerebras call failed: %s", label, result, exc_info=result)
                 return None
             try:
-                return json.loads(result)
-            except Exception as exc:
+                return json.loads(_extract_json(result))
+            except (json.JSONDecodeError, ValueError) as exc:
                 logger.error("%s JSON parse failed: %s — raw: %.200s", label, exc, result)
                 return None
 
