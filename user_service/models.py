@@ -10,11 +10,13 @@ from pydantic import BaseModel
 
 class OrgRole:
     CEO = "CEO"
+    ADMIN = "ADMIN"
     MANAGER = "MANAGER"
     MEMBER = "MEMBER"
     ASSOCIATE = "ASSOCIATE"
-    all = ("CEO", "MANAGER", "MEMBER", "ASSOCIATE")
-    managers_and_above = ("CEO", "MANAGER")
+    all = ("CEO", "ADMIN", "MANAGER", "MEMBER", "ASSOCIATE")
+    managers_and_above = ("CEO", "ADMIN", "MANAGER")
+    admin_and_above = ("CEO", "ADMIN")
 
 
 class TeamRole:

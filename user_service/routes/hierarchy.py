@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..auth import get_current_user
 from ..database import select, select_one
 from ..models import UserOut, HierarchyNode, OrgRole
-from ..rbac import require_ceo
+from ..rbac import require_admin_or_above
 
 router = APIRouter(prefix="/org", tags=["hierarchy"])
 
@@ -32,8 +32,8 @@ def _build_tree(user_id: str, all_users: dict[str, dict], hierarchy_rows: list[d
 
 
 @router.get("/hierarchy", response_model=HierarchyNode)
-def full_org_hierarchy(claims: dict = Depends(require_ceo())):
-    """CEO only: returns the full org tree rooted at the CEO."""
+def full_org_hierarchy(claims: dict = Depends(require_admin_or_above())):
+    """CEO or ADMIN: returns the full org tree rooted at the CEO."""
     org_id = claims.get("org_id")
     users_list = select("org_users", {"org_id": f"eq.{org_id}"})
     if not users_list:

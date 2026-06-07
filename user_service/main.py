@@ -63,6 +63,7 @@ from .routes.teams import router as teams_router
 from .routes.hierarchy import router as hierarchy_router
 from .routes.bots import router as bots_router
 from .routes.invites import router as invites_router
+from .routes.analytics import router as analytics_router
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 _ALLOW_DB_RESET = os.getenv("ALLOW_DB_RESET", "false").lower() == "true"
@@ -91,6 +92,7 @@ app.include_router(teams_router)
 app.include_router(hierarchy_router)
 app.include_router(bots_router)
 app.include_router(invites_router)
+app.include_router(analytics_router)
 
 
 @app.get("/health")

@@ -14,7 +14,7 @@ from ..models import (
     TeamInviteCreate, TeamInviteOut,
     OrgRole, TeamRole,
 )
-from ..rbac import require_ceo, require_manager_or_above
+from ..rbac import require_ceo, require_admin_or_above, require_manager_or_above
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def _enrich_team(row: dict) -> TeamOut:
 
 @router.get("", response_model=list[TeamOut])
 def list_teams(claims: dict = Depends(get_current_user)):
-    if claims["role"] == OrgRole.CEO:
+    if claims["role"] in (OrgRole.CEO, OrgRole.ADMIN):
         rows = select("org_teams", {"org_id": f"eq.{claims['org_id']}"})
     else:
         # Return only teams this user belongs to
@@ -58,7 +58,7 @@ def list_teams(claims: dict = Depends(get_current_user)):
 
 
 @router.post("", response_model=TeamOut, status_code=status.HTTP_201_CREATED)
-def create_team(body: TeamCreate, claims: dict = Depends(require_ceo())):
+def create_team(body: TeamCreate, claims: dict = Depends(require_admin_or_above())):
     team_data: dict = {"name": body.name, "org_id": body.org_id}
     if body.description is not None:
         team_data["description"] = body.description
@@ -74,7 +74,7 @@ def get_team(team_id: str, claims: dict = Depends(get_current_user)):
     row = select_one("org_teams", {"id": f"eq.{team_id}"})
     if not row:
         raise HTTPException(404, "Team not found")
-    if claims["role"] != OrgRole.CEO:
+    if claims["role"] not in (OrgRole.CEO, OrgRole.ADMIN):
         member = select_one("org_team_members", {
             "team_id": f"eq.{team_id}", "user_id": f"eq.{claims['sub']}",
         })
@@ -88,8 +88,8 @@ def update_team(team_id: str, body: TeamUpdate, claims: dict = Depends(get_curre
     row = select_one("org_teams", {"id": f"eq.{team_id}"})
     if not row:
         raise HTTPException(404, "Team not found")
-    if claims["role"] != OrgRole.CEO and not _is_team_manager(team_id, claims["sub"]):
-        raise HTTPException(403, "Only team manager or CEO can update team")
+    if claims["role"] not in (OrgRole.CEO, OrgRole.ADMIN) and not _is_team_manager(team_id, claims["sub"]):
+        raise HTTPException(403, "Only team manager, ADMIN, or CEO can update team")
     updates = body.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(400, "No fields to update")
@@ -98,7 +98,7 @@ def update_team(team_id: str, body: TeamUpdate, claims: dict = Depends(get_curre
 
 
 @router.delete("/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_team(team_id: str, claims: dict = Depends(require_ceo())):
+def delete_team(team_id: str, claims: dict = Depends(require_admin_or_above())):
     delete("org_teams", {"id": f"eq.{team_id}"})
 
 
@@ -109,7 +109,7 @@ def list_members(team_id: str, claims: dict = Depends(get_current_user)):
     row = select_one("org_teams", {"id": f"eq.{team_id}"})
     if not row:
         raise HTTPException(404, "Team not found")
-    if claims["role"] != OrgRole.CEO:
+    if claims["role"] not in (OrgRole.CEO, OrgRole.ADMIN):
         member = select_one("org_team_members", {
             "team_id": f"eq.{team_id}", "user_id": f"eq.{claims['sub']}",
         })
@@ -141,8 +141,8 @@ def add_member(team_id: str, body: AddMemberRequest, claims: dict = Depends(get_
     team = select_one("org_teams", {"id": f"eq.{team_id}"})
     if not team:
         raise HTTPException(404, "Team not found")
-    if claims["role"] != OrgRole.CEO and not _is_team_manager(team_id, claims["sub"]):
-        raise HTTPException(403, "Only team manager or CEO can add members")
+    if claims["role"] not in (OrgRole.CEO, OrgRole.ADMIN) and not _is_team_manager(team_id, claims["sub"]):
+        raise HTTPException(403, "Only team manager, ADMIN, or CEO can add members")
     if body.role not in (TeamRole.MANAGER, TeamRole.MEMBER, TeamRole.ASSOCIATE):
         raise HTTPException(400, f"Invalid team role: {body.role}")
 
@@ -176,8 +176,8 @@ def remove_member(team_id: str, user_id: str, body: RemoveMemberRequest, claims:
     team = select_one("org_teams", {"id": f"eq.{team_id}"})
     if not team:
         raise HTTPException(404, "Team not found")
-    if claims["role"] != OrgRole.CEO and not _is_team_manager(team_id, claims["sub"]):
-        raise HTTPException(403, "Only team manager or CEO can remove members")
+    if claims["role"] not in (OrgRole.CEO, OrgRole.ADMIN) and not _is_team_manager(team_id, claims["sub"]):
+        raise HTTPException(403, "Only team manager, ADMIN, or CEO can remove members")
     delete("org_team_members", {"team_id": f"eq.{team_id}", "user_id": f"eq.{user_id}"})
     # Remove from hierarchy
     delete("org_reporting_hierarchy", {"descendant_id": f"eq.{user_id}"})
@@ -190,8 +190,8 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     team = select_one("org_teams", {"id": f"eq.{team_id}"})
     if not team:
         raise HTTPException(404, "Team not found")
-    if claims["role"] != OrgRole.CEO and not _is_team_manager(team_id, claims["sub"]):
-        raise HTTPException(403, "Only team manager or CEO can invite members")
+    if claims["role"] not in (OrgRole.CEO, OrgRole.ADMIN) and not _is_team_manager(team_id, claims["sub"]):
+        raise HTTPException(403, "Only team manager, ADMIN, or CEO can invite members")
     if body.role not in (TeamRole.MANAGER, TeamRole.MEMBER, TeamRole.ASSOCIATE):
         raise HTTPException(400, f"Invalid team role: {body.role}")
 

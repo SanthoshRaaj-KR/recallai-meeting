@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from ..auth import get_current_user
 from ..database import select, select_one, insert, DBError
 from ..models import BotCreate, BotOut, OrgRole, TeamRole
-from ..rbac import require_ceo
+from ..rbac import require_admin_or_above
 
 router = APIRouter(tags=["bots"])
 
@@ -20,7 +20,7 @@ def _is_team_member(team_id: str, user_id: str) -> bool:
 
 @router.get("/teams/{team_id}/bot", response_model=BotOut)
 def get_team_bot(team_id: str, claims: dict = Depends(get_current_user)):
-    if claims["role"] != OrgRole.CEO and not _is_team_member(team_id, claims["sub"]):
+    if claims["role"] not in (OrgRole.CEO, OrgRole.ADMIN) and not _is_team_member(team_id, claims["sub"]):
         raise HTTPException(403, "Not authorised to view this team's bot")
     bot = select_one("org_team_bots", {"team_id": f"eq.{team_id}"})
     if not bot:
@@ -32,8 +32,8 @@ def get_team_bot(team_id: str, claims: dict = Depends(get_current_user)):
 
 
 @router.post("/teams/{team_id}/bot", response_model=BotOut, status_code=status.HTTP_201_CREATED)
-def assign_team_bot(team_id: str, body: BotCreate, claims: dict = Depends(require_ceo())):
-    """CEO only: assign (or re-assign) a bot to a team."""
+def assign_team_bot(team_id: str, body: BotCreate, claims: dict = Depends(require_admin_or_above())):
+    """CEO or ADMIN: assign (or re-assign) a bot to a team."""
     team = select_one("org_teams", {"id": f"eq.{team_id}"})
     if not team:
         raise HTTPException(404, "Team not found")
@@ -60,7 +60,7 @@ def list_team_meetings(team_id: str, claims: dict = Depends(get_current_user)):
     CEO can see all teams. Team members can only see their own team's meetings.
     Bot context is isolated: members cannot see sessions from other teams.
     """
-    if claims["role"] != OrgRole.CEO and not _is_team_member(team_id, claims["sub"]):
+    if claims["role"] not in (OrgRole.CEO, OrgRole.ADMIN) and not _is_team_member(team_id, claims["sub"]):
         raise HTTPException(403, "Not authorised to view this team's meetings")
 
     sessions = select("jarvis_sessions", {"team_id": f"eq.{team_id}", "order": "updated_at.desc"})

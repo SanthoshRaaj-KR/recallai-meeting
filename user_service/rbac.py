@@ -22,8 +22,12 @@ def require_ceo():
     return require_roles(OrgRole.CEO)
 
 
+def require_admin_or_above():
+    return require_roles(OrgRole.CEO, OrgRole.ADMIN)
+
+
 def require_manager_or_above():
-    return require_roles(OrgRole.CEO, OrgRole.MANAGER)
+    return require_roles(OrgRole.CEO, OrgRole.ADMIN, OrgRole.MANAGER)
 
 
 def require_any_role():
