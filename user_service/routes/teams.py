@@ -40,6 +40,7 @@ def _enrich_team(row: dict) -> TeamOut:
         created_at=row["created_at"],
         member_count=len(members),
         bot_assigned=bot is not None,
+        description=row.get("description"),
     )
 
 
@@ -58,8 +59,11 @@ def list_teams(claims: dict = Depends(get_current_user)):
 
 @router.post("", response_model=TeamOut, status_code=status.HTTP_201_CREATED)
 def create_team(body: TeamCreate, claims: dict = Depends(require_ceo())):
+    team_data: dict = {"name": body.name, "org_id": body.org_id}
+    if body.description is not None:
+        team_data["description"] = body.description
     try:
-        row = insert("org_teams", {"name": body.name, "org_id": body.org_id})
+        row = insert("org_teams", team_data)
     except DBError as e:
         raise HTTPException(500, str(e))
     return _enrich_team(row)

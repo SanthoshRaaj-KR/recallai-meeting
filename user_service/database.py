@@ -110,3 +110,9 @@ def delete(table: str, filters: dict[str, str]) -> None:
     _check_configured()
     resp = _call(requests.delete, _url(table), headers=_headers(), params=filters, timeout=8)
     _raise_for(resp)
+
+
+def delete_all(table: str, match_col: str = "id") -> None:
+    _check_configured()
+    resp = _call(requests.delete, _url(table), headers=_headers(), params={match_col: "not.is.null"}, timeout=15)
+    _raise_for(resp)

@@ -5,8 +5,10 @@ Both bot_service (port 8000) and confluence_service (port 8001) read and
 write session state through this module so they share the same meeting data
 without coupling their processes together.
 
-Falls back to a per-process in-memory dict when Supabase is not configured
-(useful for local dev without Supabase).
+Priority:
+  1. Supabase (if SUPABASE_URL + key are set) — authoritative cross-host store
+  2. SQLite file (.sessions.db next to .env.local) — cross-process shared store
+     for local dev without Supabase
 
 Required Supabase table (run migrations/001_initial.sql):
     jarvis_sessions (session_id PK, bot_id, meeting_url, status, error,
@@ -16,8 +18,11 @@ Required Supabase table (run migrations/001_initial.sql):
 """
 
 import datetime
+import json
 import logging
 import os
+import sqlite3
+import threading
 from pathlib import Path
 
 import requests
@@ -35,7 +40,9 @@ _SUPABASE_KEY = (
 )
 _TABLE = "jarvis_sessions"
 
-_local: dict[str, dict] = {}
+# SQLite fallback — shared file so both services see the same sessions
+_DB_PATH = Path(__file__).parent.parent / ".sessions.db"
+_db_lock = threading.Lock()
 
 
 def _utcnow() -> str:
@@ -61,6 +68,73 @@ def _rest_url() -> str:
     return f"{_SUPABASE_URL}/rest/v1/{_TABLE}"
 
 
+# ── SQLite helpers ─────────────────────────────────────────────────────────────
+
+def _db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(_DB_PATH), timeout=10, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _ensure_table() -> None:
+    with _db_lock:
+        with _db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    data       TEXT NOT NULL,
+                    updated_at TEXT
+                )
+            """)
+            conn.commit()
+
+
+_ensure_table()
+
+
+def _sqlite_get(session_id: str) -> dict | None:
+    with _db_lock:
+        with _db_conn() as conn:
+            row = conn.execute(
+                "SELECT data FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+    if row:
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return None
+    return None
+
+
+def _sqlite_set(session_id: str, data: dict) -> None:
+    serialized = json.dumps(data, default=str)
+    with _db_lock:
+        with _db_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (session_id, data, updated_at) VALUES (?, ?, ?)",
+                (session_id, serialized, data.get("updated_at")),
+            )
+            conn.commit()
+
+
+def _sqlite_list() -> list[dict]:
+    with _db_lock:
+        with _db_conn() as conn:
+            rows = conn.execute(
+                "SELECT data FROM sessions ORDER BY updated_at DESC"
+            ).fetchall()
+    result = []
+    for (raw,) in rows:
+        try:
+            result.append(json.loads(raw))
+        except Exception:
+            pass
+    return result
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
 def get(session_id: str) -> dict | None:
     if _use_supabase():
         try:
@@ -73,17 +147,17 @@ def get(session_id: str) -> dict | None:
             if resp.ok:
                 data = resp.json()
                 if data:
-                    _local[session_id] = data[0]
+                    _sqlite_set(session_id, data[0])
                     return data[0]
                 return None
         except Exception as exc:
             logger.warning("session_store.get remote failed: %s — using local cache", exc)
-    return _local.get(session_id)
+    return _sqlite_get(session_id)
 
 
 def upsert(session_id: str, data: dict) -> dict:
     record = {**data, "session_id": session_id, "updated_at": _utcnow()}
-    _local[session_id] = record
+    _sqlite_set(session_id, record)
     if _use_supabase():
         try:
             resp = requests.post(
@@ -96,7 +170,7 @@ def upsert(session_id: str, data: dict) -> dict:
             if resp.ok:
                 rows = resp.json()
                 if rows:
-                    _local[session_id] = rows[0]
+                    _sqlite_set(session_id, rows[0])
                     return rows[0]
         except Exception as exc:
             logger.warning("session_store.upsert remote failed: %s — local only", exc)
@@ -105,8 +179,9 @@ def upsert(session_id: str, data: dict) -> dict:
 
 def patch(session_id: str, updates: dict) -> None:
     updates = {**updates, "updated_at": _utcnow()}
-    if session_id in _local:
-        _local[session_id] = {**_local[session_id], **updates}
+    existing = _sqlite_get(session_id) or {}
+    merged = {**existing, **updates}
+    _sqlite_set(session_id, merged)
     if _use_supabase():
         try:
             requests.patch(
@@ -132,11 +207,11 @@ def list_all() -> list[dict]:
             if resp.ok:
                 rows = resp.json()
                 for r in rows:
-                    _local[r["session_id"]] = r
+                    _sqlite_set(r["session_id"], r)
                 return rows
         except Exception as exc:
             logger.warning("session_store.list_all remote failed: %s — using local", exc)
-    return sorted(_local.values(), key=lambda x: x.get("updated_at") or "", reverse=True)
+    return _sqlite_list()
 
 
 def require(session_id: str) -> dict:

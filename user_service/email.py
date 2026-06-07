@@ -1,4 +1,4 @@
-"""Email utility — sends team invite emails, falls back to console log if SMTP not configured."""
+"""Email utility — welcome and invite emails; falls back to console log if SMTP not configured."""
 from __future__ import annotations
 
 import logging
@@ -17,6 +17,63 @@ FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER) or "noreply@jarvis.app"
 APP_URL = os.getenv("APP_URL", "http://localhost:3000").rstrip("/")
 
 
+def _send(to_email: str, subject: str, plain: str, html: str) -> None:
+    if not SMTP_USER or not SMTP_PASS:
+        logger.warning("[email] SMTP not configured — would send to <%s>: %s", to_email, subject)
+        return
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"Jarvis <{FROM_EMAIL}>"
+    msg["To"] = to_email
+    msg.attach(MIMEText(plain, "plain"))
+    msg.attach(MIMEText(html, "html"))
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+        logger.info("[email] Sent '%s' to %s", subject, to_email)
+    except Exception as exc:
+        logger.error("[email] Delivery failed for %s: %s", to_email, exc)
+        raise RuntimeError(f"Email delivery failed: {exc}") from exc
+
+
+def send_welcome_email(to_email: str, name: str) -> None:
+    """Send a welcome / confirmation email after successful registration."""
+    plain = (
+        f"Hi {name},\n\n"
+        f"Welcome to Jarvis! Your account has been created successfully.\n\n"
+        f"Sign in at: {APP_URL}/login\n\n"
+        f"— The Jarvis Team"
+    )
+    html = f"""<!doctype html>
+<html lang="en">
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:40px auto;padding:0 16px;color:#111">
+  <div style="text-align:center;margin-bottom:32px">
+    <div style="display:inline-flex;align-items:center;gap:8px">
+      <div style="width:12px;height:12px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6)"></div>
+      <span style="font-weight:600;font-size:18px">Jarvis</span>
+    </div>
+  </div>
+  <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:32px">
+    <h2 style="font-size:20px;margin:0 0 8px">Welcome, {name}!</h2>
+    <p style="color:#6b7280;margin:0 0 24px">
+      Your Jarvis account has been created. You're all set to get started.
+    </p>
+    <a href="{APP_URL}/login"
+       style="display:block;text-align:center;background:#6366f1;color:#fff;padding:14px 24px;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px">
+      Sign In &rarr;
+    </a>
+  </div>
+  <p style="color:#9ca3af;font-size:12px;text-align:center;margin-top:24px">
+    If you didn't create this account, please ignore this email.
+  </p>
+</body>
+</html>"""
+    _send(to_email, "Welcome to Jarvis", plain, html)
+
+
 def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: str, role: str) -> None:
     """Send a team invite email. Logs the code to console if SMTP is not configured."""
     if not SMTP_USER or not SMTP_PASS:
@@ -25,11 +82,6 @@ def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: st
             to_email, code, APP_URL, code,
         )
         return
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"You're invited to join {team_name} on Jarvis"
-    msg["From"] = f"Jarvis <{FROM_EMAIL}>"
-    msg["To"] = to_email
 
     plain = (
         f"Hi,\n\n"
@@ -68,16 +120,4 @@ def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: st
 </body>
 </html>"""
 
-    msg.attach(MIMEText(plain, "plain"))
-    msg.attach(MIMEText(html, "html"))
-
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        logger.info("[invite] Email sent to %s", to_email)
-    except Exception as exc:
-        logger.error("[invite] Email delivery failed for %s: %s", to_email, exc)
-        raise RuntimeError(f"Email delivery failed: {exc}") from exc
+    _send(to_email, f"You're invited to join {team_name} on Jarvis", plain, html)

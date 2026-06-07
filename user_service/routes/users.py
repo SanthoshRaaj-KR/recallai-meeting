@@ -1,11 +1,16 @@
 """User CRUD routes."""
 
+import logging
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import get_current_user
 from ..database import select, select_one, update, DBError
-from ..models import UserOut, UserUpdate, OrgRole
+from ..models import UserOut, UserUpdate, MeetingStats, OrgRole
 from ..rbac import require_ceo
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -19,6 +24,11 @@ def _to_user_out(row: dict) -> UserOut:
         org_id=row.get("org_id"),
         is_active=row.get("is_active", True),
         created_at=row["created_at"],
+        job_title=row.get("job_title"),
+        department=row.get("department"),
+        phone=row.get("phone"),
+        bio=row.get("bio"),
+        avatar_url=row.get("avatar_url"),
     )
 
 
@@ -99,6 +109,62 @@ def get_direct_reports(user_id: str, claims: dict = Depends(get_current_user)):
         if u:
             result.append(_to_user_out(u))
     return result
+
+
+@router.get("/me/stats", response_model=MeetingStats)
+def get_my_stats(claims: dict = Depends(get_current_user)):
+    """Return meeting stats for the current user based on their team memberships."""
+    user_id = claims["sub"]
+    memberships = select("org_team_members", {"user_id": f"eq.{user_id}"})
+    team_ids = [m["team_id"] for m in memberships]
+
+    if not team_ids:
+        return MeetingStats(total_meetings=0, total_minutes=0)
+
+    all_sessions: list[dict] = []
+    for tid in team_ids:
+        sessions = select("jarvis_sessions", {"team_id": f"eq.{tid}", "status": "eq.ended"})
+        all_sessions.extend(sessions)
+
+    now = datetime.now(timezone.utc)
+    week_ago = now - timedelta(days=7)
+    month_ago = now - timedelta(days=30)
+
+    total_minutes = 0.0
+    meetings_this_week = 0
+    meetings_this_month = 0
+    durations: list[float] = []
+    last_meeting_at: str | None = None
+
+    for s in all_sessions:
+        started_raw = s.get("started_at")
+        ended_raw = s.get("ended_at")
+        if started_raw and ended_raw:
+            try:
+                start = datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+                end = datetime.fromisoformat(ended_raw.replace("Z", "+00:00"))
+                dur = (end - start).total_seconds() / 60
+                total_minutes += dur
+                durations.append(dur)
+                if start >= week_ago:
+                    meetings_this_week += 1
+                if start >= month_ago:
+                    meetings_this_month += 1
+            except Exception:
+                pass
+        if ended_raw and (last_meeting_at is None or ended_raw > last_meeting_at):
+            last_meeting_at = ended_raw
+
+    avg_mins = round(sum(durations) / len(durations), 1) if durations else 0.0
+
+    return MeetingStats(
+        total_meetings=len(all_sessions),
+        total_minutes=round(total_minutes),
+        last_meeting_at=last_meeting_at,
+        meetings_this_week=meetings_this_week,
+        meetings_this_month=meetings_this_month,
+        avg_meeting_duration_mins=avg_mins,
+    )
 
 
 @router.get("/{user_id}/manager", response_model=UserOut)

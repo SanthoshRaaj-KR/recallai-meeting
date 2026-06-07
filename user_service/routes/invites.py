@@ -59,13 +59,15 @@ def accept_invite(code: str, body: AcceptInviteRequest):
     if existing_user:
         user_id = existing_user["id"]
     else:
-        if not body.name or not body.password:
-            raise HTTPException(400, "name and password are required to create a new account")
+        if not body.name:
+            raise HTTPException(400, "name is required to create a new account")
+        # password_hash is nullable — Google-auth users authenticate via /auth/google-exchange
+        pw_hash = hash_password(body.password) if body.password else None
         try:
             new_user = insert("org_users", {
                 "email": invite["email"],
                 "name": body.name,
-                "password_hash": hash_password(body.password),
+                "password_hash": pw_hash,
                 "role": OrgRole.MEMBER,
                 "org_id": team["org_id"],
                 "is_active": True,

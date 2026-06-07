@@ -31,11 +31,20 @@ class RegisterRequest(BaseModel):
     password: str
     role: str = OrgRole.MEMBER
     org_id: Optional[str] = None
+    job_title: Optional[str] = None
+    department: Optional[str] = None
+    phone: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class GoogleExchangeRequest(BaseModel):
+    supabase_token: str
 
 
 class TokenResponse(BaseModel):
@@ -60,6 +69,11 @@ class UserOut(BaseModel):
     org_id: Optional[str]
     is_active: bool
     created_at: str
+    job_title: Optional[str] = None
+    department: Optional[str] = None
+    phone: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
 
 
 class UserUpdate(BaseModel):
@@ -67,6 +81,20 @@ class UserUpdate(BaseModel):
     email: Optional[str] = None
     is_active: Optional[bool] = None
     role: Optional[str] = None
+    job_title: Optional[str] = None
+    department: Optional[str] = None
+    phone: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+
+class MeetingStats(BaseModel):
+    total_meetings: int
+    total_minutes: int
+    last_meeting_at: Optional[str] = None
+    meetings_this_week: int = 0
+    meetings_this_month: int = 0
+    avg_meeting_duration_mins: float = 0.0
 
 
 # ── Organization models ────────────────────────────────────────────────────────
@@ -86,6 +114,7 @@ class OrgOut(BaseModel):
 class TeamCreate(BaseModel):
     name: str
     org_id: str
+    description: Optional[str] = None
 
 
 class TeamOut(BaseModel):
@@ -95,10 +124,12 @@ class TeamOut(BaseModel):
     created_at: str
     member_count: int = 0
     bot_assigned: bool = False
+    description: Optional[str] = None
 
 
 class TeamUpdate(BaseModel):
     name: Optional[str] = None
+    description: Optional[str] = None
 
 
 # ── Team member models ─────────────────────────────────────────────────────────

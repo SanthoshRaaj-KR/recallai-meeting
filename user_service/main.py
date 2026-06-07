@@ -52,10 +52,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from .database import DBError
+from .database import DBError, delete_all
 
 from .routes.auth import router as auth_router
 from .routes.users import router as users_router
@@ -65,6 +65,7 @@ from .routes.bots import router as bots_router
 from .routes.invites import router as invites_router
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+_ALLOW_DB_RESET = os.getenv("ALLOW_DB_RESET", "false").lower() == "true"
 
 app = FastAPI(
     title="Jarvis Org / User Service",
@@ -95,3 +96,31 @@ app.include_router(invites_router)
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "org-user-service"}
+
+
+# Dev-only: wipes all rows from every org table (schema stays intact).
+# Called automatically by the frontend after Google sign-in.
+_RESET_ORDER = [
+    ("org_team_invitations", "id"),
+    ("org_team_bots", "id"),
+    ("org_team_members", "team_id"),
+    ("org_reporting_hierarchy", "ancestor_id"),
+    ("jarvis_sessions", "session_id"),
+    ("org_users", "id"),
+    ("org_teams", "id"),
+    ("organizations", "id"),
+]
+
+@app.post("/admin/reset", status_code=200)
+def reset_db():
+    if not _ALLOW_DB_RESET:
+        raise HTTPException(status_code=403, detail="DB reset is disabled. Set ALLOW_DB_RESET=true in .env to enable.")
+    errors = []
+    for table, col in _RESET_ORDER:
+        try:
+            delete_all(table, col)
+        except Exception as exc:
+            errors.append(f"{table}: {exc}")
+    if errors:
+        return {"ok": False, "errors": errors}
+    return {"ok": True, "cleared": [t for t, _ in _RESET_ORDER]}
