@@ -14,6 +14,7 @@ import os
 from agents import Agent, Runner
 from pydantic import BaseModel, Field
 
+from agents_local.llm_runtime import guarded_run
 from models import ChunkRecord, LocalDocIntent
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class EvaluationAgent:
             f"Section content:\n{content}"
         )
         try:
-            result = await Runner.run(self._agent, prompt)
+            result = await guarded_run(self._agent, prompt)
             return result.final_output.relevance_score
         except Exception:
             logger.warning(

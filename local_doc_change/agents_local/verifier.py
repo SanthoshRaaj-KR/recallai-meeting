@@ -14,6 +14,8 @@ import os
 from agents import Agent, Runner
 from pydantic import BaseModel, Field
 
+from agents_local.llm_runtime import guarded_run
+
 logger = logging.getLogger(__name__)
 
 VERIFIER_INSTRUCTIONS = """\
@@ -83,7 +85,7 @@ class VerifierAgent:
             f"After:\n{after_content}"
         )
         try:
-            result = await Runner.run(self._agent, prompt)
+            result = await guarded_run(self._agent, prompt)
             raw: _VerifierRaw = result.final_output
             quality_score = (
                 raw.factual_consistency * 0.4

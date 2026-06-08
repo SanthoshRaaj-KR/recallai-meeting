@@ -27,6 +27,7 @@ from collections import Counter
 from agents import Agent, Runner
 from pydantic import BaseModel
 
+from agents_local.llm_runtime import guarded_run
 from models import ChunkRecord, LocalDocIntent
 
 logger = logging.getLogger(__name__)
@@ -361,7 +362,7 @@ class RemovalResolverAgent:
             f"Document sections in order:\n{listing}"
         )
         try:
-            result = await Runner.run(self._agent, prompt)
+            result = await guarded_run(self._agent, prompt)
             plan: _RemovalPlan = result.final_output
             valid = set(ordered_headings)
             return [h for h in plan.headings_to_delete if h in valid]

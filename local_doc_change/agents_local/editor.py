@@ -12,6 +12,7 @@ import os
 from agents import Agent, Runner
 from pydantic import BaseModel
 
+from agents_local.llm_runtime import guarded_run
 from models import LocalDocIntent
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ class LocalDocEditorAgent:
             f"Current section content:\n{section_content}"
         )
         try:
-            result = await Runner.run(self._agent, prompt)
+            result = await guarded_run(self._agent, prompt)
             return result.final_output
         except Exception:
             logger.error(

@@ -15,6 +15,7 @@ import re
 from agents import Agent, AgentOutputSchema, Runner
 from pydantic import BaseModel
 
+from agents_local.llm_runtime import guarded_run
 from models import LocalDocIntent
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ class IntentExtractionAgent:
 
     async def _extract_segment(self, segment: str) -> list[LocalDocIntent]:
         try:
-            result = await Runner.run(
+            result = await guarded_run(
                 self._agent, f"Meeting transcript:\n\n{segment}"
             )
             intent_list: _IntentList = result.final_output
