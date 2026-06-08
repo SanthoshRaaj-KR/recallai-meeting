@@ -135,9 +135,9 @@ class TranscriptCompactor:
         }
         opts: dict[str, Any] = {"model": self.model}
         if self.model.startswith(("gpt-5", "o1", "o3", "o4")):
-            opts["max_completion_tokens"] = 900
+            opts["max_completion_tokens"] = 2000
         else:
-            opts["max_tokens"] = 900
+            opts["max_tokens"] = 2000
             opts["temperature"] = 0.0
         response = self._openai.chat.completions.create(
             **opts,

@@ -34,9 +34,11 @@ from typing import AsyncIterable
 
 try:
     from .memory_compaction import TranscriptCompactor
+    from .confluence_rag import ConfluenceLiveRAG
     from . import session_store
 except ImportError:  # Allows `python src/agent.py ...` from my-agent.
     from memory_compaction import TranscriptCompactor
+    from confluence_rag import ConfluenceLiveRAG
     import session_store
 
 logger = logging.getLogger("agent")
@@ -71,7 +73,7 @@ _RECENT_TRANSCRIPT_CHARS = int(
         str(_RECENT_TRANSCRIPT_TOKENS * _CHARS_PER_TOKEN_APPROX),
     )
 )
-_COMPACTED_MEMORY_TOKENS = int(os.getenv("JARVIS_COMPACTED_MEMORY_TOKENS", "2000"))
+_COMPACTED_MEMORY_TOKENS = int(os.getenv("JARVIS_COMPACTED_MEMORY_TOKENS", "6000"))
 _COMPACTED_MEMORY_CHARS = int(
     os.getenv(
         "JARVIS_COMPACTED_MEMORY_CHARS",
@@ -144,15 +146,25 @@ def _build_github_toolset() -> mcp.MCPToolset | None:
 def _build_instructions() -> str:
     base = textwrap.dedent("""\
         You are Jarvis, a meeting assistant activated by wake word.
-        You are given compacted prior meeting memory and the recent meeting transcript before each question.
-        Draw on both the meeting transcript and your own trained knowledge when answering.
+        Before each question you receive three context sources — use them in this priority order:
 
-        # Handling conflicts between meeting content and your knowledge
-        - Only use this section when the meeting content directly contradicts your knowledge.
-        - Do NOT preface normal answers with "In the meeting..." or any reference to the meeting source. Just answer.
-        - When there IS a conflict: acknowledge both sides honestly, share the meeting claim first, then your own understanding and why.
-        - Example of a conflict response: "In the meeting this was described as X, but from what I know it is actually Y, because Z."
-        - Never fabricate meeting content. If the topic was not mentioned, answer from your own knowledge only.
+        1. [Meeting transcript (recent)] — what was actually said in THIS meeting.
+           Highest priority. Always prefer this over any other source.
+        2. [Confluence Knowledge] — relevant excerpts from the team's Confluence wiki.
+           Use this as authoritative background when the meeting hasn't covered a topic.
+           Each excerpt is labelled with its page title and section heading.
+        3. Your own trained knowledge — fall back to this only when neither source covers the topic.
+
+        # Source attribution rules
+        - Do NOT preface normal answers with "In the meeting..." or "According to Confluence...".
+          Just answer naturally and concisely.
+        - When the meeting transcript directly contradicts Confluence: state the meeting's position
+          first, then note the discrepancy briefly. Example: "The team decided X, though the wiki
+          currently says Y."
+        - When only Confluence covers the topic: answer from it without attribution unless the user
+          would benefit from knowing where the info comes from.
+        - Never fabricate meeting content. If a topic wasn't discussed, say so and use Confluence
+          or your own knowledge instead.
 
         # Output rules
         - Respond in plain text only. No markdown, lists, JSON, or emojis.
@@ -204,6 +216,11 @@ class Assistant(Agent):
             window_size=_TRANSCRIPT_WINDOW,
             max_memory_chars=_COMPACTED_MEMORY_CHARS,
         )
+        # Confluence in-meeting RAG — fires on every wake-word query.
+        self._confluence_rag = ConfluenceLiveRAG()
+        # Holds the formatted Confluence context for the current turn, cleared
+        # each turn so stale results never bleed into the next query.
+        self._last_rag_context: str = ""
         # Two-stage wake: bare "Jarvis" → listening mode → next utterance is the query.
         self._listening: bool = False
         self._listening_since: float = 0.0
@@ -315,7 +332,15 @@ class Assistant(Agent):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GitHub MCP prewarm failed: %s", exc)
 
-        await asyncio.gather(_greet(), _warmup_mcp())
+        async def _warmup_rag() -> None:
+            if not self._confluence_rag.enabled:
+                return
+            try:
+                await asyncio.to_thread(self._confluence_rag.warmup)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Confluence RAG prewarm failed: %s", exc)
+
+        await asyncio.gather(_greet(), _warmup_mcp(), _warmup_rag())
 
     async def stt_node(
         self,
@@ -397,6 +422,32 @@ class Assistant(Agent):
 
         # ── Wake word + inline query — dispatch to LLM with meeting context ──
         logger.info("Wake query dispatched: %.80r", query)
+
+        # Fire Confluence RAG concurrently with context building.
+        # asyncio.to_thread keeps the event loop free during embedding + Pinecone I/O.
+        # Awaiting here adds ~100-200 ms before the LLM starts — well within
+        # acceptable latency since the LLM response itself takes far longer.
+        self._last_rag_context = ""
+        if not self._confluence_rag.enabled:
+            logger.info("[Pinecone] skipped — PINECONE_API_KEY not set in .env.local")
+        else:
+            try:
+                # Build a noise-filtered query from the question + recent
+                # transcript so the embedding captures current meeting topic,
+                # not just the isolated spoken question.
+                enriched_query = self._confluence_rag.build_search_query(
+                    query, list(self._transcript)
+                )
+                logger.info("[Pinecone] searching — enriched query: %.120r", enriched_query)
+                hits = await asyncio.to_thread(self._confluence_rag.search, enriched_query)
+                self._last_rag_context = self._confluence_rag.format_context(hits)
+                logger.info(
+                    "[Pinecone] %d chunk(s) will be injected into LLM context",
+                    len(hits),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Pinecone] lookup failed, continuing without Confluence context: %s", exc)
+
         self._refresh_transcript_in_ctx(turn_ctx, new_message)
         new_message.content = [query]
         await self.update_chat_ctx(turn_ctx)
@@ -498,6 +549,12 @@ class Assistant(Agent):
         if compacted_memory:
             snapshot_parts.append(compacted_memory)
         snapshot_parts.append("[Meeting transcript (recent)]\n" + "\n".join(recent))
+        if self._last_rag_context:
+            snapshot_parts.append("[Confluence Knowledge]\n" + self._last_rag_context)
+            logger.info(
+                "[Pinecone] Confluence context injected (%d chars)",
+                len(self._last_rag_context),
+            )
         snapshot = "\n\n".join(snapshot_parts)
 
         # Insert just before the pending user message so ordering is natural.

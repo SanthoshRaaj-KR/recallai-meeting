@@ -41,9 +41,13 @@ from pydantic import BaseModel
 try:
     from .memory_compaction import TranscriptCompactor
     from . import session_store
+    from .review_pipeline.rag import ConfluenceVectorIndex
+    from .review_pipeline.confluence import RestConfluenceClient
 except ImportError:
     from memory_compaction import TranscriptCompactor
     import session_store
+    from review_pipeline.rag import ConfluenceVectorIndex
+    from review_pipeline.confluence import RestConfluenceClient
 
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
@@ -93,6 +97,29 @@ app.add_middleware(
 _compactors: dict[str, TranscriptCompactor] = {}
 # bot_id → session_id index so webhook lookups are O(1) instead of O(N).
 _bot_index: dict[str, str] = {}
+
+# ── RAG sync job store ───────────────────────────────────────────────────────
+# In-memory only; resets on process restart. Good enough for a manual sync
+# operation — users can just click the button again if the server restarts.
+_sync_jobs: dict[str, dict] = {}
+
+# Singleton RAG index — lazy init on first sync call.
+_rag_index: ConfluenceVectorIndex | None = None
+_confluence_client: RestConfluenceClient | None = None
+
+
+def _get_rag_index() -> ConfluenceVectorIndex:
+    global _rag_index
+    if _rag_index is None:
+        _rag_index = ConfluenceVectorIndex()
+    return _rag_index
+
+
+def _get_confluence_client() -> RestConfluenceClient:
+    global _confluence_client
+    if _confluence_client is None:
+        _confluence_client = RestConfluenceClient()
+    return _confluence_client
 
 
 def _utcnow() -> str:
@@ -536,3 +563,101 @@ async def list_history() -> list:
             "updated_at": s.get("updated_at"),
         })
     return result
+
+
+# ── Endpoints: RAG incremental sync ────────────────────────────────────────────
+
+async def _run_rag_sync(job_id: str) -> None:
+    """Background task: list Confluence pages, diff vs Pinecone, re-embed stale ones."""
+    job = _sync_jobs[job_id]
+    try:
+        confluence = _get_confluence_client()
+        rag = _get_rag_index()
+
+        # Step 1: list all pages (version numbers only, no body fetch).
+        listings = await asyncio.to_thread(confluence.list_pages, 500)
+        job["total"] = len(listings)
+        job["current_page"] = "Checking index…"
+
+        def progress_cb(done: int, total: int, title: str) -> None:
+            job["checked"] = done
+            job["total_stale"] = total
+            job["current_page"] = title
+
+        # Step 2+3: batch version check + selective re-embed (blocking, run in thread).
+        result = await asyncio.to_thread(
+            rag.sync_index,
+            listings,
+            confluence.fetch_page,
+            progress_cb,
+        )
+
+        job.update({
+            "status": "done",
+            "checked": result["checked"],
+            "changed": result["changed"],
+            "skipped": result["skipped"],
+            "failed": result["failed"],
+            "current_page": "",
+            "finished_at": _utcnow(),
+        })
+        logger.info(
+            "RAG sync %s complete: changed=%d skipped=%d failed=%d",
+            job_id, result["changed"], result["skipped"], result["failed"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("RAG sync %s failed: %s", job_id, exc)
+        job.update({"status": "error", "error": str(exc), "finished_at": _utcnow()})
+
+
+@app.post("/rag/sync")
+async def start_rag_sync() -> dict:
+    """Start an incremental Confluence → Pinecone re-index job.
+
+    Returns immediately with a ``job_id``.  Poll ``GET /rag/sync/{job_id}``
+    for progress.  Only pages whose Confluence version number is higher than
+    what is stored in Pinecone are re-embedded; unchanged pages are skipped.
+    """
+    try:
+        _get_rag_index()  # Validate Pinecone is configured before starting.
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"RAG not configured: {exc}")
+    try:
+        _get_confluence_client()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Confluence not configured: {exc}")
+
+    job_id = str(uuid.uuid4())
+    _sync_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "running",
+        "total": 0,
+        "total_stale": 0,
+        "checked": 0,
+        "changed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "current_page": "Starting…",
+        "error": None,
+        "started_at": _utcnow(),
+        "finished_at": None,
+    }
+    asyncio.create_task(_run_rag_sync(job_id))
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/rag/sync/latest")
+async def get_latest_rag_sync() -> dict:
+    """Return the most recently started sync job, or 404 if none."""
+    if not _sync_jobs:
+        raise HTTPException(status_code=404, detail="No sync job found")
+    latest = max(_sync_jobs.values(), key=lambda j: j.get("started_at", ""))
+    return latest
+
+
+@app.get("/rag/sync/{job_id}")
+async def get_rag_sync_status(job_id: str) -> dict:
+    """Poll the status and progress of a sync job."""
+    if job_id not in _sync_jobs:
+        raise HTTPException(status_code=404, detail=f"Sync job {job_id!r} not found")
+    return _sync_jobs[job_id]
