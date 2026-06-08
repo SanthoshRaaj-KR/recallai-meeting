@@ -351,6 +351,72 @@ async def stop_bot(session_id: str) -> dict:
     }
 
 
+# ── Endpoints: Jarvis direct call ─────────────────────────────────────────────
+
+class JarvisCallTokenRequest(BaseModel):
+    participant_name: Optional[str] = "user"
+
+
+class JarvisCallTokenResponse(BaseModel):
+    livekit_url: str
+    token: str
+    room_name: str
+
+
+async def _dispatch_jarvis_call_agent(room_name: str, session_id: str) -> None:
+    async with livekit_api.LiveKitAPI(
+        url=LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET,
+    ) as lk:
+        dispatch = await lk.agent_dispatch.create_dispatch(
+            livekit_api.CreateAgentDispatchRequest(
+                agent_name=AGENT_NAME,
+                room=room_name,
+                metadata=json.dumps({"mode": "jarvis_call", "session_id": session_id}),
+            )
+        )
+    logger.info(
+        "Jarvis call agent dispatched — dispatch_sid=%s room=%s session=%s",
+        dispatch.sid, room_name, session_id,
+    )
+
+
+@app.post("/sessions/{session_id}/jarvis-call/token", response_model=JarvisCallTokenResponse)
+async def jarvis_call_token(
+    session_id: str, body: JarvisCallTokenRequest
+) -> JarvisCallTokenResponse:
+    """Mint a LiveKit token for a one-on-one voice call with Jarvis.
+
+    Creates (or reuses) a dedicated room for this session and dispatches the
+    JarvisCallAssistant agent to it.  The agent loads the full meeting transcript
+    and compacted memory from session_store so it has complete meeting context.
+    """
+    try:
+        session_store.require(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+
+    if not LIVEKIT_URL or not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="LiveKit is not configured on this server.",
+        )
+
+    room_name = f"jarvis-call-{session_id}"
+    identity = (body.participant_name or "user").strip() or "user"
+    token = _mint_token(room_name, identity, can_publish=True)
+
+    try:
+        await _dispatch_jarvis_call_agent(room_name, session_id)
+    except Exception as exc:
+        logger.warning("Jarvis call agent dispatch failed (non-fatal): %s", exc)
+
+    return JarvisCallTokenResponse(
+        livekit_url=LIVEKIT_URL,
+        token=token,
+        room_name=room_name,
+    )
+
+
 # ── Endpoints: Recall webhook ──────────────────────────────────────────────────
 @app.post("/recall-webhook")
 async def recall_webhook(request: Request) -> dict:
