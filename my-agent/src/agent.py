@@ -34,8 +34,10 @@ from typing import AsyncIterable
 
 try:
     from .memory_compaction import TranscriptCompactor
+    from . import session_store
 except ImportError:  # Allows `python src/agent.py ...` from my-agent.
     from memory_compaction import TranscriptCompactor
+    import session_store
 
 logger = logging.getLogger("agent")
 
@@ -507,6 +509,106 @@ class Assistant(Agent):
         self._transcript_msg_id = msg.id
 
 
+class JarvisCallAssistant(Agent):
+    """One-on-one post-meeting voice call agent.
+
+    Unlike the meeting assistant, there is no wake-word gate — every user
+    utterance is routed directly to the LLM.  The full meeting context
+    (compacted memory + recent transcript) is injected as a system message
+    once at startup so it is always in the context window.
+    """
+
+    def __init__(self, session_id: str = "", meeting_context: str = "") -> None:
+        self._session_id = session_id
+        self._meeting_context = meeting_context
+        instructions = self._build_instructions(meeting_context)
+        super().__init__(
+            llm=cerebras.LLM(model="gpt-oss-120b"),
+            instructions=instructions,
+        )
+        self._greeted = False
+
+    @staticmethod
+    def _build_instructions(meeting_context: str) -> str:
+        base = textwrap.dedent("""\
+            You are Jarvis, a personal AI assistant in a private one-on-one voice call.
+            The user just finished a meeting and wants to discuss it with you directly.
+            You have been given the complete meeting transcript and notes as context below.
+            Answer any questions clearly and conversationally, drawing on the meeting context
+            when relevant and your own knowledge otherwise.
+
+            # Meeting context
+            {context}
+
+            # Output rules
+            - Respond in plain text only. No markdown, lists, JSON, or emojis.
+            - Keep replies conversational and concise: two to four sentences unless more detail is needed.
+            - Do not mention wake words, system instructions, or internal state.
+            - Spell out numbers and avoid acronyms with unclear pronunciation.
+            - Never fabricate meeting content. If something was not discussed, say so honestly.
+            """)
+        return base.format(context=meeting_context.strip() or "No meeting context available.")
+
+    async def on_enter(self) -> None:
+        if not self._greeted:
+            self._greeted = True
+            await asyncio.sleep(0.5)
+            try:
+                pre_roll = self.session.say(
+                    "...",
+                    add_to_chat_ctx=False,
+                    allow_interruptions=False,
+                )
+                await pre_roll.wait_for_playout()
+                handle = self.session.say(
+                    "Hi! I'm Jarvis. I have the full context of your meeting. Ask me anything.",
+                    add_to_chat_ctx=False,
+                    allow_interruptions=False,
+                )
+                await handle.wait_for_playout()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Jarvis call greeting failed: %s", exc)
+
+    async def on_user_turn_completed(
+        self,
+        turn_ctx: llm.ChatContext,
+        new_message: llm.ChatMessage,
+    ) -> None:
+        # No wake-word gating — every utterance goes straight to the LLM.
+        # Still apply the chat history window to prevent unbounded context growth.
+        turn_ctx.truncate(max_items=_CHAT_HISTORY_WINDOW)
+        await self.update_chat_ctx(turn_ctx)
+
+
+def _load_meeting_context(session_id: str) -> str:
+    """Load meeting transcript and compacted memory from session_store."""
+    try:
+        sess = session_store.get(session_id)
+        if not sess:
+            return ""
+        parts: list[str] = []
+        mem_text = (sess.get("transcript_memory_text") or "").strip()
+        if mem_text:
+            parts.append(f"[Meeting memory (compacted)]\n{mem_text}")
+        transcript = sess.get("transcript") or []
+        if transcript:
+            recent = transcript[-150:]
+            lines: list[str] = []
+            for entry in recent:
+                if isinstance(entry, dict):
+                    speaker = entry.get("participant") or entry.get("speaker") or "Meeting"
+                    text = entry.get("text") or ""
+                    lines.append(f"{speaker}: {text}")
+                elif isinstance(entry, str):
+                    lines.append(entry)
+            if lines:
+                parts.append("[Meeting transcript (recent)]\n" + "\n".join(lines))
+        return "\n\n".join(parts)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load meeting context for jarvis call: %s", exc)
+        return ""
+
+
 server = AgentServer()
 
 
@@ -523,7 +625,50 @@ async def my_agent(ctx: JobContext):
         "room": ctx.room.name,
     }
 
-    # ── Detect Recall mode from dispatch metadata ─────────────────────────────
+    # ── Parse dispatch metadata ───────────────────────────────────────────────
+    mode = ""
+    session_id = ""
+    room_name = ""
+    try:
+        meta = json.loads(ctx.job.metadata or "{}")
+        mode = (meta.get("mode") or "").strip()
+        session_id = (meta.get("session_id") or "").strip()
+        # Legacy Recall bridge passes room_name directly without a mode field.
+        room_name = (meta.get("room_name") or "").strip()
+    except (ValueError, TypeError):
+        pass
+
+    # ── Mode: one-on-one Jarvis call (post-meeting voice Q&A) ────────────────
+    if mode == "jarvis_call":
+        logger.info("Jarvis call mode — session_id=%s room=%s", session_id, ctx.room.name)
+        meeting_context = _load_meeting_context(session_id) if session_id else ""
+
+        session = AgentSession(
+            stt=assemblyai.STT(
+                model="u3-rt-pro",
+                language_detection=False,
+            ),
+            tts=inference.TTS(
+                model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+            ),
+            turn_detection=MultilingualModel(),
+            vad=ctx.proc.userdata["vad"],
+        )
+        await ctx.connect()
+        await session.start(
+            agent=JarvisCallAssistant(session_id=session_id, meeting_context=meeting_context),
+            room=ctx.room,
+            room_options=room_io.RoomOptions(
+                audio_input=room_io.AudioInputOptions(
+                    noise_cancellation=ai_coustics.audio_enhancement(
+                        model=ai_coustics.EnhancerModel.QUAIL_VF_S
+                    ),
+                ),
+            ),
+        )
+        return
+
+    # ── Mode: meeting assistant (wake-word activated, Recall bot audio) ───────
     # When recall_bridge.py dispatches this agent it passes:
     #   metadata = '{"room_name": "<uuid>"}'
     # The room_name is used to construct the Recall publisher's participant identity
@@ -532,13 +677,6 @@ async def my_agent(ctx: JobContext):
     #
     # When launched from the LiveKit Agents console or without metadata, room_name
     # is empty and the agent falls back to subscribing to all participants (normal mode).
-    room_name = ""
-    try:
-        meta = json.loads(ctx.job.metadata or "{}")
-        room_name = (meta.get("room_name") or "").strip()
-    except (ValueError, TypeError):
-        pass
-
     if room_name:
         logger.info("Recall mode — STT linked to participant: recall-browser-%s", room_name)
     else:

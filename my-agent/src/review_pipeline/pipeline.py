@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAI
+from pydantic import BaseModel, ValidationError
 
 from memory_compaction import add_memory_context
 
@@ -38,6 +39,142 @@ from .text_utils import (
 logger = logging.getLogger(__name__)
 
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+# ── Cerebras response schemas ────────────────────────────────────────────────
+
+class _SummaryResponse(BaseModel):
+    title: str = ""
+    summary: str = ""
+    key_topics: list[str] = []
+
+
+class _DecisionsResponse(BaseModel):
+    decisions: list[str] = []
+
+
+class _ActionItem(BaseModel):
+    description: str
+    owner: str | None = None
+    due: str | None = None
+
+
+class _ActionItemsResponse(BaseModel):
+    action_items: list[_ActionItem] = []
+
+
+class _MOMEntry(BaseModel):
+    topic: str
+    summary: str = ""
+
+
+class _MOMResponse(BaseModel):
+    mom: list[_MOMEntry] = []
+
+
+def _extract_json(raw: str) -> str:
+    """Strip markdown code fences so json.loads can handle LLM output reliably."""
+    stripped = raw.strip()
+    stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.MULTILINE)
+    stripped = re.sub(r"\s*```\s*$", "", stripped, flags=re.MULTILINE)
+    return stripped.strip()
+
+
+# ── Cerebras structured-output schemas ───────────────────────────────────────
+# Cerebras supports json_schema response_format with strict=True, which uses
+# constrained decoding to guarantee schema-valid JSON — no prompt-level JSON
+# instructions or post-parse fallbacks needed for these 4 calls.
+# Constraints: additionalProperties must be False on every object when strict=True;
+# no minItems/maxItems; nullable fields use anyOf.
+
+_SUMMARY_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "summary_response",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+                "key_topics": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["title", "summary", "key_topics"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+_DECISIONS_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "decisions_response",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "decisions": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["decisions"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+_ACTION_ITEMS_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "action_items_response",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "action_items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "description": {"type": "string"},
+                            "owner": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                            "due": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        },
+                        "required": ["description", "owner", "due"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["action_items"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+_MOM_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "mom_response",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "mom": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "topic": {"type": "string"},
+                            "summary": {"type": "string"},
+                        },
+                        "required": ["topic", "summary"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["mom"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 class ProposalPipeline:
@@ -2169,13 +2306,12 @@ class ProposalPipeline:
     def _summary_llm_sync(self, transcript_text: str) -> dict[str, Any]:
         client = self._get_cerebras()
         response = client.chat.completions.create(
-            **self._llm_opts_cerebras(800),
+            **self._llm_opts_cerebras(800, response_format=_SUMMARY_SCHEMA),
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are an expert meeting analyst. Produce an executive summary from the meeting transcript below.\n\n"
-                        "Return JSON only: {\"title\": string, \"summary\": string, \"key_topics\": string[]}.\n\n"
                         "title: a crisp 4-8 word title that captures the meeting's core purpose.\n\n"
                         "summary: exactly 2 paragraphs, each 2-3 sentences. "
                         "Paragraph 1 — context and objective: what the meeting was about and why it was called. "
@@ -2188,64 +2324,75 @@ class ProposalPipeline:
                 {"role": "user", "content": transcript_text},
             ],
         )
-        return json.loads(response.choices[0].message.content or "{}")
+        raw = response.choices[0].message.content or "{}"
+        try:
+            data = json.loads(raw)
+            return _SummaryResponse.model_validate(data).model_dump()
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("Summary JSON parse failed: %s — raw: %.200s", exc, raw)
+            return _SummaryResponse().model_dump()
 
     def _decisions_llm_sync(self, transcript_text: str) -> list[str]:
         client = self._get_cerebras()
         response = client.chat.completions.create(
-            **self._llm_opts_cerebras(400),
+            **self._llm_opts_cerebras(2000, response_format=_DECISIONS_SCHEMA),
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "List every concrete decision made in this meeting transcript. "
-                        "Return JSON only: {\"decisions\": string[]}. "
-                        "Each decision is one clear sentence. Omit vague discussion."
+                        "Each decision is one clear sentence. Include all agreed outcomes, chosen options, and commitments. "
+                        "Omit open questions and vague discussion."
                     ),
                 },
                 {"role": "user", "content": transcript_text},
             ],
         )
-        data = json.loads(response.choices[0].message.content or "{}")
-        return [str(d) for d in (data.get("decisions") or []) if d]
+        raw = response.choices[0].message.content or "{}"
+        try:
+            data = json.loads(raw)
+            return [str(d) for d in _DecisionsResponse.model_validate(data).decisions if d]
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("Decisions JSON parse failed: %s — raw: %.200s", exc, raw)
+            return []
 
     def _action_items_llm_sync(self, transcript_text: str) -> list[dict[str, Any]]:
         client = self._get_cerebras()
         response = client.chat.completions.create(
-            **self._llm_opts_cerebras(500),
+            **self._llm_opts_cerebras(2000, response_format=_ACTION_ITEMS_SCHEMA),
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "Extract every action item from this meeting transcript. "
-                        "Return JSON only: {\"action_items\": [{\"description\": string, \"owner\": string|null, \"due\": string|null}]}. "
                         "description: what needs to be done. owner: person responsible (null if unassigned). due: deadline if mentioned (null otherwise)."
                     ),
                 },
                 {"role": "user", "content": transcript_text},
             ],
         )
-        data = json.loads(response.choices[0].message.content or "{}")
-        return [
-            {
-                "description": str(item.get("description") or ""),
-                "owner": item.get("owner") or None,
-                "due": item.get("due") or None,
-            }
-            for item in (data.get("action_items") or [])
-            if item.get("description")
-        ]
+        raw = response.choices[0].message.content or "{}"
+        try:
+            data = json.loads(raw)
+            parsed = _ActionItemsResponse.model_validate(data)
+            return [
+                {"description": item.description, "owner": item.owner, "due": item.due}
+                for item in parsed.action_items
+                if item.description
+            ]
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("Action items JSON parse failed: %s — raw: %.200s", exc, raw)
+            return []
 
     def _mom_llm_sync(self, transcript_text: str) -> list[dict[str, Any]]:
         client = self._get_cerebras()
         response = client.chat.completions.create(
-            **self._llm_opts_cerebras(700),
+            **self._llm_opts_cerebras(2000, response_format=_MOM_SCHEMA),
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "Generate minutes of meeting from this transcript. "
-                        "Return JSON only: {\"mom\": [{\"topic\": string, \"summary\": string}]}. "
                         "Each entry covers one distinct topic discussed. "
                         "summary: 1-3 sentences capturing what was said and decided."
                     ),
@@ -2253,12 +2400,18 @@ class ProposalPipeline:
                 {"role": "user", "content": transcript_text},
             ],
         )
-        data = json.loads(response.choices[0].message.content or "{}")
-        return [
-            {"topic": str(item.get("topic") or ""), "summary": str(item.get("summary") or "")}
-            for item in (data.get("mom") or [])
-            if item.get("topic")
-        ]
+        raw = response.choices[0].message.content or "{}"
+        try:
+            data = json.loads(raw)
+            parsed = _MOMResponse.model_validate(data)
+            return [
+                {"topic": item.topic, "summary": item.summary}
+                for item in parsed.mom
+                if item.topic
+            ]
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("MOM JSON parse failed: %s — raw: %.200s", exc, raw)
+            return []
 
     async def generate_meeting_summary(
         self,
@@ -2449,13 +2602,15 @@ class ProposalPipeline:
             self._cerebras = OpenAI(api_key=api_key, base_url=self._CEREBRAS_BASE_URL)
         return self._cerebras
 
-    def _llm_opts_cerebras(self, max_tokens: int) -> dict[str, Any]:
-        # Cerebras does not support response_format; JSON is enforced via the prompt.
-        return {
+    def _llm_opts_cerebras(self, max_tokens: int, response_format: dict[str, Any] | None = None) -> dict[str, Any]:
+        opts: dict[str, Any] = {
             "model": self._CEREBRAS_MODEL,
             "max_tokens": max_tokens,
             "temperature": 0.1,
         }
+        if response_format is not None:
+            opts["response_format"] = response_format
+        return opts
 
     @property
     def client(self) -> HybridConfluenceClient:
