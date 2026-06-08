@@ -28,7 +28,13 @@ Frontend endpoints (sync-sage-bot):
   GET  /history                                     All past sessions
 
 Run alongside the agent:
-    uv run uvicorn src.recall_bridge:app --host 0.0.0.0 --port 8001
+    uv run uvicorn src.recall_bridge:app --host 0.0.0.0 --port 8000
+
+Port note: the sync-sage-bot Vite dev proxy routes /api/local-doc/*, /api/bot/*
+and /api/sessions/* to botTarget (http://localhost:8000), and only /api/review/*
+to confluenceTarget (http://localhost:8001). For the local-doc sandbox this
+bridge MUST listen on :8000 (override with VITE_API_PROXY_TARGET if you need a
+different port).
 
 Required environment variables (.env.local):
     LIVEKIT_URL            wss://your-project.livekit.cloud
