@@ -100,11 +100,16 @@ Completeness is critical — capture EVERY distinct change, not just the obvious
 - Removals / deletions count ("remove the last 4 security points", "no benefits anymore", "drop the carryover clause"). For a removal, set new_value to a short phrase describing what is removed (e.g. "remove the last 4 security sections"). affected_topic MUST name the specific document or subject area the removal applies to — carry forward the document or topic named earlier in the same discussion point. For example, if the speaker is discussing the support SOP and then says "trim the last two sections", affected_topic is "support SOP sections", NOT just "sections". When the removal sentence itself does not name the document, also include the earlier sentence that names it in verbatim_snippets.
 - Renames / rebrands count ("we are renaming the company to X", "the team is now called Y"). For a rename, old_value is the current name if stated (else null) and new_value is the new name; affected_topic should say what is being renamed (e.g. "company name").
 - Numeric and policy changes count even when phrased loosely ("only 3 days a month", "increased by 3 days", "extend retention to a year").
+- Reported facts, figures, costs, spend, budgets, durations, dates, counts, and incidents count as document updates when they state a concrete value about something an organization records in a document — even when phrased as an observation or status report rather than a command ("I discovered...", "wanted to note...", "it took..."). The speaker need not say "update the doc"; the stated value IS the proposed new content (old_value null unless a prior value is given). For example:
+    * "our EC2 and other instance spend is close to 1.4 million dollars" -> affected_topic "EC2 and instance spend", new_value "approximately 1.4 million dollars"
+    * "it took 9 days to fix the AWS NAT gateway issue" -> affected_topic "AWS NAT gateway issue resolution time", new_value "9 days"
+    * "that outage cost us 51 thousand USD" -> affected_topic "AWS NAT gateway outage cost", new_value "51 thousand USD"
+  Extract each such fact as its own intent. The downstream retrieval step decides whether a matching document section exists, so do NOT withhold a concrete operational, financial, or incident fact just because there was no explicit edit verb.
 - Product / strategy pivots count ("we're switching the product to X", "web app first, then mobile").
-- Ignore filler, hesitations, and side chatter that imply no document change.
+- Ignore hesitations and fillers ("ahmmm", "sorry", "you know") and purely social, logistical, or ephemeral chatter that no organization records in a document: greetings, lunch/coffee, weather, parking, kudos, scheduling, "can you hear me", and vague aspirations with no concrete value ("we should improve security someday"). A self-correction keeps the corrected value ("8 days, sorry, 9 days" -> 9 days).
 
 Rules:
-1. Only extract intents where a specific document update is clearly implied.
+1. Extract an intent for any specific document change AND for any concrete reported fact, figure, cost, duration, count, date, or incident that an organization would record in a document. When a concrete value is tied to a named subject, extract it; the retrieval step will discard it if no document covers that subject.
 2. verbatim_snippets MUST contain exact quoted text from the transcript.
 3. confidence: 0.9+ only when the transcript is unambiguous; 0.5-0.89 for probable; < 0.5 for speculative.
 4. old_value: the current state BEFORE the change (null if unknown). Never guess a value the transcript does not give.
