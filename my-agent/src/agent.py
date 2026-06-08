@@ -83,7 +83,7 @@ _COMPACTED_MEMORY_CHARS = int(
 # Keep at most this many conversation items (user + assistant turns) in the
 # chat context. truncate() always preserves the system instruction message.
 # 10 items = 5 Q&A pairs ≈ ~750 tokens for history.
-_CHAT_HISTORY_WINDOW = 10
+_CHAT_HISTORY_WINDOW = 1
 _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 # Optional default repo (owner/repo) used when the user doesn't name one.
 _GITHUB_DEFAULT_REPO = os.getenv("GITHUB_DEFAULT_REPO", "")
@@ -398,6 +398,7 @@ class Assistant(Agent):
                 logger.info("Wake listening timed out — suppressing LLM")
                 raise StopResponse()
             logger.info("Listening mode query: %.80r", raw.strip())
+            self._last_rag_context = ""
             self._refresh_transcript_in_ctx(turn_ctx, new_message)
             new_message.content = [raw.strip()]
             await self.update_chat_ctx(turn_ctx)
@@ -449,6 +450,7 @@ class Assistant(Agent):
                 logger.warning("[Pinecone] lookup failed, continuing without Confluence context: %s", exc)
 
         self._refresh_transcript_in_ctx(turn_ctx, new_message)
+        self._last_rag_context = ""  # consumed — clear so it cannot bleed into a subsequent turn
         new_message.content = [query]
         await self.update_chat_ctx(turn_ctx)
 
