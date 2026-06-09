@@ -8,6 +8,7 @@ import re
 import requests
 import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -25,7 +26,6 @@ from livekit.agents import (
     llm,
     mcp,
     room_io,
-    stt as lk_stt,
 )
 from livekit import rtc
 from livekit.plugins import ai_coustics, assemblyai, cerebras, silero
@@ -47,14 +47,47 @@ logger = logging.getLogger("agent")
 # finds its credentials regardless of the working directory at launch time.
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
+# ── Confluence RAG skip patterns ──────────────────────────────────────────────
+# Returns False (skip Pinecone) only for high-confidence meeting-only or
+# general-knowledge queries. Default is True (run Pinecone) when uncertain.
+_NO_CONFLUENCE_PATTERNS = re.compile(
+    r"""
+    # Meeting summary / recap
+    \b(summarize|summarise|recap|summary|recapped?)\b
+    # Action items / decisions from this meeting
+    | \baction\s+items?\b
+    | \b(key\s+)?(decisions?|takeaways?|outcomes?|conclusions?)\b
+    # "What did [someone] say/mention/talk about"
+    | \bwhat\s+did\s+\w+\s+(say|mention|talk|discuss|mean|suggest)\b
+    # Transcript recall: "earlier", "just now", "last [N] minutes", "so far"
+    | \b(earlier|just\s+now|so\s+far|at\s+the\s+(start|beginning|end))\b
+    | \blast\s+(\d+\s+)?(minute|min|hour|point|thing|part|topic)s?\b
+    # Math / time / date — no docs needed
+    | \b(what(\s+is|\s*'?s)?\s+)?(the\s+)?(time|date|day|year)\b
+    | \bhow\s+many\s+(days?|hours?|minutes?|weeks?|months?|years?)\b
+    | \b\d+\s*[\+\-\*\/]\s*\d+\b
+    # Meeting participants / who's in the call
+    | \bwho\s+(is|are|was|were|joined|spoke|said|talked)\b
+    | \bhow\s+many\s+people\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _needs_confluence(query: str) -> bool:
+    """Return False when the query is high-confidence meeting-only or general knowledge.
+
+    Conservative by design — returns True (run Pinecone) for any ambiguous query.
+    """
+    return _NO_CONFLUENCE_PATTERNS.search(query) is None
+
+
 # ── Wake word ─────────────────────────────────────────────────────────────────
 # Matches "Jarvis", "Hey Jarvis", and common STT mis-transcriptions.
 _WAKE_PATTERN = re.compile(
     r"(?:hey\s+)?(?:jarvis|jarvas|jervis|jarvus)[,.\s!?]*\s*(.*)",
     re.IGNORECASE | re.DOTALL,
 )
-# Seconds to stay in listening mode after a bare "Jarvis" before timing out.
-_LISTENING_TIMEOUT_S = 10.0
 # Full in-memory transcript buffer — all utterances are kept here.
 _TRANSCRIPT_MAX = 500
 # ── Sliding window limits ─────────────────────────────────────────────────────
@@ -218,12 +251,12 @@ class Assistant(Agent):
         # Holds the formatted Confluence context for the current turn, cleared
         # each turn so stale results never bleed into the next query.
         self._last_rag_context: str = ""
-        # Two-stage wake: bare "Jarvis" → listening mode → next utterance is the query.
-        self._listening: bool = False
-        self._listening_since: float = 0.0
-        # Tracks whether the ack was already played from a partial transcript hit,
-        # so on_user_turn_completed doesn't double-play it.
-        self._partial_wake_fired: bool = False
+        # Single-threaded executor for all TranscriptCompactor operations.
+        # Serialises observe_utterance and memory_text calls coming from both
+        # the event loop and tts_node, eliminating the race condition on the
+        # compactor's internal lists and keeping blocking LLM compaction calls
+        # off the event loop.
+        self._compactor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="compactor")
         # Ensures the opening greeting fires exactly once, even though LiveKit
         # can re-enter on_enter() after an interruption.
         self._greeted: bool = False
@@ -339,32 +372,6 @@ class Assistant(Agent):
 
         await asyncio.gather(_greet(), _warmup_mcp(), _warmup_rag())
 
-    async def stt_node(
-        self,
-        audio: AsyncIterable[rtc.AudioFrame],
-        model_settings: ModelSettings,
-    ) -> AsyncIterable[lk_stt.SpeechEvent | str]:
-        """Spy on INTERIM transcripts to fire the 'Yes?' ack the moment 'Jarvis'
-        appears — before VAD silence and STT finalization (~200–400 ms earlier).
-        """
-        async for event in Agent.default.stt_node(self, audio, model_settings):
-            if (
-                not self._partial_wake_fired
-                and isinstance(event, lk_stt.SpeechEvent)
-                and event.type == lk_stt.SpeechEventType.INTERIM_TRANSCRIPT
-            ):
-                text = event.alternatives[0].text if event.alternatives else ""
-                if _WAKE_PATTERN.search(text):
-                    self._partial_wake_fired = True
-                    logger.info("Partial wake detected in interim — firing ack early")
-                    session = self.session
-
-                    async def _say_ack():
-                        await session.say("Yes?", add_to_chat_ctx=False)
-
-                    asyncio.create_task(_say_ack())
-            yield event
-
     async def on_user_turn_completed(
         self,
         turn_ctx: llm.ChatContext,
@@ -377,62 +384,32 @@ class Assistant(Agent):
         wake word is detected.
         """
         raw = new_message.text_content or ""
-        # Snapshot and reset partial-wake flag for this turn.
-        partial_fired = self._partial_wake_fired
-        self._partial_wake_fired = False
 
         # Always buffer so the LLM has full meeting context when it is called.
         if raw.strip():
             self._transcript.append(raw.strip())
-            self._transcript_memory.observe_utterance(raw.strip())
+            asyncio.create_task(
+                self._run_in_compactor(self._transcript_memory.observe_utterance, raw.strip())
+            )
             self._post_transcript(raw.strip())
-
-        # ── Listening mode: bare "Jarvis" was just said, awaiting the query ──
-        if self._listening:
-            elapsed = time.perf_counter() - self._listening_since
-            self._listening = False
-            if elapsed > _LISTENING_TIMEOUT_S or not raw.strip():
-                logger.info("Wake listening timed out — suppressing LLM")
-                raise StopResponse()
-            logger.info("Listening mode query: %.80r", raw.strip())
-            self._last_rag_context = ""
-            self._refresh_transcript_in_ctx(turn_ctx, new_message)
-            new_message.content = [raw.strip()]
-            await self.update_chat_ctx(turn_ctx)
-            return
 
         query = _extract_query(raw)
 
-        # ── No wake word — regular meeting speech, suppress the LLM ──────────
-        if query is None:
-            logger.debug("No wake word — suppressing: %.60r", raw)
-            raise StopResponse()
-
-        # ── Bare wake word — acknowledge and wait for the follow-up ──────────
+        # ── No wake word or bare wake word — suppress the LLM silently ───────
         if not query:
-            logger.info("Wake word — entering listening mode (partial_fired=%s)", partial_fired)
-            self._listening = True
-            self._listening_since = time.perf_counter()
-            if not partial_fired:
-                # Partial detection already played the ack; skip to avoid double-play.
-                await self.session.say("Yes?", add_to_chat_ctx=False)
+            logger.debug("No wake word — suppressing: %.60r", raw)
             raise StopResponse()
 
         # ── Wake word + inline query — dispatch to LLM with meeting context ──
         logger.info("Wake query dispatched: %.80r", query)
 
-        # Fire Confluence RAG concurrently with context building.
-        # asyncio.to_thread keeps the event loop free during embedding + Pinecone I/O.
-        # Awaiting here adds ~100-200 ms before the LLM starts — well within
-        # acceptable latency since the LLM response itself takes far longer.
         self._last_rag_context = ""
         if not self._confluence_rag.enabled:
             logger.info("[Pinecone] skipped — PINECONE_API_KEY not set in .env.local")
+        elif not _needs_confluence(query):
+            logger.info("[Pinecone] skipped — query classified as meeting/general: %.80r", query)
         else:
             try:
-                # Build a noise-filtered query from the question + recent
-                # transcript so the embedding captures current meeting topic,
-                # not just the isolated spoken question.
                 enriched_query = self._confluence_rag.build_search_query(
                     query, list(self._transcript)
                 )
@@ -446,7 +423,13 @@ class Assistant(Agent):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[Pinecone] lookup failed, continuing without Confluence context: %s", exc)
 
-        self._refresh_transcript_in_ctx(turn_ctx, new_message)
+        # Fetch compacted memory off the event loop — memory_text() may trigger
+        # a blocking LLM compaction call via force_compact().
+        compacted_memory = _trim_text_to_char_budget(
+            await self._run_in_compactor(self._transcript_memory.memory_text),
+            _COMPACTED_MEMORY_CHARS,
+        )
+        self._refresh_transcript_in_ctx(turn_ctx, new_message, compacted_memory)
         self._last_rag_context = ""  # consumed — clear so it cannot bleed into a subsequent turn
         new_message.content = [query]
         await self.update_chat_ctx(turn_ctx)
@@ -497,15 +480,25 @@ class Assistant(Agent):
         if reply:
             labelled = f"Jarvis: {reply}"
             self._transcript.append(labelled)
-            # observe_utterance can trigger a blocking LLM compaction call; run it
-            # in a thread so it never stalls the event loop between turns.
             asyncio.create_task(
-                asyncio.to_thread(self._transcript_memory.observe_utterance, labelled)
+                self._run_in_compactor(self._transcript_memory.observe_utterance, labelled)
             )
             self._post_transcript(reply, speaker="Jarvis")
 
+    async def _run_in_compactor(self, fn, *args):
+        """Run a TranscriptCompactor call in the dedicated single-threaded executor.
+
+        Using a single-threaded executor (max_workers=1) for all compactor
+        operations serialises observe_utterance and memory_text calls, eliminating
+        the race condition between the event-loop path (user utterances) and the
+        tts_node background path (Jarvis replies). Blocking OpenAI compaction
+        calls run off the event loop so they never stall audio I/O.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._compactor_executor, fn, *args)
+
     def _refresh_transcript_in_ctx(
-        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage, compacted_memory: str = ""
     ) -> None:
         """Replace the rolling transcript system message and apply memory windows.
 
@@ -539,10 +532,6 @@ class Assistant(Agent):
         recent = _tail_lines_to_char_budget(
             list(self._transcript)[-_TRANSCRIPT_WINDOW:],
             _RECENT_TRANSCRIPT_CHARS,
-        )
-        compacted_memory = _trim_text_to_char_budget(
-            self._transcript_memory.memory_text(),
-            _COMPACTED_MEMORY_CHARS,
         )
         snapshot_parts = []
         if compacted_memory:
