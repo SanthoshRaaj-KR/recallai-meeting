@@ -23,6 +23,7 @@ class ChunkRecord(BaseModel):
     section_heading: str  # extracted heading or synthetic label
     section_index: int  # position in document
     content: str  # raw text of section
+    doc_title: str = ""  # the document/page title (first heading); used to route
     context_prefix: str = ""  # contextual description prepended at embed time
     token_count: int = 0
 

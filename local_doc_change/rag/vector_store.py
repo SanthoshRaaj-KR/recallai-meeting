@@ -1,15 +1,15 @@
-"""Optional Pinecone dense-vector backend for local-doc RAG.
+"""Pinecone dense-vector backend for local-doc RAG (default when configured).
 
-The default dense backend is FAISS (in-process, see indexer.py). Set the
-environment variable ``LDOC_VECTOR_DB=pinecone`` to store and query dense
-embeddings in Pinecone instead. Any of these conditions silently falls back
-to FAISS (logged once): the package is not installed, ``PINECONE_API_KEY`` is
-unset, or a Pinecone call fails.
+Pinecone is now the DEFAULT dense backend whenever ``PINECONE_API_KEY`` is set
+and the ``pinecone`` package is installed. To force the in-process FAISS backend
+instead, set ``LDOC_VECTOR_DB=faiss``. Any of these conditions silently falls
+back to FAISS (logged once): the package is not installed, ``PINECONE_API_KEY``
+is unset, or a Pinecone call fails — so the pipeline always works.
 
 Relevant environment variables
 ------------------------------
-LDOC_VECTOR_DB      "faiss" (default) | "pinecone"
-PINECONE_API_KEY    required when LDOC_VECTOR_DB=pinecone
+LDOC_VECTOR_DB      "" (auto: pinecone if key present, else faiss) | "faiss" | "pinecone"
+PINECONE_API_KEY    enables Pinecone by default when set
 LDOC_PINECONE_INDEX index name (default "local-doc-rag")
 PINECONE_CLOUD      serverless cloud (default "aws")
 PINECONE_REGION     serverless region (default "us-east-1")
@@ -31,8 +31,14 @@ _pc = None  # cached Pinecone client
 
 
 def vector_db_choice() -> str:
-    """Return the configured backend: 'faiss' (default) or 'pinecone'."""
-    return os.getenv("LDOC_VECTOR_DB", "faiss").strip().lower()
+    """Return the configured backend: 'pinecone' by default when an API key is
+    present, else 'faiss'. Set LDOC_VECTOR_DB=faiss (or =pinecone) to force one."""
+    explicit = os.getenv("LDOC_VECTOR_DB", "").strip().lower()
+    if explicit in ("faiss", "pinecone"):
+        return explicit
+    # Auto: prefer Pinecone when a key is configured (install/connectivity are
+    # checked in pinecone_enabled(), which falls back to FAISS on any problem).
+    return "pinecone" if os.getenv("PINECONE_API_KEY", "").strip() else "faiss"
 
 
 def _config() -> dict:

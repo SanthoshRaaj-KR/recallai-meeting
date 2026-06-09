@@ -274,7 +274,14 @@ class HybridRetriever:
             self._reranker_loaded = True
 
         pairs = [
-            (query, self._index.id_to_chunk[cid].content)
+            (
+                query,
+                # Include the page name + section heading so the cross-encoder can
+                # tell same-shaped sections in different documents apart.
+                f"{self._index.id_to_chunk[cid].doc_title} | "
+                f"{self._index.id_to_chunk[cid].section_heading}\n"
+                f"{self._index.id_to_chunk[cid].content}",
+            )
             for cid, _ in candidates
             if cid in self._index.id_to_chunk
         ]

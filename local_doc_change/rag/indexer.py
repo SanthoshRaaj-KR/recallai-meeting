@@ -48,6 +48,12 @@ _DOC_EXTENSIONS = {".docx", ".odt", ".pdf", ".txt", ".md", ".rtf"}
 # ── FAISS embedding dimension (text-embedding-3-small) ───────────────────────
 _EMBED_DIM = 1536
 
+# Bump when the indexed-text composition changes so existing on-disk caches (and
+# Pinecone namespaces, which are keyed by folder hash) are invalidated and
+# rebuilt. "titles-v2" = page name + filename keywords + section heading are now
+# prepended to each chunk's BM25/embedding text (not just the body).
+_INDEX_VERSION = "titles-v2"
+
 
 # ── Public dataclass ──────────────────────────────────────────────────────────
 
@@ -180,8 +186,20 @@ def build_index(
         except Exception as exc:
             logger.warning("Contextual retrieval enrichment failed: %s", exc)
 
+    # Composite index text per chunk: page name + filename + section title + body
+    # (so retrieval matches on document/section context, not body text alone).
+    # Backstop: stamp doc_title for any chunk that lacks it (e.g. loaded from an
+    # older cache) so the index text and the evaluator always have the page name.
+    for c in chunks:
+        if not c.doc_title:
+            c.doc_title = next(
+                (x.section_heading for x in chunks
+                 if x.source_path == c.source_path and x.section_index == 0), "",
+            )
+    index_texts = [_index_text(c) for c in chunks]
+
     # BM25 index
-    tokenized = [_tokenize(c.context_prefix + " " + c.content) for c in chunks]
+    tokenized = [_tokenize(t) for t in index_texts]
     bm25 = BM25Okapi(tokenized)
 
     id_to_chunk = {c.chunk_id: c for c in chunks}
@@ -193,15 +211,15 @@ def build_index(
     pinecone_ns: Optional[str] = None
     want_dense = use_embeddings and openai_client is not None and chunks
     if want_dense and vector_store.pinecone_enabled():
-        vecs = _embed_chunks(chunks, openai_client)
+        vecs = _embed_chunks(index_texts, openai_client)
         if vecs is not None and vector_store.upsert(folder_hash, chunk_ids, vecs):
             vector_db = "pinecone"
             pinecone_ns = folder_hash
         else:
             logger.warning("Pinecone dense build failed; falling back to FAISS for this folder.")
-            faiss_idx = _build_faiss_index(chunks, openai_client)
+            faiss_idx = _build_faiss_index(index_texts, openai_client)
     elif want_dense:
-        faiss_idx = _build_faiss_index(chunks, openai_client)
+        faiss_idx = _build_faiss_index(index_texts, openai_client)
 
     # Persist to cache (chunks + BM25 always; FAISS only for the FAISS backend —
     # Pinecone vectors live server-side under the folder-hash namespace).
@@ -259,8 +277,40 @@ def _compute_folder_hash(folder_path: str) -> str:
             entries.append(f"{fpath!s}:{mtime}")
         except OSError:
             pass
-    fingerprint = "\n".join(entries).encode()
+    fingerprint = (_INDEX_VERSION + "\n" + "\n".join(entries)).encode()
     return hashlib.md5(fingerprint).hexdigest()[:16]
+
+
+def _filename_keywords(source_path: str) -> str:
+    """Human-meaningful words from a filename (org/domain), minus index digits.
+
+    e.g. "security_ironbloom_008.md" -> "security ironbloom". A meeting often
+    names a document by its org/topic, so these tokens sharpen BM25 routing.
+    """
+    stem = Path(source_path).stem
+    words = re.sub(r"[_\-]+", " ", stem)
+    words = re.sub(r"\b\d+\b", " ", words)
+    return re.sub(r"\s+", " ", words).strip()
+
+
+def _index_text(chunk: ChunkRecord) -> str:
+    """Text used for BM25 + embedding: page name + filename + section title + body.
+
+    The body alone loses the document and section a chunk belongs to, so a query
+    that names a document or topic ("the Ironbloom security policy", "cold-storage
+    archival window") cannot route to it. Prepending the page/section context to
+    the indexed text — not just storing it as metadata — makes retrieval match on
+    document and heading, not body text only.
+    """
+    doc_title = chunk.doc_title or ""
+    fname = _filename_keywords(chunk.source_path)
+    head = chunk.section_heading or ""
+    prefix_parts = [doc_title, fname]
+    if head and head != doc_title:
+        prefix_parts.append(head)
+    prefix = " | ".join(p for p in prefix_parts if p)
+    parts = [p for p in (prefix, chunk.context_prefix or "", chunk.content) if p]
+    return "\n".join(parts)
 
 
 def _gather_chunks(folder_path: str) -> list[ChunkRecord]:
@@ -325,8 +375,8 @@ def _embed_batch_with_retry(sync_client, batch, offset, max_retries=6):
     return [[0.0] * _EMBED_DIM] * len(batch)
 
 
-def _embed_chunks(chunks: list[ChunkRecord], openai_client) -> Optional[np.ndarray]:
-    """Embed all chunks; returns a (N, 1536) float32 array or None.
+def _embed_chunks(texts: list[str], openai_client) -> Optional[np.ndarray]:
+    """Embed pre-composed index texts; returns a (N, 1536) float32 array or None.
 
     build_index() runs synchronously (often from inside a running event loop in
     the async pipeline), so we must use a *synchronous* embeddings client here.
@@ -339,7 +389,6 @@ def _embed_chunks(chunks: list[ChunkRecord], openai_client) -> Optional[np.ndarr
         logger.warning("No usable embeddings client; skipping dense index.")
         return None
 
-    texts = [c.context_prefix + " " + c.content for c in chunks]
     batch_size = 100
     all_embeddings: list[list[float]] = []
     for i in range(0, len(texts), batch_size):
@@ -353,9 +402,9 @@ def _embed_chunks(chunks: list[ChunkRecord], openai_client) -> Optional[np.ndarr
     return vecs
 
 
-def _build_faiss_index(chunks: list[ChunkRecord], openai_client) -> Optional[Any]:
-    """Embed all chunks and build a FAISS FlatIP index (cosine via normalized IP)."""
-    vecs = _embed_chunks(chunks, openai_client)
+def _build_faiss_index(texts: list[str], openai_client) -> Optional[Any]:
+    """Embed pre-composed index texts and build a FAISS FlatIP index (cosine)."""
+    vecs = _embed_chunks(texts, openai_client)
     if vecs is None:
         return None
     faiss.normalize_L2(vecs)

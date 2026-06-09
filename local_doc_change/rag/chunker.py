@@ -104,6 +104,24 @@ def chunk_document(file_path: str) -> list[ChunkRecord]:
     return _markdown_to_chunks(markdown, file_path, ext)
 
 
+def _stamp_doc_title(chunks: list[ChunkRecord]) -> None:
+    """Tag every chunk of a document with the document's title.
+
+    The title is the first section's heading (section_index 0). Carrying it on
+    every chunk lets retrieval and the evaluator know which document/page a
+    section belongs to — essential for routing a change the speaker addressed to
+    a specific company/document to the RIGHT file, not a same-shaped section in
+    another document.
+    """
+    if not chunks:
+        return
+    title = next((c.section_heading for c in chunks if c.section_index == 0), "")
+    if not title:
+        title = chunks[0].section_heading or ""
+    for c in chunks:
+        c.doc_title = title
+
+
 def _split_oversized_section(text: str, max_tokens: int = 800) -> list[str]:
     """Split a large section at paragraph boundaries.
 
@@ -295,6 +313,7 @@ def _markdown_to_chunks(
 
         global_index += 1
 
+    _stamp_doc_title(chunks)
     return chunks
 
 
@@ -390,4 +409,5 @@ def _page_level_fallback(
         if i >= len(words):
             break
 
+    _stamp_doc_title(chunks)
     return chunks

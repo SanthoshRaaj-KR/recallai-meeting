@@ -28,6 +28,15 @@ Given a change intent and a candidate section from a document, score the relevan
 - 0.5-0.69: The section is plausibly related but not obviously the right target.
 - 0.0-0.49: The section is unrelated to the intent; do not edit here.
 
+DOCUMENT MATCH IS DECISIVE for disambiguation. If the speaker named a specific document,
+page, company, or organization (see "Spoken context"/topic) AND the candidate's "Document"
+CLEARLY belongs to a DIFFERENT company/organization, score 0.0-0.3 even if the topic,
+heading, and values match perfectly — editing the right kind of section in the WRONG
+document is exactly the failure to avoid (many documents share the same headings and
+similar tables). BUT do NOT penalize when the document matches the named one, or when you
+cannot confidently tell that it is a different document — in those cases score on topic
+relevance as usual. Only a CLEAR wrong-document match is penalized; uncertainty is not.
+
 Return a JSON object with:
   relevance_score: float (0.0-1.0)
   reasoning: str (one sentence explaining the score)
@@ -69,13 +78,18 @@ class EvaluationAgent:
             if intent.old_value and intent.old_value not in content and intent.old_value in chunk.content:
                 pos = chunk.content.find(intent.old_value)
                 content = chunk.content[:2000] + "\n...\n" + chunk.content[max(0, pos - 500):pos + 500]
+        spoken = " ".join(intent.verbatim_snippets or []).strip()
+        doc_label = chunk.doc_title or os.path.basename(chunk.source_path)
         prompt = (
             f"Intent:\n"
             f"  topic: {intent.affected_topic}\n"
             f"  old_value: {intent.old_value}\n"
-            f"  new_value: {intent.new_value}\n\n"
-            f"Section heading: {chunk.section_heading}\n"
-            f"Section content:\n{content}"
+            f"  new_value: {intent.new_value}\n"
+            f"  spoken context: {spoken or '(none)'}\n\n"
+            f"Candidate section:\n"
+            f"  Document (page): {doc_label}\n"
+            f"  Section heading: {chunk.section_heading}\n"
+            f"  Content:\n{content}"
         )
         try:
             result = await guarded_run(self._agent, prompt)
