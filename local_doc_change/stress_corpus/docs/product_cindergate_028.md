@@ -1,10 +1,22 @@
 # Cindergate Product Operations Guide
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official product operations guide for Cindergate. Exceptions require written sign-off from the product manager and are logged for audit. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Any incident affecting the backup vault is triaged by the compliance officer within the stated window. Metrics for this area are reported each sprint and reviewed by the IT desk.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Standard approval threshold | $1000 |
+| Concurrent request budget | 20 requests |
+| Maximum batch size | 500 records |
+| Target response time | 12 hours |
+| Records retention baseline | 12 months |
 
 # Roadmap Governance
 
-The following standards apply to roadmap governance and are mandatory for all teams. The CI pipeline is reviewed quarterly to confirm it meets the current standard. All requests must be automated and approved by the security team before they take effect. Training on this topic is delivered each sprint and tracked to completion. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
+This part of the document covers roadmap governance and the controls around it. Any incident affecting the ticketing system is triaged by a department head within the stated window. Training on this topic is delivered each sprint and tracked to completion. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
 Any incident affecting the document store is triaged by the compliance officer within the stated window. Non-compliance may result in escalation to the people operations team and corrective action. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Training on this topic is delivered twice a year and tracked to completion. Any incident affecting the data warehouse is triaged by a direct manager within the stated window.
 

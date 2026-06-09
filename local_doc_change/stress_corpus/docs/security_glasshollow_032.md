@@ -1,14 +1,26 @@
 # Glasshollow Information Security Policy
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official information security policy for Glasshollow. Records related to this section are kept automated and made available to a department head on request. Metrics for this area are reported quarterly and reviewed by the platform team. Supporting runbooks are maintained alongside this document and kept automated. Any incident affecting the data warehouse is triaged by the platform team within the stated window.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Maximum batch size | 50 records |
+| Escalation tiers | 4 tiers |
+| Quarterly completion target | 90 percent |
+| Concurrent request budget | 80 requests |
+| Audit sampling rate | 5 percent |
 
 # Access Control
 
-Responsibilities and limits for access control are set out in this section. Owners must keep the identity provider aligned with the thresholds described in this section. Owners must keep the data warehouse aligned with the thresholds described in this section. Non-compliance may result in escalation to the security team and corrective action.
+The following standards apply to access control and are mandatory for all teams. Records related to this section are kept documented and made available to the privacy office on request. Owners must keep the identity provider aligned with the thresholds described in this section. Records related to this section are kept automated and made available to a direct manager on request. Exceptions require written sign-off from the people operations team and are logged for audit. Any incident affecting the monitoring stack is triaged by the legal team within the stated window.
 
-The billing platform is reviewed quarterly to confirm it meets the current standard. The identity provider is reviewed twice a year to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Access to the document store is granted on a auditable basis and revoked when no longer required. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Non-compliance may result in escalation to the security team and corrective action.
+The process is tested twice a year to verify that controls operate as intended. Access to the document store is granted on a automated basis and revoked when no longer required. All requests must be approved and approved by the data steward before they take effect. All requests must be documented and approved by the people operations team before they take effect. Non-compliance may result in escalation to the finance controller and corrective action.
 
-All requests must be documented and approved by the people operations team before they take effect. Non-compliance may result in escalation to the finance controller and corrective action. Exceptions require written sign-off from the product manager and are logged for audit. Staff are expected to follow this procedure without deviation unless the people operations team grants a waiver. Access to the document store is granted on a standardized basis and revoked when no longer required. Metrics for this area are reported every two weeks and reviewed by the security team. Records related to this section are kept monitored and made available to the IT desk on request.
+Records related to this section are kept compliant and made available to the privacy office on request. Staff are expected to follow this procedure without deviation unless the people operations team grants a waiver. Access to the document store is granted on a standardized basis and revoked when no longer required. Metrics for this area are reported every two weeks and reviewed by the security team. Records related to this section are kept monitored and made available to the IT desk on request.
 
 Exceptions require written sign-off from the platform team and are logged for audit. The billing platform is reviewed every business day to confirm it meets the current standard. Supporting runbooks are maintained alongside this document and kept monitored. Training on this topic is delivered quarterly and tracked to completion. Any incident affecting the data warehouse is triaged by the people operations team within the stated window. Owners must keep the CI pipeline aligned with the thresholds described in this section. Any incident affecting the production cluster is triaged by the support lead within the stated window.
 

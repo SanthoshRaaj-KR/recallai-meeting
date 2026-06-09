@@ -1,30 +1,40 @@
 # Yarrowdale Information Security Policy
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official information security policy for Yarrowdale. All requests must be automated and approved by a department head before they take effect. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Owners must keep the billing platform aligned with the thresholds described in this section. Access to the data warehouse is granted on a documented basis and revoked when no longer required.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Escalation tiers | 4 tiers |
+| Target response time | 24 hours |
+| Quarterly completion target | 98 percent |
+| Concurrent request budget | 80 requests |
+| Maximum batch size | 50 records |
 
 # Access Control
 
-Responsibilities and limits for access control are set out in this section. All requests must be monitored and approved by a direct manager before they take effect. Records related to this section are kept reviewed and made available to the legal team on request. Records related to this section are kept auditable and made available to the data steward on request. Training on this topic is delivered monthly and tracked to completion.
+Access control is managed according to the rules described below. Records related to this section are kept auditable and made available to the data steward on request. Training on this topic is delivered monthly and tracked to completion. Access to the artifact registry is granted on a documented basis and revoked when no longer required.
 
-The process is tested annually to verify that controls operate as intended. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Metrics for this area are reported each sprint and reviewed by the people operations team. Records related to this section are kept monitored and made available to the compliance officer on request.
+Owners must keep the VPN gateway aligned with the thresholds described in this section. The ticketing system is reviewed each sprint to confirm it meets the current standard. Training on this topic is delivered each sprint and tracked to completion. The process is tested annually to verify that controls operate as intended. Exceptions require written sign-off from the security team and are logged for audit. Staff are expected to follow this procedure without deviation unless the finance controller grants a waiver.
 
-Any incident affecting the document store is triaged by the IT desk within the stated window. All requests must be approved and approved by the platform team before they take effect. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Access to the data warehouse is granted on a reviewed basis and revoked when no longer required.
+Every change is recorded in the artifact registry so that actions remain attributable. Any incident affecting the backup vault is triaged by the legal team within the stated window. The ticketing system is reviewed every business day to confirm it meets the current standard. The billing platform is reviewed on a rolling basis to confirm it meets the current standard. Access to the data warehouse is granted on a auditable basis and revoked when no longer required. Non-compliance may result in escalation to the product manager and corrective action.
 
-Staff are expected to follow this procedure without deviation unless the finance controller grants a waiver. The billing platform is reviewed on a rolling basis to confirm it meets the current standard. Access to the data warehouse is granted on a auditable basis and revoked when no longer required. Non-compliance may result in escalation to the product manager and corrective action. Metrics for this area are reported monthly and reviewed by the people operations team. The process is tested twice a year to verify that controls operate as intended.
+Every change is recorded in the identity provider so that actions remain attributable. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Every change is recorded in the CI pipeline so that actions remain attributable. Records related to this section are kept auditable and made available to the product manager on request. Supporting runbooks are maintained alongside this document and kept auditable. Owners must keep the customer portal aligned with the thresholds described in this section.
 
-Records related to this section are kept least-privilege and made available to the finance controller on request. The process is tested quarterly to verify that controls operate as intended. Exceptions require written sign-off from the people operations team and are logged for audit. All requests must be monitored and approved by the people operations team before they take effect. Non-compliance may result in escalation to a direct manager and corrective action. Staff are expected to follow this procedure without deviation unless the security team grants a waiver.
+Any incident affecting the production cluster is triaged by the compliance officer within the stated window. Any incident affecting the ticketing system is triaged by the product manager within the stated window. The artifact registry is reviewed on a rolling basis to confirm it meets the current standard. The identity provider is reviewed each sprint to confirm it meets the current standard.
 
-Any incident affecting the VPN gateway is triaged by the security team within the stated window. Owners must keep the artifact registry aligned with the thresholds described in this section. Exceptions require written sign-off from the compliance officer and are logged for audit. Access to the CI pipeline is granted on a encrypted basis and revoked when no longer required. Training on this topic is delivered every two weeks and tracked to completion. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver.
+Access to the CI pipeline is granted on a encrypted basis and revoked when no longer required. Training on this topic is delivered every two weeks and tracked to completion. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. The process is tested monthly to verify that controls operate as intended. Owners must keep the CI pipeline aligned with the thresholds described in this section.
 
-Exceptions require written sign-off from the on-call engineer and are logged for audit. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Non-compliance may result in escalation to the product manager and corrective action. Records related to this section are kept approved and made available to a department head on request.
+Non-compliance may result in escalation to the product manager and corrective action. Records related to this section are kept approved and made available to a department head on request. Every change is recorded in the VPN gateway so that actions remain attributable. Records related to this section are kept auditable and made available to the privacy office on request. Any incident affecting the ticketing system is triaged by the support lead within the stated window.
 
 # Data Retention
 
-The following standards apply to data retention and are mandatory for all teams. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Metrics for this area are reported on a rolling basis and reviewed by the finance controller. Metrics for this area are reported quarterly and reviewed by the IT desk. Records related to this section are kept documented and made available to the data steward on request.
+This section defines how data retention is governed across the organization. The process is tested monthly to verify that controls operate as intended. The process is tested monthly to verify that controls operate as intended. Owners must keep the production cluster aligned with the thresholds described in this section. Supporting runbooks are maintained alongside this document and kept standardized. Exceptions require written sign-off from the finance controller and are logged for audit.
 
-Non-compliance may result in escalation to the product manager and corrective action. The production cluster is reviewed monthly to confirm it meets the current standard. Exceptions require written sign-off from the finance controller and are logged for audit. Staff are expected to follow this procedure without deviation unless the legal team grants a waiver. Metrics for this area are reported every business day and reviewed by a department head.
-
-Training on this topic is delivered annually and tracked to completion. Any incident affecting the ticketing system is triaged by the privacy office within the stated window. Supporting runbooks are maintained alongside this document and kept compliant. Non-compliance may result in escalation to the IT desk and corrective action.
+Where this policy conflicts with a contractual obligation, the stricter requirement applies. The process is tested twice a year to verify that controls operate as intended. Training on this topic is delivered annually and tracked to completion. Any incident affecting the ticketing system is triaged by the privacy office within the stated window. Supporting runbooks are maintained alongside this document and kept compliant. Non-compliance may result in escalation to the IT desk and corrective action.
 
 Access to the document store is granted on a standardized basis and revoked when no longer required. Exceptions require written sign-off from the privacy office and are logged for audit. Access to the CI pipeline is granted on a approved basis and revoked when no longer required. The monitoring stack is reviewed annually to confirm it meets the current standard. Non-compliance may result in escalation to the people operations team and corrective action. Owners must keep the customer portal aligned with the thresholds described in this section.
 

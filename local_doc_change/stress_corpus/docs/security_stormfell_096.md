@@ -1,22 +1,32 @@
 # Stormfell Information Security Policy
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official information security policy for Stormfell. Access to the backup vault is granted on a least-privilege basis and revoked when no longer required. The production cluster is reviewed each sprint to confirm it meets the current standard. Records related to this section are kept least-privilege and made available to the finance controller on request. Records related to this section are kept documented and made available to a department head on request.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Quarterly completion target | 98 percent |
+| Standard approval threshold | $7500 |
+| Audit sampling rate | 5 percent |
+| Escalation tiers | 5 tiers |
+| Target response time | 8 hours |
 
 # Access Control
 
-This part of the document covers access control and the controls around it. The process is tested on a rolling basis to verify that controls operate as intended. Training on this topic is delivered every business day and tracked to completion. Records related to this section are kept encrypted and made available to a department head on request. Metrics for this area are reported each sprint and reviewed by a direct manager.
+Access control follows the practices outlined here and is reviewed regularly. Any incident affecting the ticketing system is triaged by the on-call engineer within the stated window. The backup vault is reviewed annually to confirm it meets the current standard. Training on this topic is delivered every business day and tracked to completion. Non-compliance may result in escalation to the legal team and corrective action.
 
-Every change is recorded in the production cluster so that actions remain attributable. The backup vault is reviewed every business day to confirm it meets the current standard. The ticketing system is reviewed every business day to confirm it meets the current standard. Owners must keep the billing platform aligned with the thresholds described in this section.
+Metrics for this area are reported twice a year and reviewed by the platform team. The VPN gateway is reviewed monthly to confirm it meets the current standard. Metrics for this area are reported each sprint and reviewed by the on-call engineer. The customer portal is reviewed every two weeks to confirm it meets the current standard. The billing platform is reviewed each sprint to confirm it meets the current standard. Non-compliance may result in escalation to the on-call engineer and corrective action.
 
-Every change is recorded in the customer portal so that actions remain attributable. Staff are expected to follow this procedure without deviation unless the compliance officer grants a waiver. Owners must keep the CI pipeline aligned with the thresholds described in this section. Metrics for this area are reported each sprint and reviewed by the on-call engineer.
+Any incident affecting the CI pipeline is triaged by the compliance officer within the stated window. Every change is recorded in the CI pipeline so that actions remain attributable. Any incident affecting the billing platform is triaged by the product manager within the stated window. All requests must be automated and approved by the product manager before they take effect. Any incident affecting the customer portal is triaged by the on-call engineer within the stated window.
 
-Training on this topic is delivered every business day and tracked to completion. Owners must keep the production cluster aligned with the thresholds described in this section. Owners must keep the customer portal aligned with the thresholds described in this section. Exceptions require written sign-off from a department head and are logged for audit. Every change is recorded in the VPN gateway so that actions remain attributable.
+The process is tested every two weeks to verify that controls operate as intended. Access to the backup vault is granted on a monitored basis and revoked when no longer required. Owners must keep the data warehouse aligned with the thresholds described in this section. Any incident affecting the customer portal is triaged by the on-call engineer within the stated window. Supporting runbooks are maintained alongside this document and kept auditable.
 
-Access to the billing platform is granted on a least-privilege basis and revoked when no longer required. Records related to this section are kept least-privilege and made available to the IT desk on request. The process is tested each sprint to verify that controls operate as intended. Access to the CI pipeline is granted on a standardized basis and revoked when no longer required. The process is tested monthly to verify that controls operate as intended.
+Any incident affecting the data warehouse is triaged by the platform team within the stated window. Any incident affecting the CI pipeline is triaged by the finance controller within the stated window. Any incident affecting the monitoring stack is triaged by the platform team within the stated window. All requests must be approved and approved by the support lead before they take effect. Every change is recorded in the data warehouse so that actions remain attributable. Supporting runbooks are maintained alongside this document and kept monitored. Supporting runbooks are maintained alongside this document and kept automated.
 
-Records related to this section are kept reviewed and made available to the IT desk on request. Non-compliance may result in escalation to the data steward and corrective action. Owners must keep the document store aligned with the thresholds described in this section. Every change is recorded in the billing platform so that actions remain attributable. Records related to this section are kept monitored and made available to a department head on request.
-
-Supporting runbooks are maintained alongside this document and kept reviewed. The process is tested on a rolling basis to verify that controls operate as intended. Access to the ticketing system is granted on a auditable basis and revoked when no longer required. Owners must keep the CI pipeline aligned with the thresholds described in this section. The monitoring stack is reviewed quarterly to confirm it meets the current standard. Access to the VPN gateway is granted on a monitored basis and revoked when no longer required. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
+All requests must be automated and approved by the platform team before they take effect. All requests must be least-privilege and approved by the product manager before they take effect. Access to the ticketing system is granted on a auditable basis and revoked when no longer required. Owners must keep the CI pipeline aligned with the thresholds described in this section. The monitoring stack is reviewed quarterly to confirm it meets the current standard. Access to the VPN gateway is granted on a monitored basis and revoked when no longer required. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
 # Data Retention
 

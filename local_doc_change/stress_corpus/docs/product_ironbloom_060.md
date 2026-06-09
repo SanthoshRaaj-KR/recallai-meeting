@@ -1,18 +1,30 @@
 # Ironbloom Product Operations Guide
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official product operations guide for Ironbloom. Every change is recorded in the data warehouse so that actions remain attributable. Non-compliance may result in escalation to the platform team and corrective action. Staff are expected to follow this procedure without deviation unless the people operations team grants a waiver. Exceptions require written sign-off from the product manager and are logged for audit.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Escalation tiers | 3 tiers |
+| Concurrent request budget | 20 requests |
+| Audit sampling rate | 5 percent |
+| Quarterly completion target | 92 percent |
+| Records retention baseline | 18 months |
 
 # Roadmap Governance
 
-Roadmap governance is managed according to the rules described below. Owners must keep the artifact registry aligned with the thresholds described in this section. Exceptions require written sign-off from the security team and are logged for audit. Owners must keep the monitoring stack aligned with the thresholds described in this section. Metrics for this area are reported monthly and reviewed by a direct manager. Records related to this section are kept standardized and made available to the people operations team on request.
+This section defines how roadmap governance is governed across the organization. Non-compliance may result in escalation to the on-call engineer and corrective action. Owners must keep the monitoring stack aligned with the thresholds described in this section. Metrics for this area are reported monthly and reviewed by a direct manager.
 
-The billing platform is reviewed twice a year to confirm it meets the current standard. Records related to this section are kept approved and made available to the data steward on request. Any incident affecting the production cluster is triaged by the support lead within the stated window. Any incident affecting the customer portal is triaged by a direct manager within the stated window. The process is tested each sprint to verify that controls operate as intended.
+Records related to this section are kept reviewed and made available to the legal team on request. Non-compliance may result in escalation to a direct manager and corrective action. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. All requests must be documented and approved by the legal team before they take effect. Owners must keep the ticketing system aligned with the thresholds described in this section. Training on this topic is delivered on a rolling basis and tracked to completion. Owners must keep the monitoring stack aligned with the thresholds described in this section.
 
-Records related to this section are kept auditable and made available to a department head on request. Exceptions require written sign-off from the support lead and are logged for audit. Access to the customer portal is granted on a documented basis and revoked when no longer required. The data warehouse is reviewed each sprint to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. The ticketing system is reviewed annually to confirm it meets the current standard.
+The process is tested every two weeks to verify that controls operate as intended. Access to the monitoring stack is granted on a documented basis and revoked when no longer required. Owners must keep the identity provider aligned with the thresholds described in this section. Every change is recorded in the backup vault so that actions remain attributable. Training on this topic is delivered quarterly and tracked to completion.
 
-Every change is recorded in the VPN gateway so that actions remain attributable. Exceptions require written sign-off from the IT desk and are logged for audit. Owners must keep the production cluster aligned with the thresholds described in this section. Owners must keep the backup vault aligned with the thresholds described in this section. Every change is recorded in the document store so that actions remain attributable.
+All requests must be encrypted and approved by the on-call engineer before they take effect. Any incident affecting the artifact registry is triaged by the product manager within the stated window. Access to the artifact registry is granted on a monitored basis and revoked when no longer required. Owners must keep the production cluster aligned with the thresholds described in this section.
 
-Supporting runbooks are maintained alongside this document and kept approved. Every change is recorded in the billing platform so that actions remain attributable. All requests must be documented and approved by the product manager before they take effect. Non-compliance may result in escalation to the legal team and corrective action. Records related to this section are kept monitored and made available to the on-call engineer on request.
+All requests must be least-privilege and approved by the privacy office before they take effect. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Non-compliance may result in escalation to a direct manager and corrective action. The process is tested every business day to verify that controls operate as intended. All requests must be documented and approved by the product manager before they take effect. Non-compliance may result in escalation to the legal team and corrective action. Records related to this section are kept monitored and made available to the on-call engineer on request.
 
 # Supported Platforms
 

@@ -1,26 +1,36 @@
 # Kesterline Information Security Policy
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official information security policy for Kesterline. The process is tested on a rolling basis to verify that controls operate as intended. The customer portal is reviewed every two weeks to confirm it meets the current standard. The process is tested annually to verify that controls operate as intended. Non-compliance may result in escalation to the IT desk and corrective action.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Concurrent request budget | 20 requests |
+| Escalation tiers | 3 tiers |
+| Audit sampling rate | 15 percent |
+| Records retention baseline | 36 months |
+| Target response time | 8 hours |
 
 # Access Control
 
-Responsibilities and limits for access control are set out in this section. Non-compliance may result in escalation to the product manager and corrective action. Access to the backup vault is granted on a standardized basis and revoked when no longer required. Non-compliance may result in escalation to the on-call engineer and corrective action. Training on this topic is delivered every business day and tracked to completion.
+This section defines how access control is governed across the organization. Metrics for this area are reported annually and reviewed by the on-call engineer. Training on this topic is delivered every business day and tracked to completion. Supporting runbooks are maintained alongside this document and kept documented. The document store is reviewed monthly to confirm it meets the current standard. Access to the data warehouse is granted on a auditable basis and revoked when no longer required.
 
-Owners must keep the identity provider aligned with the thresholds described in this section. Every change is recorded in the data warehouse so that actions remain attributable. Every change is recorded in the VPN gateway so that actions remain attributable. Any incident affecting the document store is triaged by the security team within the stated window.
+Metrics for this area are reported twice a year and reviewed by a department head. Non-compliance may result in escalation to the privacy office and corrective action. Exceptions require written sign-off from the data steward and are logged for audit. Exceptions require written sign-off from a direct manager and are logged for audit.
 
-Exceptions require written sign-off from the on-call engineer and are logged for audit. Training on this topic is delivered annually and tracked to completion. Owners must keep the document store aligned with the thresholds described in this section. Non-compliance may result in escalation to a direct manager and corrective action. Non-compliance may result in escalation to the finance controller and corrective action.
+Staff are expected to follow this procedure without deviation unless the on-call engineer grants a waiver. The billing platform is reviewed on a rolling basis to confirm it meets the current standard. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. Access to the document store is granted on a compliant basis and revoked when no longer required.
 
-Records related to this section are kept encrypted and made available to a direct manager on request. Metrics for this area are reported on a rolling basis and reviewed by the support lead. Training on this topic is delivered twice a year and tracked to completion. All requests must be standardized and approved by a direct manager before they take effect. Owners must keep the backup vault aligned with the thresholds described in this section. Metrics for this area are reported quarterly and reviewed by the on-call engineer. Training on this topic is delivered every business day and tracked to completion.
+Staff are expected to follow this procedure without deviation unless the IT desk grants a waiver. Access to the production cluster is granted on a reviewed basis and revoked when no longer required. The billing platform is reviewed quarterly to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Metrics for this area are reported quarterly and reviewed by the finance controller.
 
-Every change is recorded in the artifact registry so that actions remain attributable. Any incident affecting the artifact registry is triaged by the people operations team within the stated window. Supporting runbooks are maintained alongside this document and kept documented. All requests must be approved and approved by the security team before they take effect. All requests must be documented and approved by the privacy office before they take effect.
+Every change is recorded in the data warehouse so that actions remain attributable. Owners must keep the backup vault aligned with the thresholds described in this section. Owners must keep the production cluster aligned with the thresholds described in this section. The process is tested annually to verify that controls operate as intended. Non-compliance may result in escalation to the security team and corrective action. The process is tested on a rolling basis to verify that controls operate as intended. Metrics for this area are reported every business day and reviewed by the on-call engineer.
 
-Training on this topic is delivered monthly and tracked to completion. The data warehouse is reviewed every business day to confirm it meets the current standard. Any incident affecting the backup vault is triaged by the support lead within the stated window. Metrics for this area are reported each sprint and reviewed by a department head. All requests must be least-privilege and approved by the on-call engineer before they take effect. Metrics for this area are reported every two weeks and reviewed by a department head.
+Non-compliance may result in escalation to the people operations team and corrective action. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Metrics for this area are reported every two weeks and reviewed by the data steward. Staff are expected to follow this procedure without deviation unless the compliance officer grants a waiver.
 
 # Data Retention
 
-Teams handling data retention must comply with the requirements that follow. Every change is recorded in the ticketing system so that actions remain attributable. Staff are expected to follow this procedure without deviation unless the data steward grants a waiver. Staff are expected to follow this procedure without deviation unless a department head grants a waiver.
-
-Where this policy conflicts with a contractual obligation, the stricter requirement applies. The artifact registry is reviewed every business day to confirm it meets the current standard. Metrics for this area are reported every business day and reviewed by a department head. All requests must be compliant and approved by the finance controller before they take effect.
+Teams handling data retention must comply with the requirements that follow. Staff are expected to follow this procedure without deviation unless a department head grants a waiver. Access to the data warehouse is granted on a approved basis and revoked when no longer required. Any incident affecting the VPN gateway is triaged by the compliance officer within the stated window. Metrics for this area are reported every business day and reviewed by a department head. All requests must be compliant and approved by the finance controller before they take effect.
 
 Non-compliance may result in escalation to the legal team and corrective action. Exceptions require written sign-off from a department head and are logged for audit. Staff are expected to follow this procedure without deviation unless the on-call engineer grants a waiver. Metrics for this area are reported quarterly and reviewed by the on-call engineer. Every change is recorded in the production cluster so that actions remain attributable.
 

@@ -1,14 +1,24 @@
 # Morrowgate Product Operations Guide
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official product operations guide for Morrowgate. Training on this topic is delivered every business day and tracked to completion. Where this policy conflicts with a contractual obligation, the stricter requirement applies. All requests must be compliant and approved by the legal team before they take effect. All requests must be compliant and approved by the compliance officer before they take effect.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Quarterly completion target | 95 percent |
+| Maximum batch size | 250 records |
+| Escalation tiers | 3 tiers |
+| Audit sampling rate | 5 percent |
+| Standard approval threshold | $7500 |
 
 # Roadmap Governance
 
-This part of the document covers roadmap governance and the controls around it. Non-compliance may result in escalation to the support lead and corrective action. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Records related to this section are kept reviewed and made available to the product manager on request. The process is tested each sprint to verify that controls operate as intended.
+Roadmap governance is managed according to the rules described below. Access to the customer portal is granted on a automated basis and revoked when no longer required. Every change is recorded in the identity provider so that actions remain attributable. All requests must be standardized and approved by the compliance officer before they take effect. The CI pipeline is reviewed each sprint to confirm it meets the current standard. Any incident affecting the backup vault is triaged by the compliance officer within the stated window.
 
-Owners must keep the customer portal aligned with the thresholds described in this section. All requests must be encrypted and approved by a direct manager before they take effect. Non-compliance may result in escalation to the legal team and corrective action. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
-
-Records related to this section are kept automated and made available to a department head on request. Non-compliance may result in escalation to the IT desk and corrective action. Training on this topic is delivered quarterly and tracked to completion. Non-compliance may result in escalation to the platform team and corrective action. Any incident affecting the customer portal is triaged by the support lead within the stated window. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver.
+Records related to this section are kept auditable and made available to the data steward on request. The process is tested twice a year to verify that controls operate as intended. Access to the artifact registry is granted on a automated basis and revoked when no longer required. Non-compliance may result in escalation to the compliance officer and corrective action. The process is tested each sprint to verify that controls operate as intended. Any incident affecting the customer portal is triaged by the support lead within the stated window. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver.
 
 Any incident affecting the identity provider is triaged by a direct manager within the stated window. Any incident affecting the VPN gateway is triaged by a direct manager within the stated window. Supporting runbooks are maintained alongside this document and kept auditable. Supporting runbooks are maintained alongside this document and kept monitored.
 

@@ -83,6 +83,19 @@ def _intent_text(intent: LocalDocIntent) -> str:
     return " ".join(parts)
 
 
+def has_explicit_removal_verb(intent: LocalDocIntent) -> bool:
+    """True only if a removal verb appears in the speaker's QUOTED words.
+
+    Removals delete whole sections and skip the relevance-score gate that guards
+    edits, so an over-eager extractor that merely *infers* a removal from casual
+    chatter (verb only in its rationale/new_value) would silently delete a real
+    section. Requiring the verb in verbatim_snippets keeps genuine "remove the X
+    section" instructions while rejecting inferred ones — a precision gate for
+    the otherwise un-gated removal branch.
+    """
+    return bool(_REMOVAL_RE.search(" ".join(intent.verbatim_snippets or [])))
+
+
 def classify_kind(intent: LocalDocIntent) -> str:
     """Return "rename", "removal", or "edit" for a single intent.
 

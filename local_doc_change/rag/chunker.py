@@ -178,7 +178,13 @@ def _read_odt_markdown(file_path: str) -> str:
                 text = teletype.extractText(child).strip()
                 if text:
                     lines.append(text)
-            elif local in ("list", "section", "table", "table-cell", "list-item"):
+            elif local in ("list", "section", "table", "table-columns",
+                            "table-column", "table-header-rows", "table-row",
+                            "table-cell", "list-item"):
+                # Recurse into common containers. table-row/table-header-rows MUST
+                # be included or every table cell is skipped (the row elements sit
+                # between <table> and <table-cell>), silently dropping all tabular
+                # content — values planted in tables would be invisible to RAG.
                 _walk(child)  # recurse into common containers
 
     _walk(doc.text)

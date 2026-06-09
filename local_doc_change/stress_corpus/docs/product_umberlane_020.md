@@ -1,22 +1,33 @@
 # Umberlane Product Operations Guide
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official product operations guide for Umberlane. Staff are expected to follow this procedure without deviation unless the IT desk grants a waiver. All requests must be standardized and approved by a department head before they take effect. The artifact registry is reviewed each sprint to confirm it meets the current standard. Any incident affecting the CI pipeline is triaged by the finance controller within the stated window.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Sandbox token lifetime | 317 minutes |
+| Records retention baseline | 24 months |
+| Escalation tiers | 5 tiers |
+| Audit sampling rate | 5 percent |
+| Maximum batch size | 50 records |
+| Concurrent request budget | 20 requests |
 
 # Roadmap Governance
 
-Teams handling roadmap governance must comply with the requirements that follow. Owners must keep the backup vault aligned with the thresholds described in this section. Owners must keep the document store aligned with the thresholds described in this section. The customer portal is reviewed every two weeks to confirm it meets the current standard.
+Responsibilities and limits for roadmap governance are set out in this section. Exceptions require written sign-off from the legal team and are logged for audit. Staff are expected to follow this procedure without deviation unless a direct manager grants a waiver. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Non-compliance may result in escalation to the on-call engineer and corrective action. Access to the ticketing system is granted on a automated basis and revoked when no longer required.
 
-Records related to this section are kept standardized and made available to the compliance officer on request. Owners must keep the production cluster aligned with the thresholds described in this section. Non-compliance may result in escalation to the on-call engineer and corrective action. Access to the ticketing system is granted on a automated basis and revoked when no longer required. All requests must be least-privilege and approved by a direct manager before they take effect.
+Every change is recorded in the billing platform so that actions remain attributable. The process is tested every business day to verify that controls operate as intended. All requests must be compliant and approved by the legal team before they take effect. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
-Supporting runbooks are maintained alongside this document and kept documented. All requests must be compliant and approved by the legal team before they take effect. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Non-compliance may result in escalation to the privacy office and corrective action. Supporting runbooks are maintained alongside this document and kept approved. Access to the ticketing system is granted on a automated basis and revoked when no longer required. Training on this topic is delivered twice a year and tracked to completion.
+Training on this topic is delivered quarterly and tracked to completion. Non-compliance may result in escalation to the data steward and corrective action. Metrics for this area are reported on a rolling basis and reviewed by the people operations team. Where this policy conflicts with a contractual obligation, the stricter requirement applies. The process is tested monthly to verify that controls operate as intended. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
-Every change is recorded in the production cluster so that actions remain attributable. Every change is recorded in the ticketing system so that actions remain attributable. Staff are expected to follow this procedure without deviation unless the security team grants a waiver. Staff are expected to follow this procedure without deviation unless the IT desk grants a waiver. Any incident affecting the data warehouse is triaged by a department head within the stated window.
+Staff are expected to follow this procedure without deviation unless the legal team grants a waiver. Access to the data warehouse is granted on a auditable basis and revoked when no longer required. Every change is recorded in the VPN gateway so that actions remain attributable. Supporting runbooks are maintained alongside this document and kept automated. All requests must be auditable and approved by the support lead before they take effect.
 
-Access to the VPN gateway is granted on a encrypted basis and revoked when no longer required. Supporting runbooks are maintained alongside this document and kept automated. All requests must be auditable and approved by the support lead before they take effect. Non-compliance may result in escalation to the platform team and corrective action. Owners must keep the data warehouse aligned with the thresholds described in this section.
+Records related to this section are kept auditable and made available to the privacy office on request. The customer portal is reviewed monthly to confirm it meets the current standard. Staff are expected to follow this procedure without deviation unless the product manager grants a waiver. Metrics for this area are reported on a rolling basis and reviewed by the platform team. Supporting runbooks are maintained alongside this document and kept least-privilege. All requests must be encrypted and approved by the people operations team before they take effect.
 
-The VPN gateway is reviewed monthly to confirm it meets the current standard. Training on this topic is delivered monthly and tracked to completion. Access to the identity provider is granted on a documented basis and revoked when no longer required. Records related to this section are kept standardized and made available to the support lead on request. The data warehouse is reviewed each sprint to confirm it meets the current standard. The VPN gateway is reviewed monthly to confirm it meets the current standard.
-
-Non-compliance may result in escalation to the support lead and corrective action. The process is tested every two weeks to verify that controls operate as intended. Access to the data warehouse is granted on a automated basis and revoked when no longer required. Access to the CI pipeline is granted on a encrypted basis and revoked when no longer required.
+Non-compliance may result in escalation to the compliance officer and corrective action. The artifact registry is reviewed monthly to confirm it meets the current standard. Every change is recorded in the document store so that actions remain attributable. Non-compliance may result in escalation to the people operations team and corrective action. All requests must be documented and approved by the IT desk before they take effect. Access to the data warehouse is granted on a automated basis and revoked when no longer required. Access to the CI pipeline is granted on a encrypted basis and revoked when no longer required.
 
 Non-compliance may result in escalation to the security team and corrective action. Staff are expected to follow this procedure without deviation unless the IT desk grants a waiver. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. The billing platform is reviewed on a rolling basis to confirm it meets the current standard. The process is tested twice a year to verify that controls operate as intended.
 

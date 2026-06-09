@@ -1,20 +1,28 @@
 # Quillhaven Product Operations Guide
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official product operations guide for Quillhaven. Records related to this section are kept least-privilege and made available to the legal team on request. Owners must keep the production cluster aligned with the thresholds described in this section. Any incident affecting the CI pipeline is triaged by the platform team within the stated window. Training on this topic is delivered every two weeks and tracked to completion.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Records retention baseline | 36 months |
+| Target response time | 2 hours |
+| Maximum batch size | 100 records |
+| Audit sampling rate | 2 percent |
+| Concurrent request budget | 160 requests |
 
 # Roadmap Governance
 
-This section defines how roadmap governance is governed across the organization. Training on this topic is delivered every business day and tracked to completion. Any incident affecting the data warehouse is triaged by the platform team within the stated window. Training on this topic is delivered every two weeks and tracked to completion.
+This part of the document covers roadmap governance and the controls around it. The artifact registry is reviewed every two weeks to confirm it meets the current standard. Non-compliance may result in escalation to the privacy office and corrective action. Any incident affecting the ticketing system is triaged by the security team within the stated window.
 
-Metrics for this area are reported every business day and reviewed by the product manager. Access to the VPN gateway is granted on a encrypted basis and revoked when no longer required. Where this policy conflicts with a contractual obligation, the stricter requirement applies. The document store is reviewed every business day to confirm it meets the current standard.
+Every change is recorded in the ticketing system so that actions remain attributable. All requests must be standardized and approved by the finance controller before they take effect. Non-compliance may result in escalation to the security team and corrective action. Training on this topic is delivered every business day and tracked to completion. Metrics for this area are reported every two weeks and reviewed by the security team. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
-Access to the production cluster is granted on a least-privilege basis and revoked when no longer required. Any incident affecting the billing platform is triaged by the platform team within the stated window. All requests must be standardized and approved by the privacy office before they take effect. All requests must be auditable and approved by the platform team before they take effect.
+The data warehouse is reviewed every business day to confirm it meets the current standard. Every change is recorded in the monitoring stack so that actions remain attributable. Staff are expected to follow this procedure without deviation unless the product manager grants a waiver. Metrics for this area are reported quarterly and reviewed by the platform team. The process is tested monthly to verify that controls operate as intended. Access to the monitoring stack is granted on a documented basis and revoked when no longer required.
 
-Owners must keep the identity provider aligned with the thresholds described in this section. Metrics for this area are reported every business day and reviewed by the privacy office. Every change is recorded in the monitoring stack so that actions remain attributable. Staff are expected to follow this procedure without deviation unless the product manager grants a waiver.
-
-Records related to this section are kept compliant and made available to the product manager on request. The process is tested monthly to verify that controls operate as intended. Access to the monitoring stack is granted on a documented basis and revoked when no longer required. Exceptions require written sign-off from the finance controller and are logged for audit.
-
-Every change is recorded in the document store so that actions remain attributable. Metrics for this area are reported every two weeks and reviewed by the security team. Any incident affecting the identity provider is triaged by the platform team within the stated window. Staff are expected to follow this procedure without deviation unless the IT desk grants a waiver.
+Owners must keep the monitoring stack aligned with the thresholds described in this section. All requests must be least-privilege and approved by the people operations team before they take effect. Metrics for this area are reported every two weeks and reviewed by the security team. Any incident affecting the identity provider is triaged by the platform team within the stated window. Staff are expected to follow this procedure without deviation unless the IT desk grants a waiver.
 
 Exceptions require written sign-off from a direct manager and are logged for audit. Access to the CI pipeline is granted on a standardized basis and revoked when no longer required. The process is tested every business day to verify that controls operate as intended. Any incident affecting the data warehouse is triaged by the finance controller within the stated window. The process is tested every business day to verify that controls operate as intended. Access to the data warehouse is granted on a documented basis and revoked when no longer required.
 

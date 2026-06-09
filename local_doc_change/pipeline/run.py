@@ -67,11 +67,22 @@ class PipelineConfig(BaseModel):
     rerank: bool = True
     contextual_retrieval: bool = True
     top_k: int = 3
-    relevance_threshold: float = 0.7
+    # Minimum (intent, section) relevance for a section to become a card. The
+    # primary no-hallucination defense is the intent extractor, which now rejects
+    # no-change / deferred / hypothetical / transient-metric chatter before it ever
+    # reaches retrieval; this threshold is the second gate. 0.75 admits genuine
+    # edits (which score 0.85-1.0) and real reported facts while still rejecting
+    # weak topical mismatches (~0.6-0.7) — balanced for recall without re-opening
+    # the false positives the extractor rules already close.
+    relevance_threshold: float = 0.75
     # How many candidate sections to pull per edit intent before evaluation.
     # Wider than top_k so the right section survives to the eval stage even on a
-    # large corpus where many sections are lexically similar.
-    retrieval_top_k: int = 12
+    # large corpus where many sections are lexically similar. Real corpora are
+    # dense with numbers/tables, so a too-narrow net drops the correct section
+    # just outside the window; 20 keeps recall robust while the 0.7 eval
+    # threshold and max_targets cap still prevent false positives. (Cost is more
+    # eval calls per intent, which the throttled runtime absorbs.)
+    retrieval_top_k: int = 20
     # Cap on how many sections a single edit intent may change. Default 1: an
     # edit ("change X from A to B") almost always targets one specific section,
     # and selecting only the single best-matching section avoids drafting onto a
@@ -160,15 +171,50 @@ def _make_proposal(
 # ── Pipeline orchestrator ─────────────────────────────────────────────────────
 
 
+def _record_diagnostics(
+    diagnostics: Optional[dict],
+    intents: list,
+    proposals: list,
+    classify_kind=None,
+) -> None:
+    """Fill the optional diagnostics dict so callers can explain a result.
+
+    The pipeline is RAG-first: a change only becomes a card when a document
+    section actually covers it. When intents are extracted but none match a
+    section (e.g. a topic the documents do not cover), the proposal list is
+    empty even though the meeting was understood. Surfacing the extracted-but-
+    unmatched intents turns a confusing silent zero into an honest explanation —
+    without ever fabricating a card for an undocumented topic.
+    """
+    if diagnostics is None:
+        return
+    matched_ids = {id(p.intent) for p in proposals}
+    unmatched = [i for i in intents if id(i) not in matched_ids]
+    diagnostics["extracted_intent_count"] = len(intents)
+    diagnostics["proposal_count"] = len(proposals)
+    diagnostics["unmatched_intents"] = [
+        {
+            "affected_topic": i.affected_topic,
+            "old_value": i.old_value,
+            "new_value": i.new_value,
+            "kind": classify_kind(i) if classify_kind else None,
+        }
+        for i in unmatched
+    ]
+
+
 async def run_pipeline(
     transcript: str,
     config: PipelineConfig,
     progress_queue: Optional[asyncio.Queue] = None,
+    diagnostics: Optional[dict] = None,
 ) -> list[LocalDocProposal]:
     """Run the full 8-stage local document change pipeline.
 
     Returns proposals ready for human review. Empty list if no qualifying edits
-    are found.
+    are found. If *diagnostics* is provided, it is populated with the extracted
+    intent count and any extracted-but-unmatched intents, so a caller can explain
+    why a result is empty (e.g. the topic is not covered by any document).
     """
     q = progress_queue
 
@@ -176,6 +222,7 @@ async def run_pipeline(
     await _emit(q, "transcript_source")
     if not transcript or not transcript.strip():
         logger.info("run_pipeline: empty transcript — no proposals to generate")
+        _record_diagnostics(diagnostics, [], [])
         await _emit(q, "ready_for_review")
         return []
 
@@ -188,13 +235,36 @@ async def run_pipeline(
     intents = await intent_agent.extract(transcript)
     if not intents:
         logger.info("run_pipeline: no intents extracted from transcript")
+        _record_diagnostics(diagnostics, [], [], classify_kind)
         await _emit(q, "ready_for_review")
         return []
 
     # Route each intent by kind.
-    edit_intents = [i for i in intents if classify_kind(i) == "edit"]
+    from agents_local.structural import has_explicit_removal_verb  # noqa: PLC0415
+
+    # An edit card must name a concrete new value; drop placeholders/empties so an
+    # inquiry the extractor mis-read ("what's our retention set to?") cannot become
+    # a card even if it slipped through extraction.
+    _PLACEHOLDER_VALUES = {
+        "", "tbd", "tba", "unknown", "n/a", "na", "to be determined",
+        "to be decided", "?", "none", "null",
+    }
+
+    def _has_concrete_value(i) -> bool:
+        return (i.new_value or "").strip().lower() not in _PLACEHOLDER_VALUES
+
+    edit_intents = [
+        i for i in intents
+        if classify_kind(i) == "edit" and _has_concrete_value(i)
+    ]
     rename_intents = [i for i in intents if classify_kind(i) == "rename"]
-    removal_intents = [i for i in intents if classify_kind(i) == "removal"]
+    # Removals delete whole sections and skip the relevance-score gate, so only
+    # honor ones where the speaker explicitly said a removal verb (not inferred
+    # from casual chatter) — otherwise a stray intent silently deletes a section.
+    removal_intents = [
+        i for i in intents
+        if classify_kind(i) == "removal" and has_explicit_removal_verb(i)
+    ]
     logger.info(
         "run_pipeline: %d intents (edit=%d rename=%d removal=%d)",
         len(intents), len(edit_intents), len(rename_intents), len(removal_intents),
@@ -459,9 +529,11 @@ async def run_pipeline(
             )
         )
 
+    _record_diagnostics(diagnostics, intents, proposals, classify_kind)
     logger.info(
-        "run_pipeline: completed — session=%s proposals=%d",
+        "run_pipeline: completed — session=%s proposals=%d unmatched=%d",
         config.session_id,
         len(proposals),
+        len(intents) - len({id(p.intent) for p in proposals}),
     )
     return proposals

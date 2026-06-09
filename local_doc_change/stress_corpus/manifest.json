@@ -7,7 +7,7 @@
       "org": "Aldermont",
       "kind": "Information Security Policy",
       "target_pages": 32,
-      "sections": 31,
+      "sections": 32,
       "has_brand": false
     },
     {
@@ -17,7 +17,7 @@
       "org": "Brightforge",
       "kind": "People Operations Handbook",
       "target_pages": 50,
-      "sections": 66,
+      "sections": 67,
       "has_brand": false
     },
     {
@@ -27,7 +27,7 @@
       "org": "Cindergate",
       "kind": "Engineering Handbook",
       "target_pages": 28,
-      "sections": 37,
+      "sections": 38,
       "has_brand": true
     },
     {
@@ -37,7 +37,7 @@
       "org": "Drayveil",
       "kind": "Customer Support SOP",
       "target_pages": 39,
-      "sections": 45,
+      "sections": 46,
       "has_brand": false
     },
     {
@@ -47,7 +47,7 @@
       "org": "Everwynd",
       "kind": "Product Operations Guide",
       "target_pages": 22,
-      "sections": 26,
+      "sections": 27,
       "has_brand": false
     },
     {
@@ -57,7 +57,7 @@
       "org": "Fenmark",
       "kind": "Finance and Procurement Policy",
       "target_pages": 31,
-      "sections": 36,
+      "sections": 37,
       "has_brand": false
     },
     {
@@ -67,7 +67,7 @@
       "org": "Glasshollow",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 56,
-      "sections": 56,
+      "sections": 57,
       "has_brand": false
     },
     {
@@ -77,7 +77,7 @@
       "org": "Harrowfield",
       "kind": "Data Governance and Privacy",
       "target_pages": 57,
-      "sections": 62,
+      "sections": 63,
       "has_brand": false
     },
     {
@@ -87,7 +87,7 @@
       "org": "Ironbloom",
       "kind": "Information Security Policy",
       "target_pages": 27,
-      "sections": 31,
+      "sections": 32,
       "has_brand": false
     },
     {
@@ -97,7 +97,7 @@
       "org": "Junivault",
       "kind": "People Operations Handbook",
       "target_pages": 27,
-      "sections": 35,
+      "sections": 36,
       "has_brand": true
     },
     {
@@ -107,7 +107,7 @@
       "org": "Kesterline",
       "kind": "Engineering Handbook",
       "target_pages": 63,
-      "sections": 65,
+      "sections": 66,
       "has_brand": false
     },
     {
@@ -117,7 +117,7 @@
       "org": "Larkspire",
       "kind": "Customer Support SOP",
       "target_pages": 74,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -127,7 +127,7 @@
       "org": "Morrowgate",
       "kind": "Product Operations Guide",
       "target_pages": 20,
-      "sections": 20,
+      "sections": 21,
       "has_brand": false
     },
     {
@@ -137,7 +137,7 @@
       "org": "Netherby",
       "kind": "Finance and Procurement Policy",
       "target_pages": 32,
-      "sections": 41,
+      "sections": 42,
       "has_brand": false
     },
     {
@@ -147,7 +147,7 @@
       "org": "Oakmeridian",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 48,
-      "sections": 62,
+      "sections": 63,
       "has_brand": false
     },
     {
@@ -157,7 +157,7 @@
       "org": "Pallasvane",
       "kind": "Data Governance and Privacy",
       "target_pages": 36,
-      "sections": 48,
+      "sections": 49,
       "has_brand": false
     },
     {
@@ -167,7 +167,7 @@
       "org": "Quillhaven",
       "kind": "Information Security Policy",
       "target_pages": 19,
-      "sections": 21,
+      "sections": 22,
       "has_brand": true
     },
     {
@@ -177,7 +177,7 @@
       "org": "Rampart Lyle",
       "kind": "People Operations Handbook",
       "target_pages": 68,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -187,7 +187,7 @@
       "org": "Stormfell",
       "kind": "Engineering Handbook",
       "target_pages": 39,
-      "sections": 38,
+      "sections": 39,
       "has_brand": false
     },
     {
@@ -197,7 +197,7 @@
       "org": "Tindermere",
       "kind": "Customer Support SOP",
       "target_pages": 58,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -207,7 +207,7 @@
       "org": "Umberlane",
       "kind": "Product Operations Guide",
       "target_pages": 47,
-      "sections": 45,
+      "sections": 46,
       "has_brand": false
     },
     {
@@ -217,7 +217,7 @@
       "org": "Vauxhollow",
       "kind": "Finance and Procurement Policy",
       "target_pages": 73,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -227,7 +227,7 @@
       "org": "Westmarch",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 23,
-      "sections": 31,
+      "sections": 32,
       "has_brand": false
     },
     {
@@ -237,7 +237,7 @@
       "org": "Xanthe Reef",
       "kind": "Data Governance and Privacy",
       "target_pages": 64,
-      "sections": 72,
+      "sections": 73,
       "has_brand": true
     },
     {
@@ -247,7 +247,7 @@
       "org": "Yarrowdale",
       "kind": "Information Security Policy",
       "target_pages": 31,
-      "sections": 33,
+      "sections": 34,
       "has_brand": false
     },
     {
@@ -257,7 +257,7 @@
       "org": "Zephyrion",
       "kind": "People Operations Handbook",
       "target_pages": 63,
-      "sections": 72,
+      "sections": 73,
       "has_brand": false
     },
     {
@@ -267,7 +267,7 @@
       "org": "Aldermont",
       "kind": "Engineering Handbook",
       "target_pages": 75,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -277,7 +277,7 @@
       "org": "Brightforge",
       "kind": "Customer Support SOP",
       "target_pages": 37,
-      "sections": 43,
+      "sections": 44,
       "has_brand": false
     },
     {
@@ -287,7 +287,7 @@
       "org": "Cindergate",
       "kind": "Product Operations Guide",
       "target_pages": 32,
-      "sections": 35,
+      "sections": 36,
       "has_brand": false
     },
     {
@@ -297,7 +297,7 @@
       "org": "Drayveil",
       "kind": "Finance and Procurement Policy",
       "target_pages": 49,
-      "sections": 61,
+      "sections": 62,
       "has_brand": false
     },
     {
@@ -307,7 +307,7 @@
       "org": "Everwynd",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 58,
-      "sections": 67,
+      "sections": 68,
       "has_brand": true
     },
     {
@@ -317,7 +317,7 @@
       "org": "Fenmark",
       "kind": "Data Governance and Privacy",
       "target_pages": 30,
-      "sections": 38,
+      "sections": 39,
       "has_brand": false
     },
     {
@@ -327,7 +327,7 @@
       "org": "Glasshollow",
       "kind": "Information Security Policy",
       "target_pages": 35,
-      "sections": 34,
+      "sections": 35,
       "has_brand": false
     },
     {
@@ -337,7 +337,7 @@
       "org": "Harrowfield",
       "kind": "People Operations Handbook",
       "target_pages": 74,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -347,7 +347,7 @@
       "org": "Ironbloom",
       "kind": "Engineering Handbook",
       "target_pages": 43,
-      "sections": 47,
+      "sections": 48,
       "has_brand": false
     },
     {
@@ -357,7 +357,7 @@
       "org": "Junivault",
       "kind": "Customer Support SOP",
       "target_pages": 29,
-      "sections": 28,
+      "sections": 29,
       "has_brand": false
     },
     {
@@ -367,7 +367,7 @@
       "org": "Kesterline",
       "kind": "Product Operations Guide",
       "target_pages": 48,
-      "sections": 47,
+      "sections": 48,
       "has_brand": false
     },
     {
@@ -377,7 +377,7 @@
       "org": "Larkspire",
       "kind": "Finance and Procurement Policy",
       "target_pages": 45,
-      "sections": 45,
+      "sections": 46,
       "has_brand": true
     },
     {
@@ -387,7 +387,7 @@
       "org": "Morrowgate",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 15,
-      "sections": 14,
+      "sections": 15,
       "has_brand": false
     },
     {
@@ -397,7 +397,7 @@
       "org": "Netherby",
       "kind": "Data Governance and Privacy",
       "target_pages": 31,
-      "sections": 36,
+      "sections": 37,
       "has_brand": false
     },
     {
@@ -407,7 +407,7 @@
       "org": "Oakmeridian",
       "kind": "Information Security Policy",
       "target_pages": 30,
-      "sections": 32,
+      "sections": 33,
       "has_brand": false
     },
     {
@@ -417,7 +417,7 @@
       "org": "Pallasvane",
       "kind": "People Operations Handbook",
       "target_pages": 22,
-      "sections": 21,
+      "sections": 22,
       "has_brand": false
     },
     {
@@ -427,7 +427,7 @@
       "org": "Quillhaven",
       "kind": "Engineering Handbook",
       "target_pages": 28,
-      "sections": 27,
+      "sections": 28,
       "has_brand": false
     },
     {
@@ -437,7 +437,7 @@
       "org": "Rampart Lyle",
       "kind": "Customer Support SOP",
       "target_pages": 59,
-      "sections": 58,
+      "sections": 59,
       "has_brand": false
     },
     {
@@ -447,7 +447,7 @@
       "org": "Stormfell",
       "kind": "Product Operations Guide",
       "target_pages": 15,
-      "sections": 20,
+      "sections": 21,
       "has_brand": true
     },
     {
@@ -457,7 +457,7 @@
       "org": "Tindermere",
       "kind": "Finance and Procurement Policy",
       "target_pages": 69,
-      "sections": 68,
+      "sections": 69,
       "has_brand": false
     },
     {
@@ -467,7 +467,7 @@
       "org": "Umberlane",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 30,
-      "sections": 37,
+      "sections": 38,
       "has_brand": false
     },
     {
@@ -477,7 +477,7 @@
       "org": "Vauxhollow",
       "kind": "Data Governance and Privacy",
       "target_pages": 77,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -487,7 +487,7 @@
       "org": "Westmarch",
       "kind": "Information Security Policy",
       "target_pages": 31,
-      "sections": 30,
+      "sections": 31,
       "has_brand": false
     },
     {
@@ -497,7 +497,7 @@
       "org": "Xanthe Reef",
       "kind": "People Operations Handbook",
       "target_pages": 32,
-      "sections": 38,
+      "sections": 39,
       "has_brand": false
     },
     {
@@ -507,7 +507,7 @@
       "org": "Yarrowdale",
       "kind": "Engineering Handbook",
       "target_pages": 26,
-      "sections": 30,
+      "sections": 31,
       "has_brand": false
     },
     {
@@ -517,7 +517,7 @@
       "org": "Zephyrion",
       "kind": "Customer Support SOP",
       "target_pages": 30,
-      "sections": 39,
+      "sections": 40,
       "has_brand": true
     },
     {
@@ -527,7 +527,7 @@
       "org": "Aldermont",
       "kind": "Product Operations Guide",
       "target_pages": 71,
-      "sections": 68,
+      "sections": 69,
       "has_brand": false
     },
     {
@@ -537,7 +537,7 @@
       "org": "Brightforge",
       "kind": "Finance and Procurement Policy",
       "target_pages": 57,
-      "sections": 58,
+      "sections": 59,
       "has_brand": false
     },
     {
@@ -547,7 +547,7 @@
       "org": "Cindergate",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 59,
-      "sections": 64,
+      "sections": 65,
       "has_brand": false
     },
     {
@@ -557,7 +557,7 @@
       "org": "Drayveil",
       "kind": "Data Governance and Privacy",
       "target_pages": 35,
-      "sections": 47,
+      "sections": 48,
       "has_brand": false
     },
     {
@@ -567,7 +567,7 @@
       "org": "Everwynd",
       "kind": "Information Security Policy",
       "target_pages": 45,
-      "sections": 51,
+      "sections": 52,
       "has_brand": false
     },
     {
@@ -577,7 +577,7 @@
       "org": "Fenmark",
       "kind": "People Operations Handbook",
       "target_pages": 20,
-      "sections": 23,
+      "sections": 24,
       "has_brand": false
     },
     {
@@ -587,7 +587,7 @@
       "org": "Glasshollow",
       "kind": "Engineering Handbook",
       "target_pages": 80,
-      "sections": 73,
+      "sections": 74,
       "has_brand": true
     },
     {
@@ -597,7 +597,7 @@
       "org": "Harrowfield",
       "kind": "Customer Support SOP",
       "target_pages": 49,
-      "sections": 59,
+      "sections": 60,
       "has_brand": false
     },
     {
@@ -607,7 +607,7 @@
       "org": "Ironbloom",
       "kind": "Product Operations Guide",
       "target_pages": 41,
-      "sections": 53,
+      "sections": 54,
       "has_brand": false
     },
     {
@@ -617,7 +617,7 @@
       "org": "Junivault",
       "kind": "Finance and Procurement Policy",
       "target_pages": 51,
-      "sections": 58,
+      "sections": 59,
       "has_brand": false
     },
     {
@@ -627,7 +627,7 @@
       "org": "Kesterline",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 33,
-      "sections": 33,
+      "sections": 34,
       "has_brand": false
     },
     {
@@ -637,7 +637,7 @@
       "org": "Larkspire",
       "kind": "Data Governance and Privacy",
       "target_pages": 63,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -647,7 +647,7 @@
       "org": "Morrowgate",
       "kind": "Information Security Policy",
       "target_pages": 50,
-      "sections": 47,
+      "sections": 48,
       "has_brand": false
     },
     {
@@ -657,7 +657,7 @@
       "org": "Netherby",
       "kind": "People Operations Handbook",
       "target_pages": 44,
-      "sections": 56,
+      "sections": 57,
       "has_brand": true
     },
     {
@@ -667,7 +667,7 @@
       "org": "Oakmeridian",
       "kind": "Engineering Handbook",
       "target_pages": 62,
-      "sections": 61,
+      "sections": 62,
       "has_brand": false
     },
     {
@@ -677,7 +677,7 @@
       "org": "Pallasvane",
       "kind": "Customer Support SOP",
       "target_pages": 66,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -687,7 +687,7 @@
       "org": "Quillhaven",
       "kind": "Product Operations Guide",
       "target_pages": 22,
-      "sections": 24,
+      "sections": 25,
       "has_brand": false
     },
     {
@@ -697,7 +697,7 @@
       "org": "Rampart Lyle",
       "kind": "Finance and Procurement Policy",
       "target_pages": 79,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -707,7 +707,7 @@
       "org": "Stormfell",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 66,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -717,7 +717,7 @@
       "org": "Tindermere",
       "kind": "Data Governance and Privacy",
       "target_pages": 31,
-      "sections": 34,
+      "sections": 35,
       "has_brand": false
     },
     {
@@ -727,7 +727,7 @@
       "org": "Umberlane",
       "kind": "Information Security Policy",
       "target_pages": 28,
-      "sections": 35,
+      "sections": 36,
       "has_brand": true
     },
     {
@@ -737,7 +737,7 @@
       "org": "Vauxhollow",
       "kind": "People Operations Handbook",
       "target_pages": 79,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -747,7 +747,7 @@
       "org": "Westmarch",
       "kind": "Engineering Handbook",
       "target_pages": 60,
-      "sections": 70,
+      "sections": 71,
       "has_brand": false
     },
     {
@@ -757,7 +757,7 @@
       "org": "Xanthe Reef",
       "kind": "Customer Support SOP",
       "target_pages": 31,
-      "sections": 33,
+      "sections": 34,
       "has_brand": false
     },
     {
@@ -767,7 +767,7 @@
       "org": "Yarrowdale",
       "kind": "Product Operations Guide",
       "target_pages": 78,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -777,7 +777,7 @@
       "org": "Zephyrion",
       "kind": "Finance and Procurement Policy",
       "target_pages": 22,
-      "sections": 21,
+      "sections": 22,
       "has_brand": false
     },
     {
@@ -787,7 +787,7 @@
       "org": "Aldermont",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 15,
-      "sections": 16,
+      "sections": 17,
       "has_brand": false
     },
     {
@@ -797,7 +797,7 @@
       "org": "Brightforge",
       "kind": "Data Governance and Privacy",
       "target_pages": 24,
-      "sections": 25,
+      "sections": 26,
       "has_brand": true
     },
     {
@@ -807,7 +807,7 @@
       "org": "Cindergate",
       "kind": "Information Security Policy",
       "target_pages": 58,
-      "sections": 71,
+      "sections": 72,
       "has_brand": false
     },
     {
@@ -817,7 +817,7 @@
       "org": "Drayveil",
       "kind": "People Operations Handbook",
       "target_pages": 32,
-      "sections": 36,
+      "sections": 37,
       "has_brand": false
     },
     {
@@ -827,7 +827,7 @@
       "org": "Everwynd",
       "kind": "Engineering Handbook",
       "target_pages": 43,
-      "sections": 44,
+      "sections": 45,
       "has_brand": false
     },
     {
@@ -837,7 +837,7 @@
       "org": "Fenmark",
       "kind": "Customer Support SOP",
       "target_pages": 51,
-      "sections": 61,
+      "sections": 62,
       "has_brand": false
     },
     {
@@ -847,7 +847,7 @@
       "org": "Glasshollow",
       "kind": "Product Operations Guide",
       "target_pages": 17,
-      "sections": 17,
+      "sections": 18,
       "has_brand": false
     },
     {
@@ -857,7 +857,7 @@
       "org": "Harrowfield",
       "kind": "Finance and Procurement Policy",
       "target_pages": 66,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -867,7 +867,7 @@
       "org": "Ironbloom",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 43,
-      "sections": 41,
+      "sections": 42,
       "has_brand": true
     },
     {
@@ -877,7 +877,7 @@
       "org": "Junivault",
       "kind": "Data Governance and Privacy",
       "target_pages": 48,
-      "sections": 52,
+      "sections": 53,
       "has_brand": false
     },
     {
@@ -887,7 +887,7 @@
       "org": "Kesterline",
       "kind": "Information Security Policy",
       "target_pages": 65,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -897,7 +897,7 @@
       "org": "Larkspire",
       "kind": "People Operations Handbook",
       "target_pages": 35,
-      "sections": 37,
+      "sections": 38,
       "has_brand": false
     },
     {
@@ -907,7 +907,7 @@
       "org": "Morrowgate",
       "kind": "Engineering Handbook",
       "target_pages": 63,
-      "sections": 61,
+      "sections": 62,
       "has_brand": false
     },
     {
@@ -917,7 +917,7 @@
       "org": "Netherby",
       "kind": "Customer Support SOP",
       "target_pages": 34,
-      "sections": 33,
+      "sections": 34,
       "has_brand": false
     },
     {
@@ -927,7 +927,7 @@
       "org": "Oakmeridian",
       "kind": "Product Operations Guide",
       "target_pages": 34,
-      "sections": 34,
+      "sections": 35,
       "has_brand": false
     },
     {
@@ -937,7 +937,7 @@
       "org": "Pallasvane",
       "kind": "Finance and Procurement Policy",
       "target_pages": 34,
-      "sections": 42,
+      "sections": 43,
       "has_brand": true
     },
     {
@@ -947,7 +947,7 @@
       "org": "Quillhaven",
       "kind": "IT and Infrastructure Policy",
       "target_pages": 26,
-      "sections": 26,
+      "sections": 27,
       "has_brand": false
     },
     {
@@ -957,7 +957,7 @@
       "org": "Rampart Lyle",
       "kind": "Data Governance and Privacy",
       "target_pages": 76,
-      "sections": 73,
+      "sections": 74,
       "has_brand": false
     },
     {
@@ -967,7 +967,7 @@
       "org": "Stormfell",
       "kind": "Information Security Policy",
       "target_pages": 42,
-      "sections": 49,
+      "sections": 50,
       "has_brand": false
     },
     {
@@ -977,7 +977,7 @@
       "org": "Tindermere",
       "kind": "People Operations Handbook",
       "target_pages": 66,
-      "sections": 70,
+      "sections": 71,
       "has_brand": false
     },
     {
@@ -987,7 +987,7 @@
       "org": "Umberlane",
       "kind": "Engineering Handbook",
       "target_pages": 44,
-      "sections": 50,
+      "sections": 51,
       "has_brand": false
     },
     {
@@ -997,21 +997,69 @@
       "org": "Vauxhollow",
       "kind": "Customer Support SOP",
       "target_pages": 38,
-      "sections": 40,
+      "sections": 41,
       "has_brand": false
     }
   ],
   "anchors": [
     {
+      "kind": "edit_table",
+      "file": "docs\\hr_brightforge_001.txt",
+      "fmt": "txt",
+      "doc_index": 1,
+      "section_heading": "SECTION 1. KEY OPERATIONAL PARAMETERS",
+      "topic": "rollback rehearsal interval",
+      "old_value": "29 weeks",
+      "new_value": "12 weeks",
+      "transcript": "For the Brightforge people operations handbook, in the key operational parameters, change the rollback rehearsal interval from 29 weeks to 12 weeks.",
+      "transcript_blind": "We need to change the rollback rehearsal interval from 29 weeks to 12 weeks."
+    },
+    {
+      "kind": "edit_table",
+      "file": "docs\\support_drayveil_003.odt",
+      "fmt": "odt",
+      "doc_index": 3,
+      "section_heading": "Key Operational Parameters",
+      "topic": "seat license ceiling",
+      "old_value": "1,265 seats",
+      "new_value": "2,000 seats",
+      "transcript": "For the Drayveil customer support sop, in the key operational parameters, change the seat license ceiling from 1,265 seats to 2,000 seats.",
+      "transcript_blind": "We need to change the seat license ceiling from 1,265 seats to 2,000 seats."
+    },
+    {
+      "kind": "edit_table",
+      "file": "docs\\product_everwynd_004.md",
+      "fmt": "md",
+      "doc_index": 4,
+      "section_heading": "Key Operational Parameters",
+      "topic": "dependency freeze window",
+      "old_value": "143 days",
+      "new_value": "60 days",
+      "transcript": "For the Everwynd product operations guide, in the key operational parameters, change the dependency freeze window from 143 days to 60 days.",
+      "transcript_blind": "We need to change the dependency freeze window from 143 days to 60 days."
+    },
+    {
       "kind": "remove_named",
       "file": "docs\\finance_fenmark_005.txt",
       "fmt": "txt",
       "doc_index": 5,
-      "section_heading": "SECTION 35. PAGER DUTY CARBON-COPY RULE",
+      "section_heading": "SECTION 36. PAGER DUTY CARBON-COPY RULE",
       "topic": "Pager Duty Carbon-Copy Rule",
       "old_value": null,
       "new_value": null,
       "transcript": "In the Fenmark finance and procurement policy, remove the pager duty carbon-copy rule section."
+    },
+    {
+      "kind": "edit_table",
+      "file": "docs\\it_glasshollow_006.docx",
+      "fmt": "docx",
+      "doc_index": 6,
+      "section_heading": "Key Operational Parameters",
+      "topic": "data egress cap",
+      "old_value": "8,430 gigabytes",
+      "new_value": "5,000 gigabytes",
+      "transcript": "For the Glasshollow it and infrastructure policy, in the key operational parameters, change the data egress cap from 8,430 gigabytes to 5,000 gigabytes.",
+      "transcript_blind": "We need to change the data egress cap from 8,430 gigabytes to 5,000 gigabytes."
     },
     {
       "kind": "edit",
@@ -1030,7 +1078,7 @@
       "file": "docs\\hr_junivault_009.txt",
       "fmt": "txt",
       "doc_index": 9,
-      "section_heading": "SECTION 18. SICK LEAVE (PART 2)",
+      "section_heading": "SECTION 19. SICK LEAVE (PART 2)",
       "topic": "incident bridge auto-timeout",
       "old_value": "53 minutes",
       "new_value": "20 minutes",
@@ -1078,7 +1126,7 @@
       "file": "docs\\finance_netherby_013.txt",
       "fmt": "txt",
       "doc_index": 13,
-      "section_heading": "SECTION 21. CORPORATE CARDS (PART 2)",
+      "section_heading": "SECTION 22. CORPORATE CARDS (PART 2)",
       "topic": "beta cohort size cap",
       "old_value": "1,740 participants",
       "new_value": "5,000 participants",
@@ -1110,6 +1158,42 @@
       "transcript_blind": "We need to change the purchase order fast-track threshold from 7,950 dollars to 10,000 dollars."
     },
     {
+      "kind": "edit_table",
+      "file": "docs\\hr_rampart_017.txt",
+      "fmt": "txt",
+      "doc_index": 17,
+      "section_heading": "SECTION 1. KEY OPERATIONAL PARAMETERS",
+      "topic": "anomaly alert threshold",
+      "old_value": "612 events",
+      "new_value": "250 events",
+      "transcript": "For the Rampart Lyle people operations handbook, in the key operational parameters, change the anomaly alert threshold from 612 events to 250 events.",
+      "transcript_blind": "We need to change the anomaly alert threshold from 612 events to 250 events."
+    },
+    {
+      "kind": "edit_table",
+      "file": "docs\\support_tindermere_019.odt",
+      "fmt": "odt",
+      "doc_index": 19,
+      "section_heading": "Key Operational Parameters",
+      "topic": "hotfix bake time",
+      "old_value": "83 hours",
+      "new_value": "24 hours",
+      "transcript": "For the Tindermere customer support sop, in the key operational parameters, change the hotfix bake time from 83 hours to 24 hours.",
+      "transcript_blind": "We need to change the hotfix bake time from 83 hours to 24 hours."
+    },
+    {
+      "kind": "edit_table",
+      "file": "docs\\product_umberlane_020.md",
+      "fmt": "md",
+      "doc_index": 20,
+      "section_heading": "Key Operational Parameters",
+      "topic": "sandbox token lifetime",
+      "old_value": "317 minutes",
+      "new_value": "120 minutes",
+      "transcript": "For the Umberlane product operations guide, in the key operational parameters, change the sandbox token lifetime from 317 minutes to 120 minutes.",
+      "transcript_blind": "We need to change the sandbox token lifetime from 317 minutes to 120 minutes."
+    },
+    {
       "kind": "remove_named",
       "file": "docs\\data_xanthe_023.odt",
       "fmt": "odt",
@@ -1119,6 +1203,18 @@
       "old_value": null,
       "new_value": null,
       "transcript": "In the Xanthe Reef data governance and privacy, get rid of the on-site smoking shelter policy section."
+    },
+    {
+      "kind": "edit_table",
+      "file": "docs\\eng_aldermont_026.docx",
+      "fmt": "docx",
+      "doc_index": 26,
+      "section_heading": "Key Operational Parameters",
+      "topic": "queue drain deadline",
+      "old_value": "97 seconds",
+      "new_value": "45 seconds",
+      "transcript": "For the Aldermont engineering handbook, in the key operational parameters, change the queue drain deadline from 97 seconds to 45 seconds.",
+      "transcript_blind": "We need to change the queue drain deadline from 97 seconds to 45 seconds."
     },
     {
       "kind": "edit",
@@ -1137,7 +1233,7 @@
       "file": "docs\\finance_drayveil_029.txt",
       "fmt": "txt",
       "doc_index": 29,
-      "section_heading": "SECTION 31. CAPITAL EXPENDITURE (PART 3)",
+      "section_heading": "SECTION 32. CAPITAL EXPENDITURE (PART 3)",
       "topic": "data subject request deadline",
       "old_value": "27 days",
       "new_value": "30 days",
@@ -1185,7 +1281,7 @@
       "file": "docs\\hr_pallasvane_041.txt",
       "fmt": "txt",
       "doc_index": 41,
-      "section_heading": "SECTION 11. GRIEVANCE PROCEDURE",
+      "section_heading": "SECTION 12. GRIEVANCE PROCEDURE",
       "topic": "telemetry sampling rate",
       "old_value": "3.7 percent",
       "new_value": "10 percent",

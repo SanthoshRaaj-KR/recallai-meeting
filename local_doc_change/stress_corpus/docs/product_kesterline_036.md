@@ -1,16 +1,28 @@
 # Kesterline Product Operations Guide
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official product operations guide for Kesterline. Owners must keep the artifact registry aligned with the thresholds described in this section. Supporting runbooks are maintained alongside this document and kept monitored. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Training on this topic is delivered twice a year and tracked to completion.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Quarterly completion target | 92 percent |
+| Audit sampling rate | 5 percent |
+| Concurrent request budget | 40 requests |
+| Maximum batch size | 500 records |
+| Target response time | 2 hours |
 
 # Roadmap Governance
 
-Responsibilities and limits for roadmap governance are set out in this section. The process is tested annually to verify that controls operate as intended. Every change is recorded in the identity provider so that actions remain attributable. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Metrics for this area are reported monthly and reviewed by the IT desk.
+This part of the document covers roadmap governance and the controls around it. Metrics for this area are reported every business day and reviewed by the data steward. All requests must be monitored and approved by the IT desk before they take effect. Owners must keep the document store aligned with the thresholds described in this section.
 
-Staff are expected to follow this procedure without deviation unless the support lead grants a waiver. Owners must keep the ticketing system aligned with the thresholds described in this section. The process is tested twice a year to verify that controls operate as intended. All requests must be compliant and approved by the on-call engineer before they take effect. Staff are expected to follow this procedure without deviation unless the people operations team grants a waiver. Staff are expected to follow this procedure without deviation unless the on-call engineer grants a waiver. Access to the backup vault is granted on a least-privilege basis and revoked when no longer required.
+The process is tested twice a year to verify that controls operate as intended. Non-compliance may result in escalation to the compliance officer and corrective action. Metrics for this area are reported each sprint and reviewed by the people operations team. Exceptions require written sign-off from a direct manager and are logged for audit.
 
-Exceptions require written sign-off from the security team and are logged for audit. Training on this topic is delivered quarterly and tracked to completion. Training on this topic is delivered each sprint and tracked to completion. Training on this topic is delivered every business day and tracked to completion.
+Where this policy conflicts with a contractual obligation, the stricter requirement applies. Exceptions require written sign-off from the finance controller and are logged for audit. The artifact registry is reviewed annually to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Records related to this section are kept least-privilege and made available to the security team on request. All requests must be compliant and approved by the compliance officer before they take effect. Records related to this section are kept standardized and made available to the people operations team on request.
 
-Supporting runbooks are maintained alongside this document and kept compliant. Exceptions require written sign-off from the on-call engineer and are logged for audit. Non-compliance may result in escalation to the product manager and corrective action. Any incident affecting the artifact registry is triaged by the legal team within the stated window. Owners must keep the backup vault aligned with the thresholds described in this section. Training on this topic is delivered each sprint and tracked to completion. Metrics for this area are reported annually and reviewed by the IT desk.
+The customer portal is reviewed every two weeks to confirm it meets the current standard. Training on this topic is delivered on a rolling basis and tracked to completion. Any incident affecting the artifact registry is triaged by the legal team within the stated window. Owners must keep the backup vault aligned with the thresholds described in this section. Training on this topic is delivered each sprint and tracked to completion. Metrics for this area are reported annually and reviewed by the IT desk.
 
 Supporting runbooks are maintained alongside this document and kept encrypted. Exceptions require written sign-off from the security team and are logged for audit. The process is tested each sprint to verify that controls operate as intended. Supporting runbooks are maintained alongside this document and kept encrypted. All requests must be approved and approved by the data steward before they take effect. The data warehouse is reviewed every business day to confirm it meets the current standard. Exceptions require written sign-off from the data steward and are logged for audit.
 

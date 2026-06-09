@@ -1,20 +1,30 @@
 # Ironbloom Information Security Policy
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official information security policy for Ironbloom. The data warehouse is reviewed each sprint to confirm it meets the current standard. Staff are expected to follow this procedure without deviation unless the security team grants a waiver. Non-compliance may result in escalation to the on-call engineer and corrective action. Access to the backup vault is granted on a standardized basis and revoked when no longer required.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Standard approval threshold | $1000 |
+| Quarterly completion target | 92 percent |
+| Records retention baseline | 12 months |
+| Maximum batch size | 250 records |
+| Escalation tiers | 5 tiers |
 
 # Access Control
 
-The following standards apply to access control and are mandatory for all teams. Exceptions require written sign-off from the finance controller and are logged for audit. Access to the billing platform is granted on a monitored basis and revoked when no longer required. Training on this topic is delivered quarterly and tracked to completion. Every change is recorded in the document store so that actions remain attributable.
+The following standards apply to access control and are mandatory for all teams. Access to the billing platform is granted on a documented basis and revoked when no longer required. Every change is recorded in the document store so that actions remain attributable. Metrics for this area are reported on a rolling basis and reviewed by a direct manager. Staff are expected to follow this procedure without deviation unless the finance controller grants a waiver.
 
-Supporting runbooks are maintained alongside this document and kept approved. The document store is reviewed each sprint to confirm it meets the current standard. Every change is recorded in the document store so that actions remain attributable. Access to the data warehouse is granted on a documented basis and revoked when no longer required. Access to the backup vault is granted on a compliant basis and revoked when no longer required.
+Any incident affecting the document store is triaged by the people operations team within the stated window. Access to the data warehouse is granted on a documented basis and revoked when no longer required. Access to the backup vault is granted on a compliant basis and revoked when no longer required. Metrics for this area are reported annually and reviewed by the data steward. Access to the CI pipeline is granted on a automated basis and revoked when no longer required.
 
-Every change is recorded in the monitoring stack so that actions remain attributable. Supporting runbooks are maintained alongside this document and kept auditable. Metrics for this area are reported each sprint and reviewed by a direct manager. Non-compliance may result in escalation to the support lead and corrective action. Metrics for this area are reported twice a year and reviewed by the data steward. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. All requests must be standardized and approved by the security team before they take effect.
+Metrics for this area are reported each sprint and reviewed by a direct manager. Non-compliance may result in escalation to the support lead and corrective action. Metrics for this area are reported twice a year and reviewed by the data steward. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. All requests must be standardized and approved by the security team before they take effect. Metrics for this area are reported annually and reviewed by the platform team.
 
-Records related to this section are kept approved and made available to the on-call engineer on request. Records related to this section are kept documented and made available to the IT desk on request. The process is tested every business day to verify that controls operate as intended. Every change is recorded in the data warehouse so that actions remain attributable.
+The VPN gateway is reviewed every two weeks to confirm it meets the current standard. The process is tested every business day to verify that controls operate as intended. Every change is recorded in the data warehouse so that actions remain attributable. Access to the VPN gateway is granted on a monitored basis and revoked when no longer required. Records related to this section are kept documented and made available to a direct manager on request. Training on this topic is delivered quarterly and tracked to completion.
 
-Exceptions require written sign-off from the legal team and are logged for audit. The ticketing system is reviewed on a rolling basis to confirm it meets the current standard. Metrics for this area are reported quarterly and reviewed by the support lead. Where this policy conflicts with a contractual obligation, the stricter requirement applies. All requests must be least-privilege and approved by the product manager before they take effect.
-
-Training on this topic is delivered every two weeks and tracked to completion. Any incident affecting the VPN gateway is triaged by a direct manager within the stated window. Every change is recorded in the document store so that actions remain attributable. Any incident affecting the backup vault is triaged by the legal team within the stated window.
+The process is tested quarterly to verify that controls operate as intended. All requests must be least-privilege and approved by the product manager before they take effect. Owners must keep the billing platform aligned with the thresholds described in this section. Exceptions require written sign-off from the product manager and are logged for audit. Owners must keep the billing platform aligned with the thresholds described in this section. Any incident affecting the backup vault is triaged by the IT desk within the stated window.
 
 Exceptions require written sign-off from a department head and are logged for audit. Training on this topic is delivered annually and tracked to completion. Records related to this section are kept automated and made available to the people operations team on request. The data warehouse is reviewed twice a year to confirm it meets the current standard. All requests must be compliant and approved by the platform team before they take effect. Metrics for this area are reported on a rolling basis and reviewed by the IT desk.
 

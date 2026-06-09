@@ -1,32 +1,42 @@
 # Quillhaven Information Security Policy
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 Quillhaven operates as a division of Vantcorex Robotics. This document is the official information security policy for Quillhaven. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Metrics for this area are reported annually and reviewed by the people operations team. Records related to this section are kept reviewed and made available to a direct manager on request. All requests must be least-privilege and approved by a department head before they take effect.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Audit sampling rate | 2 percent |
+| Standard approval threshold | $5000 |
+| Escalation tiers | 3 tiers |
+| Maximum batch size | 250 records |
+| Target response time | 8 hours |
 
 # Access Control
 
-Access control follows the practices outlined here and is reviewed regularly. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Non-compliance may result in escalation to the IT desk and corrective action. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Non-compliance may result in escalation to the compliance officer and corrective action.
+Teams handling access control must comply with the requirements that follow. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Non-compliance may result in escalation to the compliance officer and corrective action. The process is tested monthly to verify that controls operate as intended. Training on this topic is delivered monthly and tracked to completion.
 
-Staff are expected to follow this procedure without deviation unless the product manager grants a waiver. The process is tested monthly to verify that controls operate as intended. Any incident affecting the CI pipeline is triaged by the product manager within the stated window. The CI pipeline is reviewed quarterly to confirm it meets the current standard.
+Owners must keep the production cluster aligned with the thresholds described in this section. Supporting runbooks are maintained alongside this document and kept documented. Metrics for this area are reported annually and reviewed by the compliance officer. Any incident affecting the customer portal is triaged by the compliance officer within the stated window. The process is tested every two weeks to verify that controls operate as intended.
 
-Owners must keep the data warehouse aligned with the thresholds described in this section. Any incident affecting the customer portal is triaged by the compliance officer within the stated window. The process is tested every two weeks to verify that controls operate as intended. Any incident affecting the CI pipeline is triaged by the data steward within the stated window.
+Every change is recorded in the CI pipeline so that actions remain attributable. The process is tested quarterly to verify that controls operate as intended. Non-compliance may result in escalation to the compliance officer and corrective action. All requests must be least-privilege and approved by a department head before they take effect. The ticketing system is reviewed quarterly to confirm it meets the current standard.
 
-Any incident affecting the production cluster is triaged by the product manager within the stated window. Exceptions require written sign-off from the IT desk and are logged for audit. Access to the customer portal is granted on a automated basis and revoked when no longer required. Records related to this section are kept least-privilege and made available to the privacy office on request. Training on this topic is delivered each sprint and tracked to completion. Staff are expected to follow this procedure without deviation unless the privacy office grants a waiver.
+Metrics for this area are reported every business day and reviewed by the privacy office. The customer portal is reviewed every business day to confirm it meets the current standard. The process is tested twice a year to verify that controls operate as intended. Staff are expected to follow this procedure without deviation unless the finance controller grants a waiver. Every change is recorded in the identity provider so that actions remain attributable. Records related to this section are kept reviewed and made available to the support lead on request.
 
-Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. Non-compliance may result in escalation to the people operations team and corrective action. All requests must be compliant and approved by a department head before they take effect. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
+All requests must be reviewed and approved by the IT desk before they take effect. Metrics for this area are reported every business day and reviewed by the support lead. Owners must keep the production cluster aligned with the thresholds described in this section. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Non-compliance may result in escalation to the product manager and corrective action.
 
-Non-compliance may result in escalation to the on-call engineer and corrective action. Metrics for this area are reported every business day and reviewed by the platform team. Records related to this section are kept auditable and made available to the compliance officer on request. Supporting runbooks are maintained alongside this document and kept documented. Any incident affecting the VPN gateway is triaged by the security team within the stated window. Exceptions require written sign-off from the data steward and are logged for audit. Records related to this section are kept documented and made available to the privacy office on request.
+Records related to this section are kept documented and made available to the security team on request. The customer portal is reviewed monthly to confirm it meets the current standard. Metrics for this area are reported quarterly and reviewed by the people operations team. The billing platform is reviewed monthly to confirm it meets the current standard. Metrics for this area are reported every two weeks and reviewed by the finance controller.
 
-Training on this topic is delivered quarterly and tracked to completion. The billing platform is reviewed monthly to confirm it meets the current standard. Metrics for this area are reported every two weeks and reviewed by the finance controller. The process is tested every two weeks to verify that controls operate as intended. Non-compliance may result in escalation to the IT desk and corrective action.
-
-This standard is coordinated with Vantcorex Robotics group policy.
+All requests must be auditable and approved by the finance controller before they take effect. Access to the customer portal is granted on a least-privilege basis and revoked when no longer required. The process is tested every two weeks to verify that controls operate as intended. Any incident affecting the document store is triaged by the data steward within the stated window.
 
 # Data Retention
 
-Data retention follows the practices outlined here and is reviewed regularly. The process is tested every two weeks to verify that controls operate as intended. Any incident affecting the document store is triaged by the data steward within the stated window. Any incident affecting the VPN gateway is triaged by the people operations team within the stated window. Training on this topic is delivered monthly and tracked to completion.
+The following standards apply to data retention and are mandatory for all teams. Where this policy conflicts with a contractual obligation, the stricter requirement applies. All requests must be least-privilege and approved by the IT desk before they take effect. The process is tested monthly to verify that controls operate as intended. Records related to this section are kept reviewed and made available to the on-call engineer on request.
 
-Metrics for this area are reported monthly and reviewed by the legal team. Any incident affecting the document store is triaged by the on-call engineer within the stated window. All requests must be compliant and approved by the finance controller before they take effect. Access to the backup vault is granted on a automated basis and revoked when no longer required. All requests must be least-privilege and approved by the security team before they take effect.
+Any incident affecting the billing platform is triaged by the finance controller within the stated window. Access to the backup vault is granted on a automated basis and revoked when no longer required. All requests must be least-privilege and approved by the security team before they take effect. Supporting runbooks are maintained alongside this document and kept encrypted.
 
-Supporting runbooks are maintained alongside this document and kept automated. Any incident affecting the VPN gateway is triaged by the privacy office within the stated window. Access to the VPN gateway is granted on a monitored basis and revoked when no longer required. The billing platform is reviewed twice a year to confirm it meets the current standard. Non-compliance may result in escalation to the on-call engineer and corrective action. Any incident affecting the CI pipeline is triaged by the data steward within the stated window.
+Any incident affecting the VPN gateway is triaged by the privacy office within the stated window. Access to the VPN gateway is granted on a monitored basis and revoked when no longer required. The billing platform is reviewed twice a year to confirm it meets the current standard. Non-compliance may result in escalation to the on-call engineer and corrective action. Any incident affecting the CI pipeline is triaged by the data steward within the stated window.
 
 Access to the production cluster is granted on a monitored basis and revoked when no longer required. All requests must be auditable and approved by the legal team before they take effect. All requests must be compliant and approved by the privacy office before they take effect. Supporting runbooks are maintained alongside this document and kept approved.
 

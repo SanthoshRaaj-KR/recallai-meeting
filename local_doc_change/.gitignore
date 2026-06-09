@@ -23,6 +23,7 @@ stress_corpus/*.out
 stress_corpus/launch_*.txt
 stress_corpus/*_out.txt
 stress_corpus/*_err.txt
+stress_corpus/_*.txt
 
 # Claude Code
 .claude/settings.local.json

@@ -763,9 +763,14 @@ async def local_doc_pipeline_start(body: LocalDocPipelineStartBody) -> dict:
 
     async def _run():
         try:
-            proposals = await run_pipeline(transcript=transcript, config=config, progress_queue=q)
+            diagnostics: dict = {}
+            proposals = await run_pipeline(
+                transcript=transcript, config=config, progress_queue=q,
+                diagnostics=diagnostics,
+            )
             proposal_dicts = [p.model_dump() for p in proposals]
             _local_doc_jobs[job_id]["proposals"] = proposal_dicts
+            _local_doc_jobs[job_id]["diagnostics"] = diagnostics
             _local_doc_jobs[job_id]["status"] = "completed"
             _local_doc_proposals.setdefault(body.session_id, []).extend(proposal_dicts)
         except Exception as exc:
@@ -798,7 +803,11 @@ async def local_doc_pipeline_stream(job_id: str) -> StreamingResponse:
             if stage is None:
                 job_data = _local_doc_jobs.get(job_id, {})
                 proposals = job_data.get("proposals", [])
-                yield f"event: pipeline_complete\ndata: {json.dumps({'proposal_count': len(proposals)})}\n\n"
+                payload = {
+                    "proposal_count": len(proposals),
+                    "diagnostics": job_data.get("diagnostics", {}),
+                }
+                yield f"event: pipeline_complete\ndata: {json.dumps(payload)}\n\n"
                 break
             job["stage"] = stage
             yield f"event: stage_start\ndata: {json.dumps({'stage': stage})}\n\n"

@@ -1,16 +1,28 @@
 # Westmarch Information Security Policy
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official information security policy for Westmarch. Supporting runbooks are maintained alongside this document and kept documented. Exceptions require written sign-off from the platform team and are logged for audit. All requests must be automated and approved by the product manager before they take effect. Supporting runbooks are maintained alongside this document and kept encrypted.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Maximum batch size | 50 records |
+| Quarterly completion target | 90 percent |
+| Records retention baseline | 18 months |
+| Concurrent request budget | 160 requests |
+| Standard approval threshold | $1000 |
 
 # Access Control
 
-The following standards apply to access control and are mandatory for all teams. Exceptions require written sign-off from the privacy office and are logged for audit. Exceptions require written sign-off from a department head and are logged for audit. Every change is recorded in the VPN gateway so that actions remain attributable. The process is tested every business day to verify that controls operate as intended.
+The following standards apply to access control and are mandatory for all teams. Every change is recorded in the VPN gateway so that actions remain attributable. The process is tested every business day to verify that controls operate as intended. Where this policy conflicts with a contractual obligation, the stricter requirement applies. The customer portal is reviewed twice a year to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
-Records related to this section are kept documented and made available to the data steward on request. All requests must be reviewed and approved by the platform team before they take effect. Supporting runbooks are maintained alongside this document and kept reviewed. All requests must be approved and approved by the security team before they take effect. Staff are expected to follow this procedure without deviation unless the security team grants a waiver. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
+Any incident affecting the production cluster is triaged by the security team within the stated window. Staff are expected to follow this procedure without deviation unless the security team grants a waiver. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Training on this topic is delivered monthly and tracked to completion.
 
-Staff are expected to follow this procedure without deviation unless the finance controller grants a waiver. Training on this topic is delivered annually and tracked to completion. Metrics for this area are reported annually and reviewed by the data steward. Records related to this section are kept automated and made available to the compliance officer on request. Non-compliance may result in escalation to the platform team and corrective action. Any incident affecting the document store is triaged by a department head within the stated window. Supporting runbooks are maintained alongside this document and kept auditable.
+Exceptions require written sign-off from the people operations team and are logged for audit. Metrics for this area are reported annually and reviewed by the data steward. Records related to this section are kept automated and made available to the compliance officer on request. Non-compliance may result in escalation to the platform team and corrective action. Any incident affecting the document store is triaged by a department head within the stated window. Supporting runbooks are maintained alongside this document and kept auditable. Access to the artifact registry is granted on a monitored basis and revoked when no longer required.
 
-Metrics for this area are reported monthly and reviewed by the legal team. Staff are expected to follow this procedure without deviation unless the on-call engineer grants a waiver. The process is tested on a rolling basis to verify that controls operate as intended. Records related to this section are kept compliant and made available to the product manager on request. Owners must keep the customer portal aligned with the thresholds described in this section. Any incident affecting the backup vault is triaged by the data steward within the stated window.
+Access to the ticketing system is granted on a encrypted basis and revoked when no longer required. Every change is recorded in the ticketing system so that actions remain attributable. Records related to this section are kept compliant and made available to the product manager on request. Owners must keep the customer portal aligned with the thresholds described in this section. Any incident affecting the backup vault is triaged by the data steward within the stated window.
 
 Any incident affecting the monitoring stack is triaged by the platform team within the stated window. Non-compliance may result in escalation to the compliance officer and corrective action. Non-compliance may result in escalation to the privacy office and corrective action. Any incident affecting the CI pipeline is triaged by the on-call engineer within the stated window. Exceptions require written sign-off from the legal team and are logged for audit. Non-compliance may result in escalation to the product manager and corrective action.
 

@@ -1,12 +1,22 @@
 # Aldermont Information Security Policy
 
+![Figure 1. High-level process flow for this policy area.](assets/diagram_0.png)
+
 This document is the official information security policy for Aldermont. Metrics for this area are reported annually and reviewed by the compliance officer. Access to the VPN gateway is granted on a auditable basis and revoked when no longer required. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Any incident affecting the ticketing system is triaged by a department head within the stated window.
+
+# Key Operational Parameters
+
+| Parameter | Value |
+| --- | --- |
+| Target response time | 8 hours |
+| Concurrent request budget | 160 requests |
+| Maximum batch size | 50 records |
+| Records retention baseline | 36 months |
+| Standard approval threshold | $2500 |
 
 # Access Control
 
-Teams handling access control must comply with the requirements that follow. Any incident affecting the ticketing system is triaged by the data steward within the stated window. Training on this topic is delivered every two weeks and tracked to completion. Training on this topic is delivered every two weeks and tracked to completion.
-
-Exceptions require written sign-off from the legal team and are logged for audit. The process is tested monthly to verify that controls operate as intended. Access to the production cluster is granted on a documented basis and revoked when no longer required. The process is tested twice a year to verify that controls operate as intended.
+This part of the document covers access control and the controls around it. Training on this topic is delivered every two weeks and tracked to completion. Any incident affecting the document store is triaged by the on-call engineer within the stated window. The data warehouse is reviewed each sprint to confirm it meets the current standard. Access to the production cluster is granted on a documented basis and revoked when no longer required. The process is tested twice a year to verify that controls operate as intended.
 
 Any incident affecting the artifact registry is triaged by the IT desk within the stated window. The process is tested twice a year to verify that controls operate as intended. Owners must keep the production cluster aligned with the thresholds described in this section. Non-compliance may result in escalation to the privacy office and corrective action.
 

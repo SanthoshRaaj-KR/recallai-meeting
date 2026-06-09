@@ -1,10 +1,20 @@
 JUNIVAULT PEOPLE OPERATIONS HANDBOOK
+[Figure 2. Approval and escalation path overview. — see assets/diagram_1.png]
 Junivault operates as a division of Vantcorex Robotics. This document is the official people operations handbook for Junivault. All requests must be reviewed and approved by the on-call engineer before they take effect. The backup vault is reviewed every business day to confirm it meets the current standard. Records related to this section are kept compliant and made available to the IT desk on request. Training on this topic is delivered every business day and tracked to completion.
 
-SECTION 1. PAID TIME OFF
-This section defines how paid time off is governed across the organization. The process is tested annually to verify that controls operate as intended. Exceptions require written sign-off from the compliance officer and are logged for audit. Every change is recorded in the backup vault so that actions remain attributable.
+SECTION 1. KEY OPERATIONAL PARAMETERS
+Parameter                   | Value
+----------------------------+------
+Records retention baseline  | 12 months
+Quarterly completion target | 90 percent
+Audit sampling rate         | 10 percent
+Concurrent request budget   | 40 requests
+Standard approval threshold | $7500
 
-Exceptions require written sign-off from the support lead and are logged for audit. Any incident affecting the identity provider is triaged by the people operations team within the stated window. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Access to the document store is granted on a standardized basis and revoked when no longer required. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Supporting runbooks are maintained alongside this document and kept compliant.
+SECTION 2. PAID TIME OFF
+Paid time off is managed according to the rules described below. Records related to this section are kept monitored and made available to the data steward on request. Every change is recorded in the artifact registry so that actions remain attributable. Non-compliance may result in escalation to a direct manager and corrective action. Staff are expected to follow this procedure without deviation unless the compliance officer grants a waiver.
+
+Supporting runbooks are maintained alongside this document and kept approved. Supporting runbooks are maintained alongside this document and kept monitored. Access to the customer portal is granted on a auditable basis and revoked when no longer required. Non-compliance may result in escalation to the privacy office and corrective action.
 
 Exceptions require written sign-off from the compliance officer and are logged for audit. Training on this topic is delivered on a rolling basis and tracked to completion. Records related to this section are kept least-privilege and made available to the compliance officer on request. Any incident affecting the identity provider is triaged by the platform team within the stated window.
 
@@ -14,7 +24,7 @@ Any incident affecting the production cluster is triaged by the support lead wit
 
 Any incident affecting the document store is triaged by the people operations team within the stated window. Where this policy conflicts with a contractual obligation, the stricter requirement applies. The production cluster is reviewed every business day to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Owners must keep the data warehouse aligned with the thresholds described in this section. Every change is recorded in the CI pipeline so that actions remain attributable. All requests must be monitored and approved by the platform team before they take effect.
 
-SECTION 2. SICK LEAVE
+SECTION 3. SICK LEAVE
 Sick leave is managed according to the rules described below. Training on this topic is delivered every two weeks and tracked to completion. Metrics for this area are reported quarterly and reviewed by the product manager. The process is tested quarterly to verify that controls operate as intended. Non-compliance may result in escalation to the legal team and corrective action. Staff are expected to follow this procedure without deviation unless a direct manager grants a waiver.
 
 Training on this topic is delivered every two weeks and tracked to completion. Staff are expected to follow this procedure without deviation unless the product manager grants a waiver. Metrics for this area are reported every two weeks and reviewed by the support lead. Every change is recorded in the VPN gateway so that actions remain attributable. Non-compliance may result in escalation to a department head and corrective action. Metrics for this area are reported every two weeks and reviewed by the compliance officer. The process is tested twice a year to verify that controls operate as intended.
@@ -25,7 +35,7 @@ Exceptions require written sign-off from the people operations team and are logg
 
 Non-compliance may result in escalation to the people operations team and corrective action. Records related to this section are kept least-privilege and made available to the privacy office on request. All requests must be compliant and approved by the support lead before they take effect. Where this policy conflicts with a contractual obligation, the stricter requirement applies. The monitoring stack is reviewed on a rolling basis to confirm it meets the current standard. Supporting runbooks are maintained alongside this document and kept auditable. The ticketing system is reviewed on a rolling basis to confirm it meets the current standard.
 
-SECTION 3. REMOTE WORK
+SECTION 4. REMOTE WORK
 Teams handling remote work must comply with the requirements that follow. Supporting runbooks are maintained alongside this document and kept encrypted. Records related to this section are kept compliant and made available to the finance controller on request. Any incident affecting the monitoring stack is triaged by the finance controller within the stated window.
 
 Where this policy conflicts with a contractual obligation, the stricter requirement applies. Any incident affecting the CI pipeline is triaged by the product manager within the stated window. Any incident affecting the production cluster is triaged by the legal team within the stated window. Exceptions require written sign-off from the on-call engineer and are logged for audit. The process is tested on a rolling basis to verify that controls operate as intended.
@@ -38,7 +48,7 @@ Owners must keep the artifact registry aligned with the thresholds described in 
 
 Metrics for this area are reported each sprint and reviewed by the compliance officer. Every change is recorded in the document store so that actions remain attributable. All requests must be encrypted and approved by the compliance officer before they take effect. Supporting runbooks are maintained alongside this document and kept reviewed.
 
-SECTION 4. EXPENSE REIMBURSEMENT
+SECTION 5. EXPENSE REIMBURSEMENT
 Teams handling expense reimbursement must comply with the requirements that follow. Access to the ticketing system is granted on a standardized basis and revoked when no longer required. Staff are expected to follow this procedure without deviation unless the data steward grants a waiver. Supporting runbooks are maintained alongside this document and kept standardized. Non-compliance may result in escalation to the platform team and corrective action. All requests must be approved and approved by the data steward before they take effect.
 
 All requests must be standardized and approved by a direct manager before they take effect. Records related to this section are kept compliant and made available to the on-call engineer on request. Staff are expected to follow this procedure without deviation unless the privacy office grants a waiver. Any incident affecting the ticketing system is triaged by the support lead within the stated window. Metrics for this area are reported twice a year and reviewed by the legal team. Supporting runbooks are maintained alongside this document and kept documented.
@@ -49,7 +59,7 @@ Metrics for this area are reported every business day and reviewed by the securi
 
 The data warehouse is reviewed twice a year to confirm it meets the current standard. Exceptions require written sign-off from the on-call engineer and are logged for audit. Non-compliance may result in escalation to the legal team and corrective action. Owners must keep the VPN gateway aligned with the thresholds described in this section.
 
-SECTION 5. PERFORMANCE REVIEWS
+SECTION 6. PERFORMANCE REVIEWS
 Responsibilities and limits for performance reviews are set out in this section. Every change is recorded in the VPN gateway so that actions remain attributable. Non-compliance may result in escalation to the data steward and corrective action. Training on this topic is delivered quarterly and tracked to completion. Exceptions require written sign-off from a direct manager and are logged for audit.
 
 Access to the CI pipeline is granted on a documented basis and revoked when no longer required. Staff are expected to follow this procedure without deviation unless the on-call engineer grants a waiver. The customer portal is reviewed quarterly to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Training on this topic is delivered every two weeks and tracked to completion. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
@@ -64,7 +74,7 @@ Every change is recorded in the artifact registry so that actions remain attribu
 
 This standard is coordinated with Vantcorex Robotics group policy.
 
-SECTION 6. PARENTAL LEAVE
+SECTION 7. PARENTAL LEAVE
 This part of the document covers parental leave and the controls around it. Exceptions require written sign-off from the privacy office and are logged for audit. Supporting runbooks are maintained alongside this document and kept documented. Metrics for this area are reported annually and reviewed by the data steward. Records related to this section are kept monitored and made available to a department head on request. Access to the data warehouse is granted on a encrypted basis and revoked when no longer required.
 
 Where this policy conflicts with a contractual obligation, the stricter requirement applies. Owners must keep the artifact registry aligned with the thresholds described in this section. Metrics for this area are reported annually and reviewed by the compliance officer. The VPN gateway is reviewed annually to confirm it meets the current standard. Access to the backup vault is granted on a compliant basis and revoked when no longer required. Staff are expected to follow this procedure without deviation unless the finance controller grants a waiver.
@@ -77,7 +87,7 @@ Every change is recorded in the CI pipeline so that actions remain attributable.
 
 Any incident affecting the ticketing system is triaged by the privacy office within the stated window. Non-compliance may result in escalation to a department head and corrective action. Training on this topic is delivered twice a year and tracked to completion. The VPN gateway is reviewed quarterly to confirm it meets the current standard. Staff are expected to follow this procedure without deviation unless the legal team grants a waiver. Every change is recorded in the data warehouse so that actions remain attributable.
 
-SECTION 7. BENEFITS ENROLLMENT
+SECTION 8. BENEFITS ENROLLMENT
 Teams handling benefits enrollment must comply with the requirements that follow. Training on this topic is delivered each sprint and tracked to completion. Every change is recorded in the production cluster so that actions remain attributable. Access to the ticketing system is granted on a least-privilege basis and revoked when no longer required. Metrics for this area are reported twice a year and reviewed by the finance controller. The identity provider is reviewed annually to confirm it meets the current standard.
 
 Metrics for this area are reported twice a year and reviewed by the compliance officer. The ticketing system is reviewed annually to confirm it meets the current standard. Non-compliance may result in escalation to the IT desk and corrective action. Any incident affecting the identity provider is triaged by the platform team within the stated window. Metrics for this area are reported every business day and reviewed by the security team.
@@ -90,7 +100,7 @@ All requests must be encrypted and approved by the support lead before they take
 
 This standard is coordinated with Vantcorex Robotics group policy.
 
-SECTION 8. CODE OF CONDUCT
+SECTION 9. CODE OF CONDUCT
 This section defines how code of conduct is governed across the organization. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Owners must keep the artifact registry aligned with the thresholds described in this section. Staff are expected to follow this procedure without deviation unless the product manager grants a waiver.
 
 Records related to this section are kept compliant and made available to the IT desk on request. Supporting runbooks are maintained alongside this document and kept compliant. Supporting runbooks are maintained alongside this document and kept automated. Training on this topic is delivered on a rolling basis and tracked to completion. Records related to this section are kept reviewed and made available to the platform team on request.
@@ -103,7 +113,7 @@ Staff are expected to follow this procedure without deviation unless the people 
 
 Training on this topic is delivered each sprint and tracked to completion. The identity provider is reviewed twice a year to confirm it meets the current standard. Metrics for this area are reported twice a year and reviewed by the finance controller. All requests must be monitored and approved by a department head before they take effect.
 
-SECTION 9. COMPENSATION BANDS
+SECTION 10. COMPENSATION BANDS
 Responsibilities and limits for compensation bands are set out in this section. Non-compliance may result in escalation to the privacy office and corrective action. Every change is recorded in the backup vault so that actions remain attributable. The data warehouse is reviewed twice a year to confirm it meets the current standard. Any incident affecting the CI pipeline is triaged by the people operations team within the stated window. The process is tested twice a year to verify that controls operate as intended.
 
 Records related to this section are kept automated and made available to the on-call engineer on request. Training on this topic is delivered monthly and tracked to completion. Staff are expected to follow this procedure without deviation unless the IT desk grants a waiver. Non-compliance may result in escalation to the IT desk and corrective action. Exceptions require written sign-off from the platform team and are logged for audit. Access to the production cluster is granted on a monitored basis and revoked when no longer required. Metrics for this area are reported monthly and reviewed by the IT desk.
@@ -114,7 +124,7 @@ Where this policy conflicts with a contractual obligation, the stricter requirem
 
 Supporting runbooks are maintained alongside this document and kept standardized. Records related to this section are kept standardized and made available to the support lead on request. Staff are expected to follow this procedure without deviation unless the security team grants a waiver. Staff are expected to follow this procedure without deviation unless the product manager grants a waiver. Every change is recorded in the artifact registry so that actions remain attributable. Access to the CI pipeline is granted on a monitored basis and revoked when no longer required. Metrics for this area are reported every two weeks and reviewed by the platform team.
 
-SECTION 10. PROMOTION PROCESS
+SECTION 11. PROMOTION PROCESS
 This part of the document covers promotion process and the controls around it. Records related to this section are kept monitored and made available to a department head on request. The backup vault is reviewed annually to confirm it meets the current standard. Access to the document store is granted on a approved basis and revoked when no longer required.
 
 Access to the VPN gateway is granted on a monitored basis and revoked when no longer required. Every change is recorded in the CI pipeline so that actions remain attributable. Exceptions require written sign-off from the legal team and are logged for audit. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Exceptions require written sign-off from the legal team and are logged for audit. Metrics for this area are reported quarterly and reviewed by a department head.
@@ -125,7 +135,7 @@ Training on this topic is delivered quarterly and tracked to completion. Non-com
 
 Training on this topic is delivered every business day and tracked to completion. The billing platform is reviewed twice a year to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Every change is recorded in the identity provider so that actions remain attributable. The process is tested monthly to verify that controls operate as intended. Access to the billing platform is granted on a approved basis and revoked when no longer required.
 
-SECTION 11. GRIEVANCE PROCEDURE
+SECTION 12. GRIEVANCE PROCEDURE
 This part of the document covers grievance procedure and the controls around it. Staff are expected to follow this procedure without deviation unless the support lead grants a waiver. Non-compliance may result in escalation to the security team and corrective action. Metrics for this area are reported every two weeks and reviewed by a direct manager. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
 Metrics for this area are reported annually and reviewed by the people operations team. Access to the VPN gateway is granted on a auditable basis and revoked when no longer required. Metrics for this area are reported on a rolling basis and reviewed by the data steward. Owners must keep the VPN gateway aligned with the thresholds described in this section. Supporting runbooks are maintained alongside this document and kept auditable. All requests must be auditable and approved by the legal team before they take effect.
@@ -138,7 +148,7 @@ Staff are expected to follow this procedure without deviation unless the product
 
 The process is tested monthly to verify that controls operate as intended. Training on this topic is delivered every business day and tracked to completion. All requests must be compliant and approved by the compliance officer before they take effect. Records related to this section are kept least-privilege and made available to the on-call engineer on request.
 
-SECTION 12. LEARNING BUDGET
+SECTION 13. LEARNING BUDGET
 Learning budget is managed according to the rules described below. Metrics for this area are reported quarterly and reviewed by the platform team. Supporting runbooks are maintained alongside this document and kept automated. Training on this topic is delivered annually and tracked to completion. Owners must keep the data warehouse aligned with the thresholds described in this section. Exceptions require written sign-off from the compliance officer and are logged for audit.
 
 Exceptions require written sign-off from the data steward and are logged for audit. Staff are expected to follow this procedure without deviation unless the data steward grants a waiver. The document store is reviewed annually to confirm it meets the current standard. Every change is recorded in the customer portal so that actions remain attributable. Training on this topic is delivered each sprint and tracked to completion. All requests must be least-privilege and approved by the platform team before they take effect.
@@ -151,7 +161,7 @@ Records related to this section are kept automated and made available to the dat
 
 The process is tested every business day to verify that controls operate as intended. Supporting runbooks are maintained alongside this document and kept least-privilege. Staff are expected to follow this procedure without deviation unless the security team grants a waiver. Exceptions require written sign-off from the data steward and are logged for audit. Staff are expected to follow this procedure without deviation unless a direct manager grants a waiver. Metrics for this area are reported monthly and reviewed by the legal team. Access to the backup vault is granted on a encrypted basis and revoked when no longer required.
 
-SECTION 13. TRAVEL POLICY
+SECTION 14. TRAVEL POLICY
 Travel policy follows the practices outlined here and is reviewed regularly. Records related to this section are kept least-privilege and made available to the legal team on request. Access to the production cluster is granted on a approved basis and revoked when no longer required. The process is tested every two weeks to verify that controls operate as intended. Any incident affecting the data warehouse is triaged by the platform team within the stated window.
 
 Metrics for this area are reported on a rolling basis and reviewed by the platform team. Training on this topic is delivered every two weeks and tracked to completion. The process is tested each sprint to verify that controls operate as intended. Any incident affecting the document store is triaged by a department head within the stated window. Owners must keep the VPN gateway aligned with the thresholds described in this section. Exceptions require written sign-off from the product manager and are logged for audit. Every change is recorded in the backup vault so that actions remain attributable.
@@ -164,7 +174,7 @@ Where this policy conflicts with a contractual obligation, the stricter requirem
 
 This standard is coordinated with Vantcorex Robotics group policy.
 
-SECTION 14. ONBOARDING
+SECTION 15. ONBOARDING
 Onboarding follows the practices outlined here and is reviewed regularly. Exceptions require written sign-off from the finance controller and are logged for audit. Records related to this section are kept standardized and made available to the IT desk on request. The process is tested each sprint to verify that controls operate as intended. The process is tested every two weeks to verify that controls operate as intended. The process is tested each sprint to verify that controls operate as intended.
 
 Records related to this section are kept compliant and made available to the privacy office on request. Every change is recorded in the ticketing system so that actions remain attributable. Metrics for this area are reported each sprint and reviewed by a department head. Access to the VPN gateway is granted on a documented basis and revoked when no longer required. Exceptions require written sign-off from the finance controller and are logged for audit. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
@@ -177,7 +187,7 @@ Supporting runbooks are maintained alongside this document and kept approved. Ev
 
 This standard is coordinated with Vantcorex Robotics group policy.
 
-SECTION 15. OFFBOARDING
+SECTION 16. OFFBOARDING
 Offboarding follows the practices outlined here and is reviewed regularly. All requests must be monitored and approved by the legal team before they take effect. Exceptions require written sign-off from the legal team and are logged for audit. Metrics for this area are reported each sprint and reviewed by the security team.
 
 Training on this topic is delivered every two weeks and tracked to completion. Staff are expected to follow this procedure without deviation unless the support lead grants a waiver. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Exceptions require written sign-off from the security team and are logged for audit.
@@ -190,7 +200,7 @@ The process is tested monthly to verify that controls operate as intended. Excep
 
 This standard is coordinated with Vantcorex Robotics group policy.
 
-SECTION 16. RELOCATION
+SECTION 17. RELOCATION
 Responsibilities and limits for relocation are set out in this section. Exceptions require written sign-off from a department head and are logged for audit. Where this policy conflicts with a contractual obligation, the stricter requirement applies. The backup vault is reviewed quarterly to confirm it meets the current standard. Any incident affecting the VPN gateway is triaged by the legal team within the stated window. Every change is recorded in the identity provider so that actions remain attributable.
 
 Supporting runbooks are maintained alongside this document and kept compliant. Any incident affecting the artifact registry is triaged by the people operations team within the stated window. Access to the data warehouse is granted on a encrypted basis and revoked when no longer required. Staff are expected to follow this procedure without deviation unless the people operations team grants a waiver. Non-compliance may result in escalation to the compliance officer and corrective action. The identity provider is reviewed annually to confirm it meets the current standard.
@@ -203,7 +213,7 @@ Owners must keep the document store aligned with the thresholds described in thi
 
 Every change is recorded in the production cluster so that actions remain attributable. Records related to this section are kept least-privilege and made available to the people operations team on request. Owners must keep the artifact registry aligned with the thresholds described in this section. Every change is recorded in the backup vault so that actions remain attributable. Every change is recorded in the ticketing system so that actions remain attributable. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
-SECTION 17. PAID TIME OFF (PART 2)
+SECTION 18. PAID TIME OFF (PART 2)
 This section defines how paid time off (part 2) is governed across the organization. Any incident affecting the identity provider is triaged by the platform team within the stated window. Non-compliance may result in escalation to the finance controller and corrective action. Staff are expected to follow this procedure without deviation unless the support lead grants a waiver.
 
 Owners must keep the monitoring stack aligned with the thresholds described in this section. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Metrics for this area are reported quarterly and reviewed by a direct manager. Exceptions require written sign-off from the legal team and are logged for audit. The data warehouse is reviewed quarterly to confirm it meets the current standard. Every change is recorded in the identity provider so that actions remain attributable.
@@ -214,7 +224,7 @@ Non-compliance may result in escalation to the support lead and corrective actio
 
 Staff are expected to follow this procedure without deviation unless the on-call engineer grants a waiver. Staff are expected to follow this procedure without deviation unless the finance controller grants a waiver. Access to the monitoring stack is granted on a encrypted basis and revoked when no longer required. Metrics for this area are reported on a rolling basis and reviewed by the privacy office. Every change is recorded in the CI pipeline so that actions remain attributable.
 
-SECTION 18. SICK LEAVE (PART 2)
+SECTION 19. SICK LEAVE (PART 2)
 This part of the document covers sick leave (part 2) and the controls around it. The process is tested twice a year to verify that controls operate as intended. Every change is recorded in the document store so that actions remain attributable. Any incident affecting the backup vault is triaged by the on-call engineer within the stated window. Metrics for this area are reported on a rolling basis and reviewed by the platform team.
 
 The incident bridge has an auto-timeout of 53 minutes when no updates are posted. Staff are expected to follow this procedure without deviation unless the legal team grants a waiver. Records related to this section are kept standardized and made available to the data steward on request. Metrics for this area are reported every business day and reviewed by the data steward. The billing platform is reviewed every business day to confirm it meets the current standard.
@@ -227,7 +237,7 @@ Non-compliance may result in escalation to the privacy office and corrective act
 
 Metrics for this area are reported annually and reviewed by the security team. Supporting runbooks are maintained alongside this document and kept compliant. Non-compliance may result in escalation to the IT desk and corrective action. Exceptions require written sign-off from a direct manager and are logged for audit. Staff are expected to follow this procedure without deviation unless the on-call engineer grants a waiver.
 
-SECTION 19. REMOTE WORK (PART 2)
+SECTION 20. REMOTE WORK (PART 2)
 This part of the document covers remote work (part 2) and the controls around it. Where this policy conflicts with a contractual obligation, the stricter requirement applies. The document store is reviewed monthly to confirm it meets the current standard. The process is tested every business day to verify that controls operate as intended. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
 The document store is reviewed every two weeks to confirm it meets the current standard. Access to the data warehouse is granted on a reviewed basis and revoked when no longer required. The process is tested monthly to verify that controls operate as intended. All requests must be automated and approved by the security team before they take effect. Every change is recorded in the CI pipeline so that actions remain attributable. Any incident affecting the billing platform is triaged by the people operations team within the stated window. Training on this topic is delivered twice a year and tracked to completion.
@@ -238,7 +248,7 @@ Records related to this section are kept approved and made available to a direct
 
 The process is tested annually to verify that controls operate as intended. Exceptions require written sign-off from the compliance officer and are logged for audit. Any incident affecting the artifact registry is triaged by the product manager within the stated window. Access to the monitoring stack is granted on a compliant basis and revoked when no longer required. Metrics for this area are reported monthly and reviewed by a department head.
 
-SECTION 20. EXPENSE REIMBURSEMENT (PART 2)
+SECTION 21. EXPENSE REIMBURSEMENT (PART 2)
 Expense reimbursement (part 2) follows the practices outlined here and is reviewed regularly. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Supporting runbooks are maintained alongside this document and kept approved. Supporting runbooks are maintained alongside this document and kept encrypted. The VPN gateway is reviewed every two weeks to confirm it meets the current standard. Any incident affecting the document store is triaged by the IT desk within the stated window.
 
 Exceptions require written sign-off from the finance controller and are logged for audit. Exceptions require written sign-off from a department head and are logged for audit. Non-compliance may result in escalation to the security team and corrective action. The process is tested on a rolling basis to verify that controls operate as intended.
@@ -253,7 +263,7 @@ Owners must keep the VPN gateway aligned with the thresholds described in this s
 
 Owners must keep the identity provider aligned with the thresholds described in this section. Training on this topic is delivered every two weeks and tracked to completion. Every change is recorded in the artifact registry so that actions remain attributable. Any incident affecting the production cluster is triaged by the people operations team within the stated window. All requests must be documented and approved by the finance controller before they take effect. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
-SECTION 21. PERFORMANCE REVIEWS (PART 2)
+SECTION 22. PERFORMANCE REVIEWS (PART 2)
 Responsibilities and limits for performance reviews (part 2) are set out in this section. Exceptions require written sign-off from the on-call engineer and are logged for audit. Every change is recorded in the backup vault so that actions remain attributable. The identity provider is reviewed quarterly to confirm it meets the current standard. Owners must keep the monitoring stack aligned with the thresholds described in this section. Supporting runbooks are maintained alongside this document and kept least-privilege.
 
 All requests must be compliant and approved by the support lead before they take effect. Every change is recorded in the monitoring stack so that actions remain attributable. Training on this topic is delivered every two weeks and tracked to completion. The CI pipeline is reviewed each sprint to confirm it meets the current standard. All requests must be encrypted and approved by the legal team before they take effect. Staff are expected to follow this procedure without deviation unless the finance controller grants a waiver.
@@ -264,7 +274,7 @@ Non-compliance may result in escalation to the people operations team and correc
 
 Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. Staff are expected to follow this procedure without deviation unless the security team grants a waiver. Access to the artifact registry is granted on a compliant basis and revoked when no longer required. Metrics for this area are reported on a rolling basis and reviewed by the support lead. Metrics for this area are reported each sprint and reviewed by a direct manager. Records related to this section are kept documented and made available to the support lead on request. Exceptions require written sign-off from the people operations team and are logged for audit.
 
-SECTION 22. PARENTAL LEAVE (PART 2)
+SECTION 23. PARENTAL LEAVE (PART 2)
 This part of the document covers parental leave (part 2) and the controls around it. Supporting runbooks are maintained alongside this document and kept encrypted. Non-compliance may result in escalation to the data steward and corrective action. Training on this topic is delivered every two weeks and tracked to completion.
 
 All requests must be documented and approved by a department head before they take effect. Records related to this section are kept automated and made available to the support lead on request. The process is tested twice a year to verify that controls operate as intended. The identity provider is reviewed each sprint to confirm it meets the current standard. Exceptions require written sign-off from the support lead and are logged for audit.
@@ -277,7 +287,7 @@ Metrics for this area are reported annually and reviewed by the people operation
 
 Training on this topic is delivered quarterly and tracked to completion. All requests must be documented and approved by the IT desk before they take effect. All requests must be reviewed and approved by the data steward before they take effect. Metrics for this area are reported twice a year and reviewed by a department head. Non-compliance may result in escalation to the finance controller and corrective action. Exceptions require written sign-off from a department head and are logged for audit.
 
-SECTION 23. BENEFITS ENROLLMENT (PART 2)
+SECTION 24. BENEFITS ENROLLMENT (PART 2)
 Teams handling benefits enrollment (part 2) must comply with the requirements that follow. Non-compliance may result in escalation to the IT desk and corrective action. Any incident affecting the artifact registry is triaged by the security team within the stated window. Every change is recorded in the backup vault so that actions remain attributable. Owners must keep the billing platform aligned with the thresholds described in this section.
 
 Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. The process is tested every two weeks to verify that controls operate as intended. Supporting runbooks are maintained alongside this document and kept compliant. Training on this topic is delivered monthly and tracked to completion.
@@ -290,7 +300,7 @@ Owners must keep the monitoring stack aligned with the thresholds described in t
 
 Non-compliance may result in escalation to the legal team and corrective action. Owners must keep the data warehouse aligned with the thresholds described in this section. Access to the identity provider is granted on a approved basis and revoked when no longer required. The monitoring stack is reviewed annually to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Staff are expected to follow this procedure without deviation unless the data steward grants a waiver.
 
-SECTION 24. CODE OF CONDUCT (PART 2)
+SECTION 25. CODE OF CONDUCT (PART 2)
 The following standards apply to code of conduct (part 2) and are mandatory for all teams. Records related to this section are kept auditable and made available to the people operations team on request. All requests must be approved and approved by the people operations team before they take effect. The VPN gateway is reviewed monthly to confirm it meets the current standard.
 
 Staff are expected to follow this procedure without deviation unless the people operations team grants a waiver. All requests must be standardized and approved by the data steward before they take effect. Any incident affecting the VPN gateway is triaged by a direct manager within the stated window. The process is tested annually to verify that controls operate as intended.
@@ -303,7 +313,7 @@ Exceptions require written sign-off from the finance controller and are logged f
 
 The customer portal is reviewed every business day to confirm it meets the current standard. The data warehouse is reviewed twice a year to confirm it meets the current standard. The document store is reviewed monthly to confirm it meets the current standard. Any incident affecting the backup vault is triaged by the security team within the stated window. Supporting runbooks are maintained alongside this document and kept standardized. Training on this topic is delivered every business day and tracked to completion. Non-compliance may result in escalation to the privacy office and corrective action.
 
-SECTION 25. COMPENSATION BANDS (PART 2)
+SECTION 26. COMPENSATION BANDS (PART 2)
 This part of the document covers compensation bands (part 2) and the controls around it. Every change is recorded in the billing platform so that actions remain attributable. Staff are expected to follow this procedure without deviation unless the platform team grants a waiver. The CI pipeline is reviewed each sprint to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Where this policy conflicts with a contractual obligation, the stricter requirement applies.
 
 Exceptions require written sign-off from the finance controller and are logged for audit. Records related to this section are kept encrypted and made available to the on-call engineer on request. Access to the customer portal is granted on a standardized basis and revoked when no longer required. The backup vault is reviewed annually to confirm it meets the current standard. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Every change is recorded in the production cluster so that actions remain attributable.
@@ -316,7 +326,7 @@ Where this policy conflicts with a contractual obligation, the stricter requirem
 
 Where this policy conflicts with a contractual obligation, the stricter requirement applies. The process is tested every two weeks to verify that controls operate as intended. Non-compliance may result in escalation to the on-call engineer and corrective action. Non-compliance may result in escalation to the compliance officer and corrective action. Every change is recorded in the billing platform so that actions remain attributable. Supporting runbooks are maintained alongside this document and kept auditable.
 
-SECTION 26. PROMOTION PROCESS (PART 2)
+SECTION 27. PROMOTION PROCESS (PART 2)
 Teams handling promotion process (part 2) must comply with the requirements that follow. Staff are expected to follow this procedure without deviation unless the support lead grants a waiver. Records related to this section are kept standardized and made available to the on-call engineer on request. Owners must keep the billing platform aligned with the thresholds described in this section. The data warehouse is reviewed every business day to confirm it meets the current standard.
 
 Any incident affecting the customer portal is triaged by a direct manager within the stated window. Owners must keep the CI pipeline aligned with the thresholds described in this section. Owners must keep the VPN gateway aligned with the thresholds described in this section. Records related to this section are kept encrypted and made available to the people operations team on request. Staff are expected to follow this procedure without deviation unless the support lead grants a waiver. Exceptions require written sign-off from the legal team and are logged for audit. Staff are expected to follow this procedure without deviation unless the data steward grants a waiver.
@@ -329,7 +339,7 @@ Access to the monitoring stack is granted on a documented basis and revoked when
 
 This standard is coordinated with Vantcorex Robotics group policy.
 
-SECTION 27. GRIEVANCE PROCEDURE (PART 2)
+SECTION 28. GRIEVANCE PROCEDURE (PART 2)
 This part of the document covers grievance procedure (part 2) and the controls around it. The process is tested monthly to verify that controls operate as intended. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Supporting runbooks are maintained alongside this document and kept approved. The artifact registry is reviewed monthly to confirm it meets the current standard.
 
 The process is tested each sprint to verify that controls operate as intended. Owners must keep the VPN gateway aligned with the thresholds described in this section. Non-compliance may result in escalation to the on-call engineer and corrective action. Training on this topic is delivered quarterly and tracked to completion. Training on this topic is delivered monthly and tracked to completion. Training on this topic is delivered every two weeks and tracked to completion. Any incident affecting the document store is triaged by the compliance officer within the stated window.
@@ -340,7 +350,7 @@ Where this policy conflicts with a contractual obligation, the stricter requirem
 
 Owners must keep the document store aligned with the thresholds described in this section. Training on this topic is delivered twice a year and tracked to completion. Access to the VPN gateway is granted on a approved basis and revoked when no longer required. The artifact registry is reviewed each sprint to confirm it meets the current standard. Any incident affecting the data warehouse is triaged by a department head within the stated window. The billing platform is reviewed each sprint to confirm it meets the current standard.
 
-SECTION 28. LEARNING BUDGET (PART 2)
+SECTION 29. LEARNING BUDGET (PART 2)
 The following standards apply to learning budget (part 2) and are mandatory for all teams. Every change is recorded in the data warehouse so that actions remain attributable. Training on this topic is delivered twice a year and tracked to completion. The document store is reviewed each sprint to confirm it meets the current standard. Any incident affecting the production cluster is triaged by the security team within the stated window. Metrics for this area are reported quarterly and reviewed by the security team.
 
 The identity provider is reviewed each sprint to confirm it meets the current standard. Staff are expected to follow this procedure without deviation unless the privacy office grants a waiver. Owners must keep the monitoring stack aligned with the thresholds described in this section. The billing platform is reviewed annually to confirm it meets the current standard. Records related to this section are kept documented and made available to the finance controller on request. All requests must be standardized and approved by the on-call engineer before they take effect. Training on this topic is delivered on a rolling basis and tracked to completion.
@@ -353,7 +363,7 @@ The process is tested on a rolling basis to verify that controls operate as inte
 
 This standard is coordinated with Vantcorex Robotics group policy.
 
-SECTION 29. TRAVEL POLICY (PART 2)
+SECTION 30. TRAVEL POLICY (PART 2)
 The following standards apply to travel policy (part 2) and are mandatory for all teams. Staff are expected to follow this procedure without deviation unless the support lead grants a waiver. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Records related to this section are kept automated and made available to a department head on request. Supporting runbooks are maintained alongside this document and kept documented.
 
 Access to the customer portal is granted on a auditable basis and revoked when no longer required. Training on this topic is delivered monthly and tracked to completion. Owners must keep the identity provider aligned with the thresholds described in this section. Owners must keep the billing platform aligned with the thresholds described in this section. Every change is recorded in the CI pipeline so that actions remain attributable. Metrics for this area are reported every business day and reviewed by the product manager. All requests must be encrypted and approved by a direct manager before they take effect.
@@ -366,7 +376,7 @@ Staff are expected to follow this procedure without deviation unless the on-call
 
 Supporting runbooks are maintained alongside this document and kept compliant. Metrics for this area are reported monthly and reviewed by the data steward. Owners must keep the identity provider aligned with the thresholds described in this section. Non-compliance may result in escalation to the platform team and corrective action. Owners must keep the VPN gateway aligned with the thresholds described in this section. Supporting runbooks are maintained alongside this document and kept least-privilege. Owners must keep the identity provider aligned with the thresholds described in this section.
 
-SECTION 30. ONBOARDING (PART 2)
+SECTION 31. ONBOARDING (PART 2)
 This section defines how onboarding (part 2) is governed across the organization. Non-compliance may result in escalation to the on-call engineer and corrective action. Non-compliance may result in escalation to the data steward and corrective action. Supporting runbooks are maintained alongside this document and kept encrypted.
 
 Owners must keep the CI pipeline aligned with the thresholds described in this section. All requests must be approved and approved by the privacy office before they take effect. Owners must keep the document store aligned with the thresholds described in this section. Supporting runbooks are maintained alongside this document and kept compliant. The process is tested each sprint to verify that controls operate as intended. Non-compliance may result in escalation to the people operations team and corrective action.
@@ -379,7 +389,7 @@ Owners must keep the document store aligned with the thresholds described in thi
 
 Exceptions require written sign-off from the data steward and are logged for audit. Training on this topic is delivered each sprint and tracked to completion. Exceptions require written sign-off from the product manager and are logged for audit. Training on this topic is delivered annually and tracked to completion. Staff are expected to follow this procedure without deviation unless the product manager grants a waiver. Owners must keep the document store aligned with the thresholds described in this section.
 
-SECTION 31. OFFBOARDING (PART 2)
+SECTION 32. OFFBOARDING (PART 2)
 This section defines how offboarding (part 2) is governed across the organization. Exceptions require written sign-off from the finance controller and are logged for audit. Every change is recorded in the artifact registry so that actions remain attributable. The process is tested every two weeks to verify that controls operate as intended. Supporting runbooks are maintained alongside this document and kept compliant. Metrics for this area are reported every two weeks and reviewed by the IT desk.
 
 Staff are expected to follow this procedure without deviation unless the people operations team grants a waiver. Training on this topic is delivered annually and tracked to completion. Non-compliance may result in escalation to the product manager and corrective action. All requests must be standardized and approved by the support lead before they take effect. The process is tested every two weeks to verify that controls operate as intended.
@@ -390,7 +400,7 @@ Owners must keep the billing platform aligned with the thresholds described in t
 
 Every change is recorded in the backup vault so that actions remain attributable. Owners must keep the backup vault aligned with the thresholds described in this section. All requests must be approved and approved by the privacy office before they take effect. Owners must keep the artifact registry aligned with the thresholds described in this section. Training on this topic is delivered twice a year and tracked to completion. Records related to this section are kept monitored and made available to the support lead on request.
 
-SECTION 32. RELOCATION (PART 2)
+SECTION 33. RELOCATION (PART 2)
 This part of the document covers relocation (part 2) and the controls around it. Exceptions require written sign-off from the privacy office and are logged for audit. Any incident affecting the CI pipeline is triaged by the on-call engineer within the stated window. Training on this topic is delivered every business day and tracked to completion.
 
 All requests must be approved and approved by the finance controller before they take effect. Every change is recorded in the customer portal so that actions remain attributable. The process is tested on a rolling basis to verify that controls operate as intended. The process is tested on a rolling basis to verify that controls operate as intended. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Owners must keep the ticketing system aligned with the thresholds described in this section.
@@ -401,7 +411,7 @@ Exceptions require written sign-off from the privacy office and are logged for a
 
 Access to the customer portal is granted on a documented basis and revoked when no longer required. The production cluster is reviewed quarterly to confirm it meets the current standard. All requests must be standardized and approved by the finance controller before they take effect. Access to the VPN gateway is granted on a documented basis and revoked when no longer required. Access to the CI pipeline is granted on a automated basis and revoked when no longer required.
 
-SECTION 33. PAID TIME OFF (PART 3)
+SECTION 34. PAID TIME OFF (PART 3)
 This part of the document covers paid time off (part 3) and the controls around it. Training on this topic is delivered twice a year and tracked to completion. Non-compliance may result in escalation to the on-call engineer and corrective action. Non-compliance may result in escalation to the platform team and corrective action. The identity provider is reviewed each sprint to confirm it meets the current standard.
 
 Non-compliance may result in escalation to the platform team and corrective action. Every change is recorded in the document store so that actions remain attributable. Where this policy conflicts with a contractual obligation, the stricter requirement applies. Metrics for this area are reported on a rolling basis and reviewed by the finance controller. Every change is recorded in the monitoring stack so that actions remain attributable. The monitoring stack is reviewed annually to confirm it meets the current standard. Metrics for this area are reported every two weeks and reviewed by a department head.
@@ -412,7 +422,7 @@ Non-compliance may result in escalation to the data steward and corrective actio
 
 Supporting runbooks are maintained alongside this document and kept encrypted. Exceptions require written sign-off from the platform team and are logged for audit. Access to the document store is granted on a standardized basis and revoked when no longer required. Non-compliance may result in escalation to the legal team and corrective action. Records related to this section are kept standardized and made available to the IT desk on request.
 
-SECTION 34. SICK LEAVE (PART 3)
+SECTION 35. SICK LEAVE (PART 3)
 The following standards apply to sick leave (part 3) and are mandatory for all teams. All requests must be least-privilege and approved by the privacy office before they take effect. Training on this topic is delivered monthly and tracked to completion. All requests must be standardized and approved by the legal team before they take effect. Any incident affecting the CI pipeline is triaged by the platform team within the stated window.
 
 Owners must keep the monitoring stack aligned with the thresholds described in this section. Every change is recorded in the ticketing system so that actions remain attributable. Owners must keep the VPN gateway aligned with the thresholds described in this section. Training on this topic is delivered each sprint and tracked to completion. The process is tested every business day to verify that controls operate as intended.

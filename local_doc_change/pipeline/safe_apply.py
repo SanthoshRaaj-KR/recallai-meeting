@@ -174,23 +174,52 @@ class SafeApply:
                     break
                 body_paras_to_replace.append(para)
 
-            if body_paras_to_replace:
-                # Clear first body paragraph and set its text to new_content
-                body_paras_to_replace[0].clear()
-                body_paras_to_replace[0].add_run(new_content)
-                # Remove remaining body paragraphs
-                for para in body_paras_to_replace[1:]:
-                    p_elem = para._element
-                    p_elem.getparent().remove(p_elem)
+            # Tables live in <w:tbl>, NOT in doc.paragraphs. If the section
+            # contains a table (common in real policy docs), replacing only the
+            # paragraphs leaves the table's OLD values in place and appends the
+            # new content as a stray text blob — duplicated, stale data. Edit the
+            # native table in place when the new content is a table of the same
+            # shape; otherwise drop the stale table so values are never left behind.
+            section_tables = _docx_section_tables(doc, section_heading)
+            md_rows = _markdown_table_rows(new_content)
+            updated_in_place = bool(
+                section_tables and md_rows
+                and _update_docx_table_in_place(section_tables[0], md_rows)
+            )
+
+            if updated_in_place:
+                # Native table edited cell-by-cell. Preserve any NON-table prose in
+                # the new content (text around the table); otherwise remove leftover
+                # body paragraphs so the change appears exactly once (no dup blob).
+                non_table = "\n".join(
+                    ln for ln in new_content.splitlines() if not ln.strip().startswith("|")
+                ).strip()
+                if non_table:
+                    if body_paras_to_replace:
+                        body_paras_to_replace[0].clear()
+                        body_paras_to_replace[0].add_run(non_table)
+                        for para in body_paras_to_replace[1:]:
+                            para._element.getparent().remove(para._element)
+                    else:
+                        heading_elem = paragraphs[heading_idx]._element
+                        heading_elem.addnext(doc.add_paragraph(non_table)._element)
+                else:
+                    for para in body_paras_to_replace:
+                        para._element.getparent().remove(para._element)
             else:
-                # No body paragraphs — insert a new one after the heading
-                heading_elem = paragraphs[heading_idx]._element
-                new_para = doc.add_paragraph(new_content)
-                heading_elem.addnext(new_para._element)
-                # Remove the paragraph that add_paragraph() appended at end
-                new_para._element.getparent().remove(new_para._element)
-                # Re-insert after heading
-                heading_elem.addnext(new_para._element)
+                # Shape mismatch or non-table section: remove stale tables first,
+                # then replace the body text with the new content.
+                for tbl in section_tables:
+                    tbl._element.getparent().remove(tbl._element)
+                if body_paras_to_replace:
+                    body_paras_to_replace[0].clear()
+                    body_paras_to_replace[0].add_run(new_content)
+                    for para in body_paras_to_replace[1:]:
+                        para._element.getparent().remove(para._element)
+                else:
+                    heading_elem = paragraphs[heading_idx]._element
+                    new_para = doc.add_paragraph(new_content)
+                    heading_elem.addnext(new_para._element)
 
             doc.save(file_path)
 
@@ -590,6 +619,68 @@ class SafeApply:
             raise ValueError("PDF is read-only; no write-back supported")
         else:
             raise ValueError(f"Unsupported format: {suffix}")
+
+
+def _markdown_table_rows(text: str) -> list[list[str]]:
+    """Parse a Markdown/pipe table into rows of cell strings.
+
+    Ignores the ``|---|---|`` separator row. Returns [] if *text* is not a
+    pipe table, so a non-table edit falls through to plain-text replacement.
+    """
+    rows: list[list[str]] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if cells and all(set(c) <= set("-: ") for c in cells):
+            continue  # separator row
+        rows.append(cells)
+    return rows
+
+
+def _docx_section_tables(doc, section_heading: str) -> list:
+    """Return python-docx Table objects that sit within a heading's section.
+
+    Walks the body in document order so paragraphs and tables are seen
+    interleaved (doc.tables alone loses position). A section runs from its
+    heading paragraph to the next Heading paragraph.
+    """
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    tables: list = []
+    in_section = False
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            para = Paragraph(child, doc)
+            is_heading = para.style is not None and para.style.name.startswith("Heading")
+            if in_section and is_heading:
+                break
+            if is_heading and para.text.strip() == section_heading:
+                in_section = True
+        elif child.tag == qn("w:tbl") and in_section:
+            tables.append(Table(child, doc))
+    return tables
+
+
+def _update_docx_table_in_place(table, md_rows: list[list[str]]) -> bool:
+    """Set a native docx table's cell texts from parsed Markdown rows.
+
+    Only proceeds when the shapes match exactly (so a reformatted edit cannot
+    scramble cells); returns False to signal the caller to fall back otherwise.
+    """
+    if len(table.rows) != len(md_rows):
+        return False
+    for r, row in enumerate(table.rows):
+        if len(row.cells) != len(md_rows[r]):
+            return False
+    for r, row in enumerate(table.rows):
+        for c, cell in enumerate(row.cells):
+            if cell.text != md_rows[r][c]:
+                cell.text = md_rows[r][c]
+    return True
 
 
 def _odf_localname(node) -> str:
