@@ -20,13 +20,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_TOP_K_DEFAULT = int(os.getenv("JARVIS_CONFLUENCE_RAG_TOP_K", "5"))
-_SCORE_THRESHOLD = float(os.getenv("JARVIS_CONFLUENCE_RAG_SCORE_THRESHOLD", "0.25"))
+_TOP_K_DEFAULT = int(os.getenv("JARVIS_CONFLUENCE_RAG_TOP_K", "3"))
+_SCORE_THRESHOLD = float(os.getenv("JARVIS_CONFLUENCE_RAG_SCORE_THRESHOLD", "0.45"))
 # Characters kept from each chunk in the LLM context — keeps tokens tight.
 _MAX_CHUNK_CHARS = int(os.getenv("JARVIS_CONFLUENCE_RAG_MAX_CHUNK_CHARS", "600"))
 
 # How many recent transcript lines to harvest for query enrichment.
-_TRANSCRIPT_CONTEXT_LINES = int(os.getenv("JARVIS_CONFLUENCE_RAG_CONTEXT_LINES", "5"))
+_TRANSCRIPT_CONTEXT_LINES = int(os.getenv("JARVIS_CONFLUENCE_RAG_CONTEXT_LINES", "12"))
 # Max characters for the final enriched query sent to the embedding model.
 _MAX_QUERY_CHARS = int(os.getenv("JARVIS_CONFLUENCE_RAG_MAX_QUERY_CHARS", "350"))
 
@@ -124,6 +124,12 @@ class ConfluenceLiveRAG:
                     if isinstance(match, dict)
                     else (match.score or 0.0)
                 )
+                logger.debug(
+                    "[Pinecone] candidate score=%.3f page=%r heading=%r",
+                    score,
+                    metadata.get("title", ""),
+                    metadata.get("heading", ""),
+                )
                 if score < _SCORE_THRESHOLD:
                     continue
                 hits.append(
@@ -170,16 +176,19 @@ class ConfluenceLiveRAG:
             text = (hit.get("text") or "").strip()
             if not text:
                 continue
+            page_id = hit.get("page_id") or ""
+            # Hits are score-sorted — keep only the top-scoring chunk per page.
+            if page_id and page_id in seen_pages:
+                continue
             title = hit.get("title") or "Untitled"
             heading = (hit.get("heading") or "").strip()
             space_key = hit.get("space_key") or ""
-            page_id = hit.get("page_id") or ""
 
             # Build a readable breadcrumb: "Page Title › Section Heading [SPACE]"
             label = title
             if heading and heading.lower() not in ("page intro", ""):
                 label = f"{title} › {heading}"
-            if space_key and page_id not in seen_pages:
+            if space_key:
                 label = f"{label} [{space_key}]"
             seen_pages.add(page_id)
 
@@ -192,6 +201,7 @@ class ConfluenceLiveRAG:
         question: str,
         recent_transcript: list[str],
         context_lines: int = _TRANSCRIPT_CONTEXT_LINES,
+        topic_hint: str = "",
     ) -> str:
         """Build a noise-filtered, context-aware query for Pinecone search.
 
@@ -232,11 +242,13 @@ class ConfluenceLiveRAG:
                 continue
             context_parts.append(text)
 
-        if not context_parts:
-            return q[:_MAX_QUERY_CHARS]
-
-        # Question first (dominant signal), then compact meeting context.
-        combined = q + " " + " ".join(context_parts)
+        # Question first, then persistent topic hint, then recent transcript context.
+        parts = [q]
+        if topic_hint:
+            parts.append(topic_hint.strip())
+        if context_parts:
+            parts.append(" ".join(context_parts))
+        combined = " ".join(parts)
         return combined[:_MAX_QUERY_CHARS]
 
     def warmup(self) -> None:

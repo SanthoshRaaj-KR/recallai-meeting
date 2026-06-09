@@ -74,6 +74,19 @@ _NO_CONFLUENCE_PATTERNS = re.compile(
 )
 
 
+_MEMORY_HEADER_RE = re.compile(
+    r"^\[Compacted meeting memory\].*?Key retained context:\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_topic_hint(memory: str, max_chars: int = 150) -> str:
+    """Strip compacted-memory headers and return a short topic string for query enrichment."""
+    text = _MEMORY_HEADER_RE.sub("", (memory or "")).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_chars].strip()
+
+
 def _needs_confluence(query: str) -> bool:
     """Return False when the query is high-confidence meeting-only or general knowledge.
 
@@ -272,6 +285,9 @@ class Assistant(Agent):
         # Holds the formatted Confluence context for the current turn, cleared
         # each turn so stale results never bleed into the next query.
         self._last_rag_context: str = ""
+        # Persists the most recent compacted memory so the Pinecone query can
+        # be enriched with the meeting's running topic even after a topic switch.
+        self._last_compacted_memory: str = ""
         # Single-threaded executor for all TranscriptCompactor operations.
         # Serialises observe_utterance and memory_text calls coming from both
         # the event loop and tts_node, eliminating the race condition on the
@@ -431,8 +447,9 @@ class Assistant(Agent):
             logger.info("[Pinecone] skipped — query classified as meeting/general: %.80r", query)
         else:
             try:
+                topic_hint = _extract_topic_hint(self._last_compacted_memory)
                 enriched_query = self._confluence_rag.build_search_query(
-                    query, list(self._transcript)
+                    query, list(self._transcript), topic_hint=topic_hint
                 )
                 logger.info("[Pinecone] searching — enriched query: %.120r", enriched_query)
                 hits = await asyncio.to_thread(self._confluence_rag.search, enriched_query)
@@ -450,6 +467,8 @@ class Assistant(Agent):
             await self._run_in_compactor(self._transcript_memory.memory_text),
             _COMPACTED_MEMORY_CHARS,
         )
+        if compacted_memory:
+            self._last_compacted_memory = compacted_memory
         self._refresh_transcript_in_ctx(turn_ctx, new_message, compacted_memory)
         self._last_rag_context = ""  # consumed — clear so it cannot bleed into a subsequent turn
         new_message.content = [query]
