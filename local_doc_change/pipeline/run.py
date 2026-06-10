@@ -70,11 +70,13 @@ class PipelineConfig(BaseModel):
     # Minimum (intent, section) relevance for a section to become a card. The
     # primary no-hallucination defense is the intent extractor, which now rejects
     # no-change / deferred / hypothetical / transient-metric chatter before it ever
-    # reaches retrieval; this threshold is the second gate. 0.75 admits genuine
-    # edits (which score 0.85-1.0) and real reported facts while still rejecting
-    # weak topical mismatches (~0.6-0.7) — balanced for recall without re-opening
-    # the false positives the extractor rules already close.
-    relevance_threshold: float = 0.75
+    # reaches retrieval; this threshold is the second gate. 0.70 is the bottom of
+    # the evaluator's "likely the right place" band (0.7-0.89): real edits score
+    # 0.85-1.0 and genuinely-relevant prose sections (a postmortem/reporting
+    # paragraph that states the value) score ~0.70, which we WANT to admit. The
+    # extractor — not this threshold — is what keeps no-change/hypothetical
+    # chatter out, so 0.70 maximises recall without re-opening false positives.
+    relevance_threshold: float = 0.70
     # How many candidate sections to pull per edit intent before evaluation.
     # Wider than top_k so the right section survives to the eval stage even on a
     # large corpus where many sections are lexically similar. Real corpora are
@@ -224,6 +226,73 @@ def _doc_identifier_tokens(text: str) -> set:
     return toks - _DOC_ID_STOPWORDS
 
 
+# Generic words that carry no field identity, so they don't count toward a
+# label match (e.g. a "Value" column header or the word "parameter").
+_LABEL_STOPWORDS = {
+    "the", "a", "an", "of", "for", "to", "and", "or", "per", "by", "in", "on",
+    "is", "are", "be", "value", "parameter", "parameters", "standard", "target",
+    "current", "new", "max", "min",  # 'max'/'min' alone are too generic to anchor
+}
+
+
+def _sig_tokens(text: str) -> list:
+    """Significant (length>=3, non-stopword) lowercase tokens of a phrase."""
+    return [
+        t for t in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(t) >= 3 and t not in _LABEL_STOPWORDS
+    ]
+
+
+def _field_labels(content: str) -> list:
+    """Field labels declared in a section: table-row left cells and the
+    'Label: value' / 'Label - value' prefix of a line. These are the
+    structured places a specific parameter is stated."""
+    labels: list = []
+    for line in (content or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if "|" in s:  # markdown / rendered table row
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if len(cells) >= 2 and cells[0] and not set(cells[0]) <= set("-: "):
+                labels.append(cells[0])
+        else:
+            m = re.match(r"^([A-Za-z][\w '/&\-]{2,45})\s*[:\-–]\s+\S", s)
+            if m:
+                labels.append(m.group(1))
+    return labels
+
+
+def _field_label_match(intent, chunk) -> bool:
+    """True when the intent's topic names a structured FIELD that this section
+    actually declares (a table row or 'Label: value'). This is a deterministic,
+    high-confidence "right place" signal that does not depend on the (noisy) LLM
+    evaluator — an exact field match like topic "maximum batch size" against a
+    row "Maximum batch size | 100 records" must not be missed because the model
+    happened to score it 0.5. Domain-agnostic: it reads whatever labels the
+    section declares; nothing about any specific corpus is assumed."""
+    topic_toks = _sig_tokens(getattr(intent, "affected_topic", ""))
+    if len(topic_toks) < 2:
+        return False  # too generic to anchor on a label safely
+    topic_set = set(topic_toks)
+    for label in _field_labels(chunk.content):
+        ltoks = set(_sig_tokens(label))
+        if not ltoks:
+            continue
+        # count topic tokens present in the label (substring-aware so
+        # "max"/"maximum", "metric"/"metrics" still align)
+        hits = sum(
+            1 for t in topic_set
+            if any(t in lt or lt in t for lt in ltoks)
+        )
+        # require a strong overlap: at least two topic tokens, and nearly all of
+        # them, present in this one label — prevents flooring on a coincidental
+        # single-word brush.
+        if hits >= 2 and hits >= len(topic_set) - 1:
+            return True
+    return False
+
+
 def _detect_target_documents(transcript: str, chunks: list) -> tuple:
     """Find a document/company the speaker named for the WHOLE meeting.
 
@@ -360,7 +429,7 @@ async def run_pipeline(
     # Edit intents: collect candidate sections (wide net for recall).
     from agents_local.structural import is_cross_cutting  # noqa: PLC0415
 
-    intent_candidates: list[tuple] = []  # (intent, chunks, max_targets)
+    intent_candidates: list[tuple] = []  # (intent, primary_chunks, fallback_chunks, max_targets)
     for intent in edit_intents:
         # Include the verbatim quote so BM25 gets the exact terms the speaker
         # used — critical for needle-in-haystack retrieval on large corpora where
@@ -377,17 +446,23 @@ async def run_pipeline(
             config.cross_cutting_max_targets if cross_cutting
             else config.max_targets_per_intent
         )
-        # When the meeting named one document, bias retrieval toward it and widen
-        # the net so the right section surfaces, then keep only that document's
-        # sections — a change addressed to a named company never lands elsewhere.
+        # When the meeting named one document/company, search WITHIN that
+        # document's sections (restrict_paths) — many documents share an identical
+        # section (e.g. "Key Operational Parameters"), so the named company's copy
+        # would never survive a global top-k cut otherwise. There is deliberately
+        # NO global fallback for a scoped change: a change addressed to a named
+        # company must never land on a DIFFERENT company's document. If the named
+        # company has no qualifying section, the change is left unmatched (the
+        # diagnostics explain it) rather than silently edited elsewhere.
         scope = target_paths and not cross_cutting
-        q_text = f"{target_token} {query_text}" if scope else query_text
-        results = retriever.query(q_text, top_k=max(top_k, 40) if scope else top_k)
-        cands = [r.chunk for r in results]
         if scope:
-            scoped = [c for c in cands if c.source_path in target_paths]
-            cands = scoped  # if empty, the named doc lacks the topic -> no card
-        intent_candidates.append((intent, cands, max_targets))
+            results = retriever.query(
+                query_text, top_k=max(top_k, 20), restrict_paths=target_paths
+            )
+        else:
+            results = retriever.query(query_text, top_k=top_k)
+        primary = [r.chunk for r in results]
+        intent_candidates.append((intent, primary, max_targets))
 
     # Removal intents: pick the target document, resolve which sections to drop.
     removal_targets: list[tuple] = []  # (intent, chunk) per section to delete
@@ -416,14 +491,17 @@ async def run_pipeline(
             )
             # Enrich the doc-selection query with the snippet so a removal that
             # only names its document in the surrounding sentence still routes to
-            # the right file. If the meeting named one document, bias + restrict to it.
+            # the right file. If the meeting named one document, search within it
+            # first; only fall back to a global search if it has no match.
             rq = f"{intent.affected_topic} {intent.new_value} {snippet}".strip()
-            results = retriever.query(
-                f"{target_token} {rq}" if target_paths else rq,
-                top_k=max(config.retrieval_top_k, 40) if target_paths else config.retrieval_top_k,
-            )
             if target_paths:
-                results = [r for r in results if r.chunk.source_path in target_paths]
+                results = retriever.query(
+                    rq, top_k=max(config.retrieval_top_k, 20), restrict_paths=target_paths
+                )
+                if not results:
+                    results = retriever.query(rq, top_k=config.retrieval_top_k)
+            else:
+                results = retriever.query(rq, top_k=config.retrieval_top_k)
             if not results:
                 return []
             target_path = results[0].chunk.source_path
@@ -464,11 +542,21 @@ async def run_pipeline(
 
     eval_agent = EvaluationAgent()
 
-    async def _score_candidates(intent, chunks: list[ChunkRecord], max_targets: int) -> list[tuple]:
+    # Deterministic floor for an exact structured-field match. The LLM evaluator
+    # is noisy on table rows (an exact "Maximum batch size" match scores anywhere
+    # from 0.5 to 0.9 run-to-run); when the section literally declares the field
+    # the intent names, treat it as a confident match regardless of the model.
+    _LABEL_FLOOR = 0.85
+
+    async def _score_pool(intent, chunks: list[ChunkRecord], max_targets: int) -> list[tuple]:
         """Keep EVERY section that scores above threshold (deduped, capped)."""
         if not chunks:
             return []
         scores = await asyncio.gather(*[eval_agent.score(intent, c) for c in chunks])
+        scores = [
+            max(s, _LABEL_FLOOR) if _field_label_match(intent, c) else s
+            for c, s in zip(chunks, scores)
+        ]
         ranked = sorted(zip(chunks, scores), key=lambda cs: cs[1], reverse=True)
         kept: list[tuple] = []
         seen: set[tuple[str, str]] = set()
@@ -485,7 +573,7 @@ async def run_pipeline(
         return kept
 
     eval_results = await asyncio.gather(
-        *[_score_candidates(intent, chunks, mt) for intent, chunks, mt in intent_candidates]
+        *[_score_pool(i, chunks, mt) for i, chunks, mt in intent_candidates]
     )
     qualified: list[tuple] = [pair for rl in eval_results for pair in rl]
 

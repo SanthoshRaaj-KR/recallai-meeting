@@ -33,6 +33,13 @@ intent is about (same label/subject), it is the right place even if the section'
 value differs from the intent's old_value — the speaker may have misremembered the old
 value. Do not lower the score just because the current number differs from old_value.
 
+Judge by the section's BODY, not its heading. A section whose text actually states the
+thing the intent changes is the right place even when its heading is generic or unrelated
+(e.g. an intent about "metrics reported weekly" should score 0.85+ on a section whose body
+says "Metrics for this area are reported every two weeks", even if that section is headed
+"Postmortems" or "Overview"). A specific, on-topic heading is a bonus, not a requirement;
+never penalise a section that contains the exact sentence the change targets.
+
 DOCUMENT MATCH IS DECISIVE for disambiguation. If the speaker named a specific document,
 page, company, or organization (see "Spoken context"/topic) AND the candidate's "Document"
 CLEARLY belongs to a DIFFERENT company/organization, score 0.0-0.3 even if the topic,

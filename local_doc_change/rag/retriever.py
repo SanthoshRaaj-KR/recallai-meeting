@@ -121,6 +121,7 @@ class HybridRetriever:
         top_k: int = 3,
         bm25_only: bool = False,
         dense_only: bool = False,
+        restrict_paths: Optional[set] = None,
     ) -> list[RetrievalResult]:
         """Retrieve the top *top_k* chunks for *text*.
 
@@ -134,6 +135,15 @@ class HybridRetriever:
             Use BM25 scores only (skip FAISS even if available).
         dense_only:
             Use FAISS scores only (skip BM25).
+        restrict_paths:
+            When given, the candidate universe is restricted to chunks whose
+            ``source_path`` is in this set BEFORE the BM25/dense top-20 cut.
+            This is essential for named-document scoping: many documents share
+            an identical section (e.g. "Key Operational Parameters"), so the
+            named company's copy would never survive a global top-20 cut. By
+            filtering the pool first, that company's best section actually
+            surfaces. If nothing in the index matches the set, the restriction
+            is ignored (caller handles the empty/fallback case).
 
         Returns
         -------
@@ -145,6 +155,16 @@ class HybridRetriever:
         if not chunks:
             return []
 
+        # Restrict the candidate universe to a subset of documents, when asked.
+        allowed: Optional[set] = None
+        if restrict_paths:
+            allowed = {
+                cid for cid, ch in self._index.id_to_chunk.items()
+                if ch.source_path in restrict_paths
+            }
+            if not allowed:
+                allowed = None  # nothing matched — fall back to global search
+
         # When dense_only=True but FAISS index is unavailable, fall back to BM25.
         # This prevents silent empty results when no OpenAI client was provided
         # at index-build time (graceful degradation without credentials).
@@ -154,34 +174,47 @@ class HybridRetriever:
         effective_dense_only = dense_only and has_dense
         effective_bm25_only = bm25_only or (dense_only and not has_dense)
 
-        # ── Step 1: BM25 top-20 ───────────────────────────────────────────────
+        # ── Step 1: BM25 top-20 (within the allowed set, if restricting) ──────
         bm25_ids: list[str] = []
         bm25_rank_map: dict[str, int] = {}
         if not effective_dense_only:
             scores = self._index.bm25.get_scores(_tokenize(text))
-            top_indices = np.argsort(scores)[::-1][:20]
-            bm25_ids = [self._index.chunk_ids[i] for i in top_indices]
+            order = np.argsort(scores)[::-1]
+            for i in order:
+                cid = self._index.chunk_ids[i]
+                if allowed is not None and cid not in allowed:
+                    continue
+                bm25_ids.append(cid)
+                if len(bm25_ids) >= 20:
+                    break
             bm25_rank_map = {cid: rank for rank, cid in enumerate(bm25_ids)}
 
         # ── Step 2: dense top-20 (FAISS in-process or Pinecone) ──────────────
+        # When restricting, request a much larger pool then keep only the allowed
+        # ids — the named company's section may sit well outside the global top-20
+        # because many documents share the same dense neighbourhood.
         dense_ids: list[str] = []
         dense_rank_map: dict[str, int] = {}
         if not effective_bm25_only and has_dense:
             q_vec = self._embed_query(text)
+            pool = min(20, len(chunks)) if allowed is None else min(len(chunks), 500)
             if self._index.vector_db == "pinecone":
                 from rag import vector_store
 
                 ids = vector_store.query(
-                    self._index.pinecone_namespace, q_vec[0], min(20, len(chunks))
+                    self._index.pinecone_namespace, q_vec[0], pool
                 )
-                dense_ids = [cid for cid in ids if cid in self._index.id_to_chunk]
+                cand = [cid for cid in ids if cid in self._index.id_to_chunk]
             else:
-                D, I = self._index.faiss_index.search(q_vec, min(20, len(chunks)))
-                dense_ids = [
+                D, I = self._index.faiss_index.search(q_vec, pool)
+                cand = [
                     self._index.chunk_ids[idx]
                     for idx in I[0]
                     if idx >= 0 and idx < len(self._index.chunk_ids)
                 ]
+            if allowed is not None:
+                cand = [cid for cid in cand if cid in allowed]
+            dense_ids = cand[:20]
             dense_rank_map = {cid: rank for rank, cid in enumerate(dense_ids)}
 
         # ── Step 3: RRF fusion ────────────────────────────────────────────────
