@@ -293,6 +293,30 @@ def _field_label_match(intent, chunk) -> bool:
     return False
 
 
+def _phrase_overlap_match(intent, chunk) -> bool:
+    """True when the speaker's own words clearly quote a sentence that exists in
+    this section. Prose edits (e.g. "metrics reported every week") have no
+    structured field for _field_label_match to anchor on, so they rely on the LLM
+    evaluator — which is noisy and sometimes scores the right section just under
+    threshold. But when the verbatim snippet ("the metrics for the area will be
+    reported every week") and a sentence in the section ("Metrics for this area
+    are reported every two weeks") share most of their distinctive words, the
+    speaker is unmistakably referencing THIS text, and that lexical fact is more
+    reliable than a single model roll. Domain-agnostic: it compares the spoken
+    words to the document text, assuming nothing about any corpus. Conservative on
+    purpose — it requires several distinctive spoken words to actually appear, so
+    chatter that slipped through extraction cannot trip it."""
+    verbatim = " ".join(getattr(intent, "verbatim_snippets", None) or [])
+    vtoks = set(_sig_tokens(verbatim))
+    if len(vtoks) < 4:
+        return False  # too little spoken signal to be sure
+    body = (chunk.content or "").lower()
+    matched = sum(1 for t in vtoks if t in body)
+    # several distinctive spoken words present AND a clear majority of them: this
+    # is the speaker reading from (a paraphrase of) this section.
+    return matched >= 3 and matched >= 0.6 * len(vtoks)
+
+
 def _detect_target_documents(transcript: str, chunks: list) -> tuple:
     """Find a document/company the speaker named for the WHOLE meeting.
 
@@ -542,21 +566,30 @@ async def run_pipeline(
 
     eval_agent = EvaluationAgent()
 
-    # Deterministic floor for an exact structured-field match. The LLM evaluator
-    # is noisy on table rows (an exact "Maximum batch size" match scores anywhere
-    # from 0.5 to 0.9 run-to-run); when the section literally declares the field
-    # the intent names, treat it as a confident match regardless of the model.
+    # Deterministic floors for matches the noisy LLM evaluator can miss:
+    #  - LABEL: the section literally declares the field the intent names (table
+    #    row / "Label: value") — an exact structural match (scores 0.5-0.9 on the
+    #    model run-to-run), floored high regardless of the model.
+    #  - PHRASE: the speaker's verbatim words clearly quote a sentence in the
+    #    section (prose edits with no structured field). Gated on the model not
+    #    having CONFIDENTLY rejected the section (>= 0.4), so a strong lexical
+    #    quote rescues a borderline roll without overriding a clear "wrong place".
     _LABEL_FLOOR = 0.85
+    _PHRASE_FLOOR = 0.80
+    _PHRASE_LLM_GATE = 0.40
 
     async def _score_pool(intent, chunks: list[ChunkRecord], max_targets: int) -> list[tuple]:
         """Keep EVERY section that scores above threshold (deduped, capped)."""
         if not chunks:
             return []
-        scores = await asyncio.gather(*[eval_agent.score(intent, c) for c in chunks])
-        scores = [
-            max(s, _LABEL_FLOOR) if _field_label_match(intent, c) else s
-            for c, s in zip(chunks, scores)
-        ]
+        raw = await asyncio.gather(*[eval_agent.score(intent, c) for c in chunks])
+        scores = []
+        for c, s in zip(chunks, raw):
+            if _field_label_match(intent, c):
+                s = max(s, _LABEL_FLOOR)
+            elif s >= _PHRASE_LLM_GATE and _phrase_overlap_match(intent, c):
+                s = max(s, _PHRASE_FLOOR)
+            scores.append(s)
         ranked = sorted(zip(chunks, scores), key=lambda cs: cs[1], reverse=True)
         kept: list[tuple] = []
         seen: set[tuple[str, str]] = set()
