@@ -212,6 +212,9 @@ def _build_instructions() -> str:
         * Ignore obviously garbled transcript text.
         * If evidence is weak, use cautious language such as "it sounded like" or "the team appeared to".
         * Confluence excerpts are retrieved by similarity, not intent.
+        * Each excerpt is labelled with its page title and section heading — use these to identify which system or topic the excerpt covers.
+        * Before using any excerpt, check the meeting transcript to establish which specific system, pipeline, or topic is being discussed.
+        * If multiple excerpts from different pages cover the same subject (e.g. deployment), only use the one whose page title matches the system the meeting is discussing. Discard the others.
         * Use an excerpt only if it directly helps answer the question.
         * Ignore irrelevant or weak matches.
         * Do not force wiki content into an answer.
@@ -266,8 +269,9 @@ def _extract_query(text: str) -> str | None:
 
 
 class Assistant(Agent):
-    def __init__(self, session_id: str = "") -> None:
+    def __init__(self, session_id: str = "", confluence_enabled: bool = True) -> None:
         self._session_id = session_id
+        self._confluence_enabled = confluence_enabled
         self._github_toolset = _build_github_toolset()
         super().__init__(
             llm=cerebras.LLM(model="gpt-oss-120b"),
@@ -441,7 +445,9 @@ class Assistant(Agent):
         logger.info("Wake query dispatched: %.80r", query)
 
         self._last_rag_context = ""
-        if not self._confluence_rag.enabled:
+        if not self._confluence_enabled:
+            logger.info("[Pinecone] skipped — Confluence disabled for this session")
+        elif not self._confluence_rag.enabled:
             logger.info("[Pinecone] skipped — PINECONE_API_KEY not set in .env.local")
         elif not _needs_confluence(query):
             logger.info("[Pinecone] skipped — query classified as meeting/general: %.80r", query)
@@ -714,12 +720,14 @@ async def my_agent(ctx: JobContext):
     mode = ""
     session_id = ""
     room_name = ""
+    confluence_enabled = False
     try:
         meta = json.loads(ctx.job.metadata or "{}")
         mode = (meta.get("mode") or "").strip()
         session_id = (meta.get("session_id") or "").strip()
         # Legacy Recall bridge passes room_name directly without a mode field.
         room_name = (meta.get("room_name") or "").strip()
+        confluence_enabled = bool(meta.get("confluence_enabled", False))
     except (ValueError, TypeError):
         pass
 
@@ -794,7 +802,7 @@ async def my_agent(ctx: JobContext):
         # and publishes it to LiveKit under this exact identity. Without this filter the
         # agent would try to subscribe to all participants and may not find the right track.
         await session.start(
-            agent=Assistant(session_id=room_name),
+            agent=Assistant(session_id=room_name, confluence_enabled=confluence_enabled),
             room=ctx.room,
             room_options=room_io.RoomOptions(
                 participant_identity=f"recall-browser-{room_name}",
@@ -804,7 +812,7 @@ async def my_agent(ctx: JobContext):
         # Standard mode (console / direct browser): subscribe to all participants
         # with background noise cancellation enabled.
         await session.start(
-            agent=Assistant(),
+            agent=Assistant(confluence_enabled=confluence_enabled),
             room=ctx.room,
             room_options=room_io.RoomOptions(
                 audio_input=room_io.AudioInputOptions(

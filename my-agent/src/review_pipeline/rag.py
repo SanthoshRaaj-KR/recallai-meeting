@@ -435,13 +435,20 @@ def chunk_page(page: PageCandidate, *, max_words: int = 350) -> list[PageChunk]:
     return chunks
 
 
-def _split_text(text: str, *, max_words: int) -> list[str]:
+def _split_text(text: str, *, max_words: int, overlap: int = 50) -> list[str]:
     words = text.split()
     if len(words) <= max_words:
         return [text]
     paragraphs = [p.strip() for p in re.split(r"\n\n+", text) if p.strip()]
     if len(paragraphs) <= 1:
-        return [" ".join(words[idx : idx + max_words]) for idx in range(0, len(words), max_words)]
+        # Hard word-window path: slide by (max_words - overlap) so consecutive
+        # chunks share the last `overlap` words of the previous window.
+        step = max(1, max_words - overlap)
+        return [
+            " ".join(words[idx : idx + max_words])
+            for idx in range(0, len(words), step)
+            if words[idx : idx + max_words]
+        ]
 
     chunks: list[str] = []
     current: list[str] = []
@@ -450,8 +457,19 @@ def _split_text(text: str, *, max_words: int) -> list[str]:
         count = len(paragraph.split())
         if current and current_words + count > max_words:
             chunks.append("\n\n".join(current))
-            current = [paragraph]
-            current_words = count
+            # Carry forward trailing paragraphs that fit within the overlap budget
+            # so boundary sentences appear in both the outgoing and incoming chunk.
+            overlap_parts: list[str] = []
+            overlap_count = 0
+            for p in reversed(current):
+                p_count = len(p.split())
+                if overlap_count + p_count <= overlap:
+                    overlap_parts.insert(0, p)
+                    overlap_count += p_count
+                else:
+                    break
+            current = overlap_parts + [paragraph]
+            current_words = overlap_count + count
         else:
             current.append(paragraph)
             current_words += count

@@ -196,7 +196,7 @@ def _create_recall_bot(meeting_url: str, room_name: str) -> str:
     return bot_id
 
 
-async def _dispatch_agent(room_name: str) -> None:
+async def _dispatch_agent(room_name: str, confluence_enabled: bool = False) -> None:
     async with livekit_api.LiveKitAPI(
         url=LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET,
     ) as lk:
@@ -204,10 +204,10 @@ async def _dispatch_agent(room_name: str) -> None:
             livekit_api.CreateAgentDispatchRequest(
                 agent_name=AGENT_NAME,
                 room=room_name,
-                metadata=json.dumps({"room_name": room_name}),
+                metadata=json.dumps({"room_name": room_name, "confluence_enabled": confluence_enabled}),
             )
         )
-    logger.info("Agent dispatched — dispatch_sid=%s room=%s", dispatch.sid, room_name)
+    logger.info("Agent dispatched — dispatch_sid=%s room=%s confluence=%s", dispatch.sid, room_name, confluence_enabled)
 
 
 # ── Request / response models ──────────────────────────────────────────────────
@@ -216,6 +216,7 @@ class StartBotRequest(BaseModel):
     room_name: Optional[str] = None
     session_id: Optional[str] = None
     team_id: Optional[str] = None  # optional team scoping (port 8003 integration)
+    confluence_enabled: bool = False
 
 
 class StartBotResponse(BaseModel):
@@ -241,7 +242,7 @@ async def start_bot(body: StartBotRequest) -> StartBotResponse:
         raise HTTPException(status_code=502, detail=f"Recall.ai error: {exc} — {err_body}")
 
     try:
-        await _dispatch_agent(room_name)
+        await _dispatch_agent(room_name, confluence_enabled=body.confluence_enabled)
     except Exception as exc:
         logger.warning("Agent dispatch failed (non-fatal): %s", exc)
 
@@ -262,6 +263,7 @@ async def start_bot(body: StartBotRequest) -> StartBotResponse:
         "ended_at": None,
         "updated_at": now,
         "team_id": body.team_id,
+        "confluence_enabled": body.confluence_enabled,
     }
     session_store.upsert(room_name, session_data)
     _compactors[room_name] = _new_compactor()
