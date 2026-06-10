@@ -28,6 +28,11 @@ Given a change intent and a candidate section from a document, score the relevan
 - 0.5-0.69: The section is plausibly related but not obviously the right target.
 - 0.0-0.49: The section is unrelated to the intent; do not edit here.
 
+Score on TOPIC match, not value match: if this section contains the field/parameter the
+intent is about (same label/subject), it is the right place even if the section's current
+value differs from the intent's old_value — the speaker may have misremembered the old
+value. Do not lower the score just because the current number differs from old_value.
+
 DOCUMENT MATCH IS DECISIVE for disambiguation. If the speaker named a specific document,
 page, company, or organization (see "Spoken context"/topic) AND the candidate's "Document"
 CLEARLY belongs to a DIFFERENT company/organization, score 0.0-0.3 even if the topic,

@@ -31,6 +31,7 @@ Rules:
 8. Preserve the document's writing style, tone, punctuation, and formatting conventions (markdown markers, list style, spacing).
 9. If the section already fully matches the intent's new_value, return after_content identical to before_content.
 10. Wrong-section guard: this section was already selected as the best match, so normally you should apply the change. The ONLY time you return after_content identical to before_content is when this section is clearly about a DIFFERENT rule or subject and merely happens to share a number or keyword with the intent (e.g. an intent about a support response SLA must not edit a security incident-reporting window that coincidentally also says "24 hours"). Do not approximate a change onto an unrelated rule.
+11. old_value is the speaker's recollection and may be WRONG or ABSENT. When the topic clearly identifies a specific field, parameter, labeled value, or table row in THIS section (e.g. topic "maximum batch size" and the section has a row "Maximum batch size | 250 records", or "set the response time to 2 hours" and the section states a response time), SET that field to new_value even if the section's current value differs from old_value. Identify the field by its TOPIC/label, not by matching the old number. ("increase X to 950", "set X to 2 hours", "change X to weekly" all mean: put new_value on the field named X.) This still obeys rule 10 — if no field in this section is actually about the topic, do not force a change.
 """
 
 
