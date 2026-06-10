@@ -203,6 +203,63 @@ def _record_diagnostics(
     ]
 
 
+# Generic category / structure words that are NOT a document's identity — so a
+# transcript that merely says "security" or "policy" can't capture a whole group.
+# This is domain-agnostic: a real company/page name is a distinctive proper noun
+# that survives this filter; generic category words do not.
+_DOC_ID_STOPWORDS = {
+    "policy", "policies", "handbook", "guide", "guides", "sop", "manual", "manuals",
+    "procedure", "procedures", "standard", "standards", "overview", "doc", "document",
+    "documents", "the", "and", "for", "of", "an", "section", "part", "team", "teams",
+    "security", "finance", "financial", "human", "resources", "engineering", "eng",
+    "product", "products", "support", "data", "infrastructure", "operations", "ops",
+    "people", "governance", "privacy", "information", "company", "corp", "inc",
+    "ltd", "llc", "group", "department", "div", "division",
+}
+
+
+def _doc_identifier_tokens(text: str) -> set:
+    """Distinctive identifier tokens from a title/filename (drops generic words)."""
+    toks = set(re.findall(r"[a-z][a-z0-9]{2,}", (text or "").lower()))
+    return toks - _DOC_ID_STOPWORDS
+
+
+def _detect_target_documents(transcript: str, chunks: list) -> tuple:
+    """Find a document/company the speaker named for the WHOLE meeting.
+
+    Domain-agnostic: builds candidate identifier tokens from each document's
+    title + filename (minus generic category/structure words), then sees which
+    the transcript mentions. When the speaker establishes one document/org once
+    ("I'm from Acme", "for the Acme handbook") and then lists several changes
+    without re-naming it, every change must still route to that document. Returns
+    (token, set_of_source_paths) or (None, None) when no single document is
+    clearly named. NOTHING about any specific corpus is hardcoded — it reads the
+    titles/filenames of whatever folder is loaded.
+    """
+    tok2paths: dict = {}
+    all_paths = set()
+    for c in chunks:
+        all_paths.add(c.source_path)
+        stem = os.path.splitext(os.path.basename(c.source_path))[0]
+        ident = (getattr(c, "doc_title", "") or "") + " " + stem
+        for t in _doc_identifier_tokens(ident):
+            tok2paths.setdefault(t, set()).add(c.source_path)
+    if not tok2paths:
+        return None, None
+    matched = [(t, paths) for t, paths in tok2paths.items()
+               if t in _doc_identifier_tokens(transcript)]
+    if not matched:
+        return None, None
+    # The most distinctive named identifier tags the FEWEST documents (a specific
+    # company/page, not a broad category). Require it to point at a minority of
+    # the corpus so a stray word can't capture everything.
+    matched.sort(key=lambda kv: len(kv[1]))
+    token, paths = matched[0]
+    if len(paths) > max(1, int(len(all_paths) * 0.5)):
+        return None, None
+    return token, paths
+
+
 async def run_pipeline(
     transcript: str,
     config: PipelineConfig,
@@ -283,6 +340,17 @@ async def run_pipeline(
     )
     all_chunks: list[ChunkRecord] = index.chunks
 
+    # Transcript-level document routing: if the speaker named one document/company
+    # for the whole meeting (e.g. "I'm from Acme ... change X ... change Y"), scope
+    # every change to that document instead of letting each change match a
+    # same-shaped section in a different company's doc.
+    target_token, target_paths = _detect_target_documents(transcript, all_chunks)
+    if target_token:
+        logger.info(
+            "run_pipeline: transcript names document %r (%d files) — scoping changes to it",
+            target_token, len(target_paths or []),
+        )
+
     # ── Stage 4: rag_retrieval ────────────────────────────────────────────────
     await _emit(q, "rag_retrieval")
     from rag.retriever import HybridRetriever  # noqa: PLC0415
@@ -309,8 +377,17 @@ async def run_pipeline(
             config.cross_cutting_max_targets if cross_cutting
             else config.max_targets_per_intent
         )
-        results = retriever.query(query_text, top_k=top_k)
-        intent_candidates.append((intent, [r.chunk for r in results], max_targets))
+        # When the meeting named one document, bias retrieval toward it and widen
+        # the net so the right section surfaces, then keep only that document's
+        # sections — a change addressed to a named company never lands elsewhere.
+        scope = target_paths and not cross_cutting
+        q_text = f"{target_token} {query_text}" if scope else query_text
+        results = retriever.query(q_text, top_k=max(top_k, 40) if scope else top_k)
+        cands = [r.chunk for r in results]
+        if scope:
+            scoped = [c for c in cands if c.source_path in target_paths]
+            cands = scoped  # if empty, the named doc lacks the topic -> no card
+        intent_candidates.append((intent, cands, max_targets))
 
     # Removal intents: pick the target document, resolve which sections to drop.
     removal_targets: list[tuple] = []  # (intent, chunk) per section to delete
@@ -339,11 +416,14 @@ async def run_pipeline(
             )
             # Enrich the doc-selection query with the snippet so a removal that
             # only names its document in the surrounding sentence still routes to
-            # the right file.
+            # the right file. If the meeting named one document, bias + restrict to it.
+            rq = f"{intent.affected_topic} {intent.new_value} {snippet}".strip()
             results = retriever.query(
-                f"{intent.affected_topic} {intent.new_value} {snippet}".strip(),
-                top_k=config.retrieval_top_k,
+                f"{target_token} {rq}" if target_paths else rq,
+                top_k=max(config.retrieval_top_k, 40) if target_paths else config.retrieval_top_k,
             )
+            if target_paths:
+                results = [r for r in results if r.chunk.source_path in target_paths]
             if not results:
                 return []
             target_path = results[0].chunk.source_path
