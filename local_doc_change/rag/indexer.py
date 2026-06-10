@@ -284,8 +284,8 @@ def _compute_folder_hash(folder_path: str) -> str:
 def _filename_keywords(source_path: str) -> str:
     """Human-meaningful words from a filename (org/domain), minus index digits.
 
-    e.g. "security_ironbloom_008.md" -> "security ironbloom". A meeting often
-    names a document by its org/topic, so these tokens sharpen BM25 routing.
+    e.g. "finance_policy_2024.docx" -> "finance policy". A meeting often names a
+    document by its org/topic, so these tokens sharpen BM25 routing.
     """
     stem = Path(source_path).stem
     words = re.sub(r"[_\-]+", " ", stem)
@@ -297,7 +297,7 @@ def _index_text(chunk: ChunkRecord) -> str:
     """Text used for BM25 + embedding: page name + filename + section title + body.
 
     The body alone loses the document and section a chunk belongs to, so a query
-    that names a document or topic ("the Ironbloom security policy", "cold-storage
+    that names a document or topic ("the Northwind security policy", "cold-storage
     archival window") cannot route to it. Prepending the page/section context to
     the indexed text — not just storing it as metadata — makes retrieval match on
     document and heading, not body text only.

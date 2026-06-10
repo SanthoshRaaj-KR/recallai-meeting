@@ -118,7 +118,7 @@ Completeness is critical — capture EVERY distinct change, not just the obvious
 
 Rules:
 1. Extract an intent for any specific document change AND for any concrete reported fact, figure, cost, duration, count, date, or incident that an organization would record in a document. When a concrete value is tied to a named subject, extract it; the retrieval step will discard it if no document covers that subject.
-2. verbatim_snippets MUST contain exact quoted text from the transcript. When the speaker addresses a change to a SPECIFIC named document, page, company, or organization (e.g. "for the Drayveil customer support SOP, change ..."), ALWAYS include that naming phrase in verbatim_snippets so the change can be routed to the right document — even though the document name is never the affected_topic (see rule 6).
+2. verbatim_snippets MUST contain exact quoted text from the transcript. When the speaker addresses a change to a SPECIFIC named document, page, company, or organization (e.g. "for the Northwind customer support SOP, change ..."), ALWAYS include that naming phrase in verbatim_snippets so the change can be routed to the right document — even though the document name is never the affected_topic (see rule 6).
 3. confidence: 0.9+ only when the transcript is unambiguous; 0.5-0.89 for probable; < 0.5 for speculative.
 4. old_value: the current state BEFORE the change (null if unknown). Never guess a value the transcript does not give.
 5. new_value: the intended new state AFTER the change (for a relative change like "increased by 3 days", describe the delta, e.g. "current sick days + 3").
