@@ -561,27 +561,30 @@ class JarvisCallAssistant(Agent):
     once at startup so it is always in the context window.
     """
 
-    def __init__(self, session_id: str = "", meeting_context: str = "") -> None:
+    def __init__(
+        self,
+        session_id: str = "",
+        meeting_context: str = "",
+        confluence_enabled: bool = False,
+    ) -> None:
         self._session_id = session_id
         self._meeting_context = meeting_context
-        instructions = self._build_instructions(meeting_context)
+        self._confluence_enabled = confluence_enabled
+        self._confluence_rag = ConfluenceLiveRAG()
         super().__init__(
             llm=cerebras.LLM(model="gpt-oss-120b"),
-            instructions=instructions,
+            instructions=self._build_instructions(),
         )
         self._greeted = False
 
     @staticmethod
-    def _build_instructions(meeting_context: str) -> str:
-        base = textwrap.dedent("""\
+    def _build_instructions() -> str:
+        return textwrap.dedent("""\
             You are Jarvis, a personal AI assistant in a private one-on-one voice call.
             The user just finished a meeting and wants to discuss it with you directly.
-            You have been given the complete meeting transcript and notes as context below.
+            You will receive the meeting transcript and notes as context with each message.
             Answer any questions clearly and conversationally, drawing on the meeting context
             when relevant and your own knowledge otherwise.
-
-            # Meeting context
-            {context}
 
             # Output rules
             - Respond in plain text only. No markdown, lists, JSON, or emojis.
@@ -590,7 +593,6 @@ class JarvisCallAssistant(Agent):
             - Spell out numbers and avoid acronyms with unclear pronunciation.
             - Never fabricate meeting content. If something was not discussed, say so honestly.
             """)
-        return base.format(context=meeting_context.strip() or "No meeting context available.")
 
     async def on_enter(self) -> None:
         if not self._greeted:
@@ -613,6 +615,43 @@ class JarvisCallAssistant(Agent):
         # No wake-word gating — every utterance goes straight to the LLM.
         # Still apply the chat history window to prevent unbounded context growth.
         turn_ctx.truncate(max_items=_CHAT_HISTORY_WINDOW)
+
+        # Inject meeting context as a system message just before the user turn
+        # so it is present for this LLM call but not baked into the static system prompt.
+        if self._meeting_context:
+            user_idx = turn_ctx.index_by_id(new_message.id)
+            insert_at = user_idx if user_idx is not None else len(turn_ctx.items)
+            turn_ctx.items.insert(
+                insert_at,
+                llm.ChatMessage(
+                    role="system",
+                    content=["[Meeting context]\n" + self._meeting_context],
+                ),
+            )
+
+        query = (new_message.text_content or "").strip()
+        if query and self._confluence_enabled and self._confluence_rag.enabled:
+            try:
+                enriched_query = self._confluence_rag.build_search_query(query, [])
+                logger.info("[Pinecone/call] searching — enriched query: %.120r", enriched_query)
+                hits = await asyncio.to_thread(self._confluence_rag.search, enriched_query)
+                rag_context = self._confluence_rag.format_context(hits)
+                if rag_context:
+                    logger.info("[Pinecone/call] %d chunk(s) injected into context", len(hits))
+                    user_idx = turn_ctx.index_by_id(new_message.id)
+                    insert_at = user_idx if user_idx is not None else len(turn_ctx.items)
+                    turn_ctx.items.insert(
+                        insert_at,
+                        llm.ChatMessage(
+                            role="system",
+                            content=["[Confluence Knowledge]\n" + rag_context],
+                        ),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Pinecone/call] lookup failed, continuing without context: %s", exc)
+        elif self._confluence_enabled and not self._confluence_rag.enabled:
+            logger.info("[Pinecone/call] skipped — PINECONE_API_KEY not set")
+
         await self.update_chat_ctx(turn_ctx)
 
 
@@ -650,6 +689,7 @@ server = AgentServer()
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["turn_detector"] = MultilingualModel()
 
 
 server.setup_fnc = prewarm
@@ -678,7 +718,10 @@ async def my_agent(ctx: JobContext):
 
     # ── Mode: one-on-one Jarvis call (post-meeting voice Q&A) ────────────────
     if mode == "jarvis_call":
-        logger.info("Jarvis call mode — session_id=%s room=%s", session_id, ctx.room.name)
+        logger.info(
+            "Jarvis call mode — session_id=%s room=%s confluence=%s",
+            session_id, ctx.room.name, confluence_enabled,
+        )
         meeting_context = _load_meeting_context(session_id) if session_id else ""
 
         session = AgentSession(
@@ -689,20 +732,17 @@ async def my_agent(ctx: JobContext):
             tts=inference.TTS(
                 model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
             ),
-            turn_detection=MultilingualModel(),
+            turn_detection=ctx.proc.userdata["turn_detector"],
             vad=ctx.proc.userdata["vad"],
         )
         await ctx.connect()
         await session.start(
-            agent=JarvisCallAssistant(session_id=session_id, meeting_context=meeting_context),
-            room=ctx.room,
-            room_options=room_io.RoomOptions(
-                audio_input=room_io.AudioInputOptions(
-                    noise_cancellation=ai_coustics.audio_enhancement(
-                        model=ai_coustics.EnhancerModel.QUAIL_VF_S
-                    ),
-                ),
+            agent=JarvisCallAssistant(
+                session_id=session_id,
+                meeting_context=meeting_context,
+                confluence_enabled=confluence_enabled,
             ),
+            room=ctx.room,
         )
         return
 
@@ -732,7 +772,7 @@ async def my_agent(ctx: JobContext):
         tts=inference.TTS(
             model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
         ),
-        turn_detection=MultilingualModel(),
+        turn_detection=ctx.proc.userdata["turn_detector"],
         vad=ctx.proc.userdata["vad"],
         # Disabled: on_user_turn_completed always rewrites or clears the message,
         # so speculative output is always discarded → audio glitch at turn start.

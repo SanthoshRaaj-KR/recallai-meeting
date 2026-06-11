@@ -384,6 +384,7 @@ async def stop_bot(session_id: str) -> dict:
 
 class JarvisCallTokenRequest(BaseModel):
     participant_name: Optional[str] = "user"
+    confluence_enabled: bool = False
 
 
 class JarvisCallTokenResponse(BaseModel):
@@ -392,7 +393,9 @@ class JarvisCallTokenResponse(BaseModel):
     room_name: str
 
 
-async def _dispatch_jarvis_call_agent(room_name: str, session_id: str) -> None:
+async def _dispatch_jarvis_call_agent(
+    room_name: str, session_id: str, confluence_enabled: bool = False
+) -> None:
     async with livekit_api.LiveKitAPI(
         url=LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET,
     ) as lk:
@@ -400,7 +403,11 @@ async def _dispatch_jarvis_call_agent(room_name: str, session_id: str) -> None:
             livekit_api.CreateAgentDispatchRequest(
                 agent_name=AGENT_NAME,
                 room=room_name,
-                metadata=json.dumps({"mode": "jarvis_call", "session_id": session_id}),
+                metadata=json.dumps({
+                    "mode": "jarvis_call",
+                    "session_id": session_id,
+                    "confluence_enabled": confluence_enabled,
+                }),
             )
         )
     logger.info(
@@ -435,7 +442,7 @@ async def jarvis_call_token(
     token = _mint_token(room_name, identity, can_publish=True)
 
     try:
-        await _dispatch_jarvis_call_agent(room_name, session_id)
+        await _dispatch_jarvis_call_agent(room_name, session_id, body.confluence_enabled)
     except Exception as exc:
         logger.warning("Jarvis call agent dispatch failed (non-fatal): %s", exc)
 
