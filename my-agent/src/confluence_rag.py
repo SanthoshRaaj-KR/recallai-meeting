@@ -1,14 +1,13 @@
 """In-meeting Confluence RAG for Jarvis wake-word queries.
 
-Reuses the same Pinecone index as the post-meeting review pipeline
-(MY_AGENT_RAG_INDEX / PINECONE_INDEX_NAME) but is purpose-built for
-low-latency lookups during a live meeting. The search() method is
-synchronous and should always be called via asyncio.to_thread() so
-the event loop stays free.
+Reuses the same Pinecone integrated index as the post-meeting review pipeline
+(MY_AGENT_RAG_INDEX / PINECONE_INDEX_NAME). Embedding is handled server-side by
+Pinecone (llama-text-embed-v2) — no separate OpenAI call per query. A single
+search() round-trip to Pinecone embeds the query and returns ranked chunks.
 
-Index metadata schema expected per chunk (set during review-pipeline upsert):
+Index field schema expected per chunk (set during review-pipeline upsert):
   page_id, title, space_key, heading, section_order, chunk_order, version,
-  content_hash, chunk_count, text
+  content_hash, chunk_count, text (raw display content), chunk_text (embedded)
 """
 
 from __future__ import annotations
@@ -16,6 +15,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
+from collections import deque
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ _MAX_CHUNK_CHARS = int(os.getenv("JARVIS_CONFLUENCE_RAG_MAX_CHUNK_CHARS", "2000"
 _TRANSCRIPT_CONTEXT_LINES = int(os.getenv("JARVIS_CONFLUENCE_RAG_CONTEXT_LINES", "12"))
 # Max characters for the final enriched query sent to the embedding model.
 _MAX_QUERY_CHARS = int(os.getenv("JARVIS_CONFLUENCE_RAG_MAX_QUERY_CHARS", "350"))
+
+# Query-result cache: avoids repeat Pinecone calls for the same topic within a session.
+_CACHE_TTL_S = int(os.getenv("JARVIS_CONFLUENCE_RAG_CACHE_TTL", "120"))  # 2 minutes
+_CACHE_MAX = int(os.getenv("JARVIS_CONFLUENCE_RAG_CACHE_MAX", "20"))
 
 # Spoken filler words that carry no topical signal — removed before embedding.
 _FILLER_RE = re.compile(
@@ -45,37 +50,25 @@ _SPEAKER_PREFIX_RE = re.compile(r"^[^:]{1,40}:\s*")
 class ConfluenceLiveRAG:
     """Pinecone-backed in-meeting Confluence knowledge retriever.
 
-    Lazy-initialises both the OpenAI embedding client and the Pinecone index
-    on first use so startup time is unaffected. Thread-safe for read access;
-    write access is single-threaded (one asyncio.to_thread call at a time in
-    practice).
+    Uses Pinecone integrated inference (llama-text-embed-v2). Embedding and
+    search happen in a single server-side round-trip — no external OpenAI call
+    is made per query. Lazy-initialises the Pinecone index client on first use.
     """
 
     def __init__(self) -> None:
         self.index_name = (
             os.getenv("MY_AGENT_RAG_INDEX")
             or os.getenv("PINECONE_INDEX_NAME")
-            or "confluence-review-rag"
+            or "confluence-review-rag-v2"
         ).strip()
         self.namespace = (
             os.getenv("MY_AGENT_RAG_NAMESPACE")
             or os.getenv("PINECONE_NAMESPACE")
             or "confluence-review"
         ).strip()
-        self.embedding_model = (
-            os.getenv("MY_AGENT_RAG_EMBEDDING_MODEL")
-            or os.getenv("OPENAI_EMBEDDING_MODEL")
-            or "text-embedding-3-small"
-        ).strip()
-        configured_dims = (
-            os.getenv("MY_AGENT_RAG_EMBEDDING_DIMENSIONS")
-            or os.getenv("OPENAI_EMBEDDING_DIMENSIONS")
-            or os.getenv("PINECONE_INDEX_DIMENSION")
-            or ""
-        ).strip()
-        self.embedding_dimensions = int(configured_dims) if configured_dims else None
-        self._openai: Any | None = None
         self._pinecone_index: Any | None = None
+        # (query_str, hits, timestamp) — bounded by _CACHE_MAX entries, evicted by TTL.
+        self._cache: deque[tuple[str, list[dict[str, Any]], float]] = deque(maxlen=_CACHE_MAX)
 
     @property
     def enabled(self) -> bool:
@@ -86,8 +79,9 @@ class ConfluenceLiveRAG:
     def search(self, query: str, top_k: int = _TOP_K_DEFAULT) -> list[dict[str, Any]]:
         """Retrieve top-k Confluence chunks relevant to *query*.
 
-        Always call this via ``asyncio.to_thread(rag.search, query)`` from
-        async code to keep the event loop unblocked.
+        Embedding and ANN search happen in one Pinecone round-trip via integrated
+        inference (llama-text-embed-v2). Always call this via
+        ``asyncio.to_thread(rag.search, query)`` from async code.
 
         Returns a list of dicts with keys:
           page_id, title, space_key, heading, section_order, text, score
@@ -99,47 +93,40 @@ class ConfluenceLiveRAG:
             return []
         if not query.strip():
             return []
+        now = time.monotonic()
+        for cached_q, cached_hits, ts in self._cache:
+            if cached_q == query and now - ts < _CACHE_TTL_S:
+                logger.info("[Pinecone] cache hit — skipping search for: %.60r", query)
+                return cached_hits
         try:
-            embedding = self._embed(query)
             index = self._get_index()
-            result = index.query(
-                vector=embedding,
-                top_k=max(1, top_k),
+            result = index.search(
                 namespace=self.namespace,
-                include_metadata=True,
-                include_values=False,
+                top_k=max(1, top_k),
+                inputs={"text": query.strip()},
+                fields=["page_id", "title", "space_key", "heading", "section_order", "text"],
             )
-            matches = (
-                result.get("matches", []) if isinstance(result, dict) else result.matches
-            ) or []
+            raw_hits = result.result.hits if hasattr(result, "result") else []
             hits: list[dict[str, Any]] = []
-            for match in matches:
-                metadata = (
-                    match.get("metadata", {})
-                    if isinstance(match, dict)
-                    else (match.metadata or {})
-                )
-                score = float(
-                    match.get("score", 0.0)
-                    if isinstance(match, dict)
-                    else (match.score or 0.0)
-                )
+            for hit in raw_hits:
+                fields = hit.fields if hasattr(hit, "fields") else {}
+                score = float(hit.score if hasattr(hit, "score") else 0.0)
                 logger.debug(
                     "[Pinecone] candidate score=%.3f page=%r heading=%r",
                     score,
-                    metadata.get("title", ""),
-                    metadata.get("heading", ""),
+                    fields.get("title", ""),
+                    fields.get("heading", ""),
                 )
                 if score < _SCORE_THRESHOLD:
                     continue
                 hits.append(
                     {
-                        "page_id": str(metadata.get("page_id") or ""),
-                        "title": str(metadata.get("title") or ""),
-                        "space_key": str(metadata.get("space_key") or ""),
-                        "heading": str(metadata.get("heading") or ""),
-                        "section_order": int(metadata.get("section_order") or 0),
-                        "text": str(metadata.get("text") or "")[:_MAX_CHUNK_CHARS],
+                        "page_id": str(fields.get("page_id") or ""),
+                        "title": str(fields.get("title") or ""),
+                        "space_key": str(fields.get("space_key") or ""),
+                        "heading": str(fields.get("heading") or ""),
+                        "section_order": int(fields.get("section_order") or 0),
+                        "text": str(fields.get("text") or "")[:_MAX_CHUNK_CHARS],
                         "score": score,
                     }
                 )
@@ -156,6 +143,7 @@ class ConfluenceLiveRAG:
                 )
             else:
                 logger.info("[Pinecone] query returned 0 hits above threshold %.2f", _SCORE_THRESHOLD)
+            self._cache.append((query, hits, now))
             return hits
         except Exception as exc:  # noqa: BLE001
             logger.warning("ConfluenceLiveRAG search failed: %s", exc)
@@ -252,41 +240,23 @@ class ConfluenceLiveRAG:
         return combined[:_MAX_QUERY_CHARS]
 
     def warmup(self) -> None:
-        """Eagerly initialise the OpenAI and Pinecone clients.
+        """Pre-warm the Pinecone connection.
 
-        Call via ``asyncio.to_thread(rag.warmup)`` from ``on_enter()`` so the
-        first wake-word query of a session doesn't pay the cold-init penalty.
-        Only the client objects are created — no embedding or index query is
-        made, so there is no token cost.
+        Performs a real (throwaway) search so the TCP connection and TLS
+        handshake to Pinecone are established during the opening greeting —
+        before the first wake-word query arrives. Cost: 1 read unit.
+        Call via ``asyncio.to_thread(rag.warmup)`` from ``on_enter()``.
         """
         if not self.enabled:
             return
         try:
-            if self._openai is None:
-                from openai import OpenAI
-                self._openai = OpenAI()
-            self._get_index()
-            logger.info("ConfluenceLiveRAG: clients pre-initialised")
+            index = self._get_index()
+            index.search(namespace=self.namespace, top_k=1, inputs={"text": "warmup"})
+            logger.info("ConfluenceLiveRAG: connection pre-warmed")
         except Exception as exc:  # noqa: BLE001
             logger.warning("ConfluenceLiveRAG warmup failed: %s", exc)
 
     # ── Private helpers ──────────────────────────────────────────────────────
-
-    def _embed(self, text: str) -> list[float]:
-        if self._openai is None:
-            from openai import OpenAI
-
-            self._openai = OpenAI()
-        request: dict[str, Any] = {
-            "model": self.embedding_model,
-            "input": [text.strip()],
-        }
-        if self.embedding_dimensions and self.embedding_model.startswith(
-            "text-embedding-3"
-        ):
-            request["dimensions"] = self.embedding_dimensions
-        response = self._openai.embeddings.create(**request)
-        return list(response.data[0].embedding)
 
     def _get_index(self) -> Any:
         if self._pinecone_index is not None:

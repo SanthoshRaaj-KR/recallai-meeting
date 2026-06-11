@@ -7,8 +7,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from openai import OpenAI
-
 from .models import PageCandidate
 from .text_utils import extract_sections, html_to_text, normalize_ws
 
@@ -63,18 +61,6 @@ class ConfluenceVectorIndex:
             or os.getenv("PINECONE_NAMESPACE")
             or "confluence-review"
         ).strip()
-        self.embedding_model = (
-            os.getenv("MY_AGENT_RAG_EMBEDDING_MODEL")
-            or os.getenv("OPENAI_EMBEDDING_MODEL")
-            or "text-embedding-3-small"
-        ).strip()
-        configured_dims = (
-            os.getenv("MY_AGENT_RAG_EMBEDDING_DIMENSIONS")
-            or os.getenv("OPENAI_EMBEDDING_DIMENSIONS")
-            or os.getenv("PINECONE_INDEX_DIMENSION")
-            or ""
-        ).strip()
-        self.embedding_dimensions = int(configured_dims) if configured_dims else None
         self.max_chunk_words = int(os.getenv("MY_AGENT_RAG_CHUNK_WORDS", "350"))
         self.max_metadata_chars = int(os.getenv("MY_AGENT_RAG_METADATA_CHARS", "5000"))
         self.create_index = os.getenv("MY_AGENT_RAG_CREATE_INDEX", "0").strip().lower() in {
@@ -85,7 +71,6 @@ class ConfluenceVectorIndex:
         }
         self.cloud = os.getenv("PINECONE_CLOUD", "aws").strip()
         self.region = os.getenv("PINECONE_REGION", "us-east-1").strip()
-        self._openai: OpenAI | None = None
         self._pinecone_index: Any | None = None
         self._disabled_reason: str | None = None
 
@@ -111,30 +96,27 @@ class ConfluenceVectorIndex:
         chunks = chunk_page(page, max_words=self.max_chunk_words)
         if not chunks:
             return
-        embeddings = self._embed([self._embedding_text(chunk) for chunk in chunks])
-        vectors = []
-        for chunk, embedding in zip(chunks, embeddings):
-            vectors.append(
-                {
-                    "id": chunk.id,
-                    "values": embedding,
-                    "metadata": {
-                        "page_id": chunk.page_id,
-                        "title": chunk.title,
-                        "space_key": chunk.space_key,
-                        "heading": chunk.heading,
-                        "section_order": chunk.section_order,
-                        "chunk_order": chunk.chunk_order,
-                        "version": chunk.version or 0,
-                        "content_hash": content_hash,
-                        "chunk_count": len(chunks),
-                        "text": chunk.text[: self.max_metadata_chars],
-                    },
-                }
-            )
         index = self._index()
-        for start in range(0, len(vectors), 100):
-            index.upsert(vectors=vectors[start : start + 100], namespace=self.namespace)
+        records = [
+            {
+                "_id": chunk.id,
+                # chunk_text is the fieldMap.text field — embedded server-side by llama-text-embed-v2.
+                "chunk_text": self._embedding_text(chunk)[: self.max_metadata_chars],
+                "text": chunk.text[: self.max_metadata_chars],
+                "page_id": chunk.page_id,
+                "title": chunk.title,
+                "space_key": chunk.space_key,
+                "heading": chunk.heading,
+                "section_order": chunk.section_order,
+                "chunk_order": chunk.chunk_order,
+                "version": chunk.version or 0,
+                "content_hash": content_hash,
+                "chunk_count": len(chunks),
+            }
+            for chunk in chunks
+        ]
+        for start in range(0, len(records), 96):
+            index.upsert_records(namespace=self.namespace, records=records[start : start + 96])
         self._delete_stale_chunks(page.page_id, len(chunks))
 
     def _indexed_page_is_fresh(self, page: PageCandidate, content_hash: str) -> bool:
@@ -142,13 +124,21 @@ class ConfluenceVectorIndex:
             return False
         try:
             result = self._index().fetch(ids=[f"{page.page_id}:0"], namespace=self.namespace)
-            vectors = result.get("vectors", {}) if isinstance(result, dict) else (result.vectors or {})
-            first = vectors.get(f"{page.page_id}:0")
+            # Standard index: result.vectors; integrated index fetch may return vectors or records.
+            if isinstance(result, dict):
+                records = result.get("vectors") or result.get("records") or {}
+            else:
+                records = getattr(result, "vectors", None) or getattr(result, "records", None) or {}
+            first = records.get(f"{page.page_id}:0")
             if not first:
                 return False
-            metadata = first.get("metadata", {}) if isinstance(first, dict) else (first.metadata or {})
-            indexed_hash = str(metadata.get("content_hash") or "")
-            indexed_version = int(metadata.get("version") or 0) or None
+            # Standard index stores fields in .metadata; integrated may use .fields.
+            if isinstance(first, dict):
+                fields = first.get("metadata") or first.get("fields") or {}
+            else:
+                fields = getattr(first, "metadata", None) or getattr(first, "fields", None) or {}
+            indexed_hash = str(fields.get("content_hash") or "")
+            indexed_version = int(fields.get("version") or 0) or None
             if page.version is not None and indexed_version == page.version and indexed_hash == content_hash:
                 return True
             if page.version is None and indexed_hash == content_hash:
@@ -165,31 +155,29 @@ class ConfluenceVectorIndex:
         clean_query = normalize_ws(query)
         if not clean_query:
             return []
-        embedding = self._embed([clean_query])[0]
-        result = self._index().query(
-            vector=embedding,
-            top_k=max(1, top_k),
+        result = self._index().search(
             namespace=self.namespace,
-            include_metadata=True,
-            include_values=False,
+            top_k=max(1, top_k),
+            inputs={"text": clean_query},
+            fields=["page_id", "title", "space_key", "heading", "section_order", "version", "text"],
         )
-        matches = result.get("matches", []) if isinstance(result, dict) else result.matches
+        raw_hits = result.result.hits if hasattr(result, "result") else []
         hits: list[VectorSearchHit] = []
-        for match in matches or []:
-            metadata = match.get("metadata", {}) if isinstance(match, dict) else (match.metadata or {})
-            page_id = str(metadata.get("page_id") or "")
+        for hit in raw_hits:
+            fields = hit.fields if hasattr(hit, "fields") else {}
+            page_id = str(fields.get("page_id") or "")
             if not page_id:
                 continue
-            score = float(match.get("score", 0.0) if isinstance(match, dict) else (match.score or 0.0))
+            score = float(hit.score if hasattr(hit, "score") else 0.0)
             hits.append(
                 VectorSearchHit(
                     page_id=page_id,
-                    title=str(metadata.get("title") or page_id),
-                    space_key=str(metadata.get("space_key") or ""),
-                    heading=str(metadata.get("heading") or ""),
+                    title=str(fields.get("title") or page_id),
+                    space_key=str(fields.get("space_key") or ""),
+                    heading=str(fields.get("heading") or ""),
                     score=score,
-                    text=str(metadata.get("text") or ""),
-                    version=int(metadata.get("version") or 0) or None,
+                    text=str(fields.get("text") or ""),
+                    version=int(fields.get("version") or 0) or None,
                 )
             )
         return hits
@@ -214,33 +202,20 @@ class ConfluenceVectorIndex:
             names = [item["name"] if isinstance(item, dict) else item.name for item in existing]
             if self.index_name in names:
                 return
-            from pinecone import ServerlessSpec
-
-            pc.create_index(
+            # Create an integrated index — llama-text-embed-v2 embeds server-side.
+            # chunk_text is the field sent to the embedding model (fieldMap.text).
+            pc.create_index_for_model(
                 name=self.index_name,
-                dimension=self._embedding_dimension(),
-                metric="cosine",
-                spec=ServerlessSpec(cloud=self.cloud, region=self.region),
+                cloud=self.cloud,
+                region=self.region,
+                embed={
+                    "model": "llama-text-embed-v2",
+                    "field_map": {"text": "chunk_text"},
+                },
             )
         except Exception as exc:
-            logger.warning("Could not ensure Pinecone index %s: %s", self.index_name, exc)
+            logger.warning("Could not ensure Pinecone integrated index %s: %s", self.index_name, exc)
             raise
-
-    def _embed(self, texts: list[str]) -> list[list[float]]:
-        if self._openai is None:
-            self._openai = OpenAI()
-        request: dict[str, Any] = {"model": self.embedding_model, "input": texts}
-        if self.embedding_dimensions and self.embedding_model.startswith("text-embedding-3"):
-            request["dimensions"] = self.embedding_dimensions
-        response = self._openai.embeddings.create(**request)
-        return [list(item.embedding) for item in response.data]
-
-    def _embedding_dimension(self) -> int:
-        if self.embedding_dimensions:
-            return self.embedding_dimensions
-        if self.embedding_model == "text-embedding-3-large":
-            return 3072
-        return 1536
 
     def _embedding_text(self, chunk: PageChunk) -> str:
         return normalize_ws(
@@ -325,20 +300,19 @@ class ConfluenceVectorIndex:
             batch = chunk_ids[batch_start : batch_start + 100]
             try:
                 result = index.fetch(ids=batch, namespace=self.namespace)
-                vectors = (
-                    result.get("vectors", {})
-                    if isinstance(result, dict)
-                    else (result.vectors or {})
-                )
-                for vec_id, vec in (vectors or {}).items():
-                    page_id = vec_id.rsplit(":", 1)[0]
-                    metadata = (
-                        vec.get("metadata", {})
-                        if isinstance(vec, dict)
-                        else (vec.metadata or {})
-                    )
-                    stored_versions[page_id] = int(metadata.get("version") or 0) or None
-                    stored_hashes[page_id] = str(metadata.get("content_hash") or "")
+                # Standard index: result.vectors; integrated index fetch may use records.
+                if isinstance(result, dict):
+                    records = result.get("vectors") or result.get("records") or {}
+                else:
+                    records = getattr(result, "vectors", None) or getattr(result, "records", None) or {}
+                for rec_id, rec in (records or {}).items():
+                    page_id = rec_id.rsplit(":", 1)[0]
+                    if isinstance(rec, dict):
+                        fields = rec.get("metadata") or rec.get("fields") or {}
+                    else:
+                        fields = getattr(rec, "metadata", None) or getattr(rec, "fields", None) or {}
+                    stored_versions[page_id] = int(fields.get("version") or 0) or None
+                    stored_hashes[page_id] = str(fields.get("content_hash") or "")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("sync_index: Pinecone batch fetch failed: %s", exc)
                 # Treat all pages in this batch as stale so they get re-indexed.
