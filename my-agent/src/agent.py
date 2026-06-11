@@ -47,33 +47,6 @@ logger = logging.getLogger("agent")
 # finds its credentials regardless of the working directory at launch time.
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
-# ── Confluence RAG skip patterns ──────────────────────────────────────────────
-# Returns False (skip Pinecone) only for high-confidence meeting-only or
-# general-knowledge queries. Default is True (run Pinecone) when uncertain.
-_NO_CONFLUENCE_PATTERNS = re.compile(
-    r"""
-    # Meeting summary / recap
-    \b(summarize|summarise|recap|summary|recapped?)\b
-    # Action items / decisions from this meeting
-    | \baction\s+items?\b
-    | \b(key\s+)?(decisions?|takeaways?|outcomes?|conclusions?)\b
-    # "What did [someone] say/mention/talk about"
-    | \bwhat\s+did\s+\w+\s+(say|mention|talk|discuss|mean|suggest)\b
-    # Transcript recall: "earlier", "just now", "last [N] minutes", "so far"
-    | \b(earlier|just\s+now|so\s+far|at\s+the\s+(start|beginning|end))\b
-    | \blast\s+(\d+\s+)?(minute|min|hour|point|thing|part|topic)s?\b
-    # Math / time / date — no docs needed
-    | \b(what(\s+is|\s*'?s)?\s+)?(the\s+)?(time|date|day|year)\b
-    | \bhow\s+many\s+(days?|hours?|minutes?|weeks?|months?|years?)\b
-    | \b\d+\s*[\+\-\*\/]\s*\d+\b
-    # Meeting participants / who's in the call
-    | \bwho\s+(is|are|was|were|joined|spoke|said|talked)\b
-    | \bhow\s+many\s+people\b
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-
-
 _MEMORY_HEADER_RE = re.compile(
     r"^\[Compacted meeting memory\].*?Key retained context:\s*",
     re.IGNORECASE | re.DOTALL,
@@ -85,14 +58,6 @@ def _extract_topic_hint(memory: str, max_chars: int = 150) -> str:
     text = _MEMORY_HEADER_RE.sub("", (memory or "")).strip()
     text = re.sub(r"\s+", " ", text)
     return text[:max_chars].strip()
-
-
-def _needs_confluence(query: str) -> bool:
-    """Return False when the query is high-confidence meeting-only or general knowledge.
-
-    Conservative by design — returns True (run Pinecone) for any ambiguous query.
-    """
-    return _NO_CONFLUENCE_PATTERNS.search(query) is None
 
 
 # ── Wake word ─────────────────────────────────────────────────────────────────
@@ -134,7 +99,7 @@ _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 # Optional default repo (owner/repo) used when the user doesn't name one.
 _GITHUB_DEFAULT_REPO = os.getenv("GITHUB_DEFAULT_REPO", "")
 _BRIDGE_INTERNAL_URL = os.getenv("BRIDGE_INTERNAL_URL", "http://127.0.0.1:8000").rstrip("/")
-_OPENING_GREETING_DELAY_S = float(os.getenv("JARVIS_OPENING_GREETING_DELAY_SECONDS", "1.25"))
+_OPENING_GREETING_DELAY_S = float(os.getenv("JARVIS_OPENING_GREETING_DELAY_SECONDS", "0"))
 
 
 def _trim_text_to_char_budget(text: str, max_chars: int) -> str:
@@ -374,17 +339,6 @@ class Assistant(Agent):
             if _OPENING_GREETING_DELAY_S > 0:
                 await asyncio.sleep(_OPENING_GREETING_DELAY_S)
             try:
-                # Send a silent pre-roll first. This warms up the TTS HTTP
-                # connection and pre-fills the audio buffer so the Recall
-                # browser's audio pipeline is stable before the first audible
-                # word. Without this, the cold TTS connection + thin initial
-                # buffer causes the first 2-3 words to sound choppy.
-                pre_roll = self.session.say(
-                    "...",
-                    add_to_chat_ctx=False,
-                    allow_interruptions=False,
-                )
-                await pre_roll.wait_for_playout()
                 handle = self.session.say(
                     greeting,
                     add_to_chat_ctx=False,
@@ -449,8 +403,6 @@ class Assistant(Agent):
             logger.info("[Pinecone] skipped — Confluence disabled for this session")
         elif not self._confluence_rag.enabled:
             logger.info("[Pinecone] skipped — PINECONE_API_KEY not set in .env.local")
-        elif not _needs_confluence(query):
-            logger.info("[Pinecone] skipped — query classified as meeting/general: %.80r", query)
         else:
             try:
                 topic_hint = _extract_topic_hint(self._last_compacted_memory)
@@ -643,14 +595,7 @@ class JarvisCallAssistant(Agent):
     async def on_enter(self) -> None:
         if not self._greeted:
             self._greeted = True
-            await asyncio.sleep(0.5)
             try:
-                pre_roll = self.session.say(
-                    "...",
-                    add_to_chat_ctx=False,
-                    allow_interruptions=False,
-                )
-                await pre_roll.wait_for_playout()
                 handle = self.session.say(
                     "Hi! I'm Jarvis. I have the full context of your meeting. Ask me anything.",
                     add_to_chat_ctx=False,
