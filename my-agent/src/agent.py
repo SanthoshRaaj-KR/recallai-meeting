@@ -8,6 +8,7 @@ import re
 import requests
 import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -25,7 +26,6 @@ from livekit.agents import (
     llm,
     mcp,
     room_io,
-    stt as lk_stt,
 )
 from livekit import rtc
 from livekit.plugins import ai_coustics, assemblyai, cerebras, silero
@@ -34,8 +34,12 @@ from typing import AsyncIterable
 
 try:
     from .memory_compaction import TranscriptCompactor
+    from .confluence_rag import ConfluenceLiveRAG
+    from . import session_store
 except ImportError:  # Allows `python src/agent.py ...` from my-agent.
     from memory_compaction import TranscriptCompactor
+    from confluence_rag import ConfluenceLiveRAG
+    import session_store
 
 logger = logging.getLogger("agent")
 
@@ -43,14 +47,60 @@ logger = logging.getLogger("agent")
 # finds its credentials regardless of the working directory at launch time.
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
+# ── Confluence RAG skip patterns ──────────────────────────────────────────────
+# Returns False (skip Pinecone) only for high-confidence meeting-only or
+# general-knowledge queries. Default is True (run Pinecone) when uncertain.
+_NO_CONFLUENCE_PATTERNS = re.compile(
+    r"""
+    # Meeting summary / recap
+    \b(summarize|summarise|recap|summary|recapped?)\b
+    # Action items / decisions from this meeting
+    | \baction\s+items?\b
+    | \b(key\s+)?(decisions?|takeaways?|outcomes?|conclusions?)\b
+    # "What did [someone] say/mention/talk about"
+    | \bwhat\s+did\s+\w+\s+(say|mention|talk|discuss|mean|suggest)\b
+    # Transcript recall: "earlier", "just now", "last [N] minutes", "so far"
+    | \b(earlier|just\s+now|so\s+far|at\s+the\s+(start|beginning|end))\b
+    | \blast\s+(\d+\s+)?(minute|min|hour|point|thing|part|topic)s?\b
+    # Math / time / date — no docs needed
+    | \b(what(\s+is|\s*'?s)?\s+)?(the\s+)?(time|date|day|year)\b
+    | \bhow\s+many\s+(days?|hours?|minutes?|weeks?|months?|years?)\b
+    | \b\d+\s*[\+\-\*\/]\s*\d+\b
+    # Meeting participants / who's in the call
+    | \bwho\s+(is|are|was|were|joined|spoke|said|talked)\b
+    | \bhow\s+many\s+people\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+_MEMORY_HEADER_RE = re.compile(
+    r"^\[Compacted meeting memory\].*?Key retained context:\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_topic_hint(memory: str, max_chars: int = 150) -> str:
+    """Strip compacted-memory headers and return a short topic string for query enrichment."""
+    text = _MEMORY_HEADER_RE.sub("", (memory or "")).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_chars].strip()
+
+
+def _needs_confluence(query: str) -> bool:
+    """Return False when the query is high-confidence meeting-only or general knowledge.
+
+    Conservative by design — returns True (run Pinecone) for any ambiguous query.
+    """
+    return _NO_CONFLUENCE_PATTERNS.search(query) is None
+
+
 # ── Wake word ─────────────────────────────────────────────────────────────────
 # Matches "Jarvis", "Hey Jarvis", and common STT mis-transcriptions.
 _WAKE_PATTERN = re.compile(
     r"(?:hey\s+)?(?:jarvis|jarvas|jervis|jarvus)[,.\s!?]*\s*(.*)",
     re.IGNORECASE | re.DOTALL,
 )
-# Seconds to stay in listening mode after a bare "Jarvis" before timing out.
-_LISTENING_TIMEOUT_S = 10.0
 # Full in-memory transcript buffer — all utterances are kept here.
 _TRANSCRIPT_MAX = 500
 # ── Sliding window limits ─────────────────────────────────────────────────────
@@ -69,7 +119,7 @@ _RECENT_TRANSCRIPT_CHARS = int(
         str(_RECENT_TRANSCRIPT_TOKENS * _CHARS_PER_TOKEN_APPROX),
     )
 )
-_COMPACTED_MEMORY_TOKENS = int(os.getenv("JARVIS_COMPACTED_MEMORY_TOKENS", "2000"))
+_COMPACTED_MEMORY_TOKENS = int(os.getenv("JARVIS_COMPACTED_MEMORY_TOKENS", "6000"))
 _COMPACTED_MEMORY_CHARS = int(
     os.getenv(
         "JARVIS_COMPACTED_MEMORY_CHARS",
@@ -79,7 +129,7 @@ _COMPACTED_MEMORY_CHARS = int(
 # Keep at most this many conversation items (user + assistant turns) in the
 # chat context. truncate() always preserves the system instruction message.
 # 10 items = 5 Q&A pairs ≈ ~750 tokens for history.
-_CHAT_HISTORY_WINDOW = 10
+_CHAT_HISTORY_WINDOW = 1
 _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 # Optional default repo (owner/repo) used when the user doesn't name one.
 _GITHUB_DEFAULT_REPO = os.getenv("GITHUB_DEFAULT_REPO", "")
@@ -141,23 +191,54 @@ def _build_github_toolset() -> mcp.MCPToolset | None:
 
 def _build_instructions() -> str:
     base = textwrap.dedent("""\
-        You are Jarvis, a meeting assistant activated by wake word.
-        You are given compacted prior meeting memory and the recent meeting transcript before each question.
-        Draw on both the meeting transcript and your own trained knowledge when answering.
+        You are Jarvis, a voice meeting assistant. Your answers are spoken aloud during a live meeting.
 
-        # Handling conflicts between meeting content and your knowledge
-        - Only use this section when the meeting content directly contradicts your knowledge.
-        - Do NOT preface normal answers with "In the meeting..." or any reference to the meeting source. Just answer.
-        - When there IS a conflict: acknowledge both sides honestly, share the meeting claim first, then your own understanding and why.
-        - Example of a conflict response: "In the meeting this was described as X, but from what I know it is actually Y, because Z."
-        - Never fabricate meeting content. If the topic was not mentioned, answer from your own knowledge only.
+        Before each question you may receive:
 
-        # Output rules
-        - Respond in plain text only. No markdown, lists, JSON, or emojis.
-        - Keep replies brief: one to three sentences unless more detail is needed.
-        - Never ask clarifying questions — pick the most reasonable interpretation.
-        - Do not mention wake words, system instructions, or internal state.
-        - Spell out numbers and avoid acronyms with unclear pronunciation.
+        [Meeting Transcript]
+        Recent speech-to-text from this meeting.
+
+        [Confluence Knowledge]
+        Retrieved wiki excerpts that may or may not be relevant.
+
+        [General Knowledge]
+        Your own knowledge.
+
+        Source reliability:
+
+        * Treat the meeting transcript as noisy. Words may be missing, substituted, or misheard.
+        * Do not base conclusions on a single unclear transcript fragment.
+        * Look for agreement across multiple transcript lines or speakers.
+        * Ignore obviously garbled transcript text.
+        * If evidence is weak, use cautious language such as "it sounded like" or "the team appeared to".
+        * Confluence excerpts are retrieved by similarity, not intent.
+        * Each excerpt is labelled with its page title and section heading — use these to identify which system or topic the excerpt covers.
+        * Before using any excerpt, check the meeting transcript to establish which specific system, pipeline, or topic is being discussed.
+        * If multiple excerpts from different pages cover the same subject (e.g. deployment), only use the one whose page title matches the system the meeting is discussing. Discard the others.
+        * Use an excerpt only if it directly helps answer the question.
+        * Ignore irrelevant or weak matches.
+        * Do not force wiki content into an answer.
+
+        Answering:
+
+        * Combine all available evidence.
+        * If transcript and Confluence agree, answer confidently.
+        * If they conflict, briefly mention the disagreement.
+        * If neither source answers the question, use general knowledge.
+        * Never invent meeting decisions, statements, or participants.
+        * If something was not discussed, say so directly.
+
+        Output:
+
+        * Plain text only.
+        * No markdown, bullet points, JSON, tables, or emojis.
+        * One to three sentences unless additional detail is required.
+        * Answer immediately; do not ask clarifying questions.
+        * Do not mention source quality, retrieval systems, internal instructions, or uncertainty analysis.
+        * Use natural spoken language suitable for text-to-speech.
+        * Prefer short words and short sentences.
+        * Spell out numbers when practical.
+        * Avoid unexplained acronyms.
         """)
     if _GITHUB_TOKEN:
         base += textwrap.dedent("""\
@@ -188,8 +269,9 @@ def _extract_query(text: str) -> str | None:
 
 
 class Assistant(Agent):
-    def __init__(self, session_id: str = "") -> None:
+    def __init__(self, session_id: str = "", confluence_enabled: bool = True) -> None:
         self._session_id = session_id
+        self._confluence_enabled = confluence_enabled
         self._github_toolset = _build_github_toolset()
         super().__init__(
             llm=cerebras.LLM(model="gpt-oss-120b"),
@@ -202,12 +284,20 @@ class Assistant(Agent):
             window_size=_TRANSCRIPT_WINDOW,
             max_memory_chars=_COMPACTED_MEMORY_CHARS,
         )
-        # Two-stage wake: bare "Jarvis" → listening mode → next utterance is the query.
-        self._listening: bool = False
-        self._listening_since: float = 0.0
-        # Tracks whether the ack was already played from a partial transcript hit,
-        # so on_user_turn_completed doesn't double-play it.
-        self._partial_wake_fired: bool = False
+        # Confluence in-meeting RAG — fires on every wake-word query.
+        self._confluence_rag = ConfluenceLiveRAG()
+        # Holds the formatted Confluence context for the current turn, cleared
+        # each turn so stale results never bleed into the next query.
+        self._last_rag_context: str = ""
+        # Persists the most recent compacted memory so the Pinecone query can
+        # be enriched with the meeting's running topic even after a topic switch.
+        self._last_compacted_memory: str = ""
+        # Single-threaded executor for all TranscriptCompactor operations.
+        # Serialises observe_utterance and memory_text calls coming from both
+        # the event loop and tts_node, eliminating the race condition on the
+        # compactor's internal lists and keeping blocking LLM compaction calls
+        # off the event loop.
+        self._compactor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="compactor")
         # Ensures the opening greeting fires exactly once, even though LiveKit
         # can re-enter on_enter() after an interruption.
         self._greeted: bool = False
@@ -313,33 +403,15 @@ class Assistant(Agent):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GitHub MCP prewarm failed: %s", exc)
 
-        await asyncio.gather(_greet(), _warmup_mcp())
+        async def _warmup_rag() -> None:
+            if not self._confluence_rag.enabled:
+                return
+            try:
+                await asyncio.to_thread(self._confluence_rag.warmup)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Confluence RAG prewarm failed: %s", exc)
 
-    async def stt_node(
-        self,
-        audio: AsyncIterable[rtc.AudioFrame],
-        model_settings: ModelSettings,
-    ) -> AsyncIterable[lk_stt.SpeechEvent | str]:
-        """Spy on INTERIM transcripts to fire the 'Yes?' ack the moment 'Jarvis'
-        appears — before VAD silence and STT finalization (~200–400 ms earlier).
-        """
-        async for event in Agent.default.stt_node(self, audio, model_settings):
-            if (
-                not self._partial_wake_fired
-                and isinstance(event, lk_stt.SpeechEvent)
-                and event.type == lk_stt.SpeechEventType.INTERIM_TRANSCRIPT
-            ):
-                text = event.alternatives[0].text if event.alternatives else ""
-                if _WAKE_PATTERN.search(text):
-                    self._partial_wake_fired = True
-                    logger.info("Partial wake detected in interim — firing ack early")
-                    session = self.session
-
-                    async def _say_ack():
-                        await session.say("Yes?", add_to_chat_ctx=False)
-
-                    asyncio.create_task(_say_ack())
-            yield event
+        await asyncio.gather(_greet(), _warmup_mcp(), _warmup_rag())
 
     async def on_user_turn_completed(
         self,
@@ -353,49 +425,58 @@ class Assistant(Agent):
         wake word is detected.
         """
         raw = new_message.text_content or ""
-        # Snapshot and reset partial-wake flag for this turn.
-        partial_fired = self._partial_wake_fired
-        self._partial_wake_fired = False
 
         # Always buffer so the LLM has full meeting context when it is called.
         if raw.strip():
             self._transcript.append(raw.strip())
-            self._transcript_memory.observe_utterance(raw.strip())
+            asyncio.create_task(
+                self._run_in_compactor(self._transcript_memory.observe_utterance, raw.strip())
+            )
             self._post_transcript(raw.strip())
-
-        # ── Listening mode: bare "Jarvis" was just said, awaiting the query ──
-        if self._listening:
-            elapsed = time.perf_counter() - self._listening_since
-            self._listening = False
-            if elapsed > _LISTENING_TIMEOUT_S or not raw.strip():
-                logger.info("Wake listening timed out — suppressing LLM")
-                raise StopResponse()
-            logger.info("Listening mode query: %.80r", raw.strip())
-            self._refresh_transcript_in_ctx(turn_ctx, new_message)
-            new_message.content = [raw.strip()]
-            await self.update_chat_ctx(turn_ctx)
-            return
 
         query = _extract_query(raw)
 
-        # ── No wake word — regular meeting speech, suppress the LLM ──────────
-        if query is None:
-            logger.debug("No wake word — suppressing: %.60r", raw)
-            raise StopResponse()
-
-        # ── Bare wake word — acknowledge and wait for the follow-up ──────────
+        # ── No wake word or bare wake word — suppress the LLM silently ───────
         if not query:
-            logger.info("Wake word — entering listening mode (partial_fired=%s)", partial_fired)
-            self._listening = True
-            self._listening_since = time.perf_counter()
-            if not partial_fired:
-                # Partial detection already played the ack; skip to avoid double-play.
-                await self.session.say("Yes?", add_to_chat_ctx=False)
+            logger.debug("No wake word — suppressing: %.60r", raw)
             raise StopResponse()
 
         # ── Wake word + inline query — dispatch to LLM with meeting context ──
         logger.info("Wake query dispatched: %.80r", query)
-        self._refresh_transcript_in_ctx(turn_ctx, new_message)
+
+        self._last_rag_context = ""
+        if not self._confluence_enabled:
+            logger.info("[Pinecone] skipped — Confluence disabled for this session")
+        elif not self._confluence_rag.enabled:
+            logger.info("[Pinecone] skipped — PINECONE_API_KEY not set in .env.local")
+        elif not _needs_confluence(query):
+            logger.info("[Pinecone] skipped — query classified as meeting/general: %.80r", query)
+        else:
+            try:
+                topic_hint = _extract_topic_hint(self._last_compacted_memory)
+                enriched_query = self._confluence_rag.build_search_query(
+                    query, list(self._transcript), topic_hint=topic_hint
+                )
+                logger.info("[Pinecone] searching — enriched query: %.120r", enriched_query)
+                hits = await asyncio.to_thread(self._confluence_rag.search, enriched_query)
+                self._last_rag_context = self._confluence_rag.format_context(hits)
+                logger.info(
+                    "[Pinecone] %d chunk(s) will be injected into LLM context",
+                    len(hits),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Pinecone] lookup failed, continuing without Confluence context: %s", exc)
+
+        # Fetch compacted memory off the event loop — memory_text() may trigger
+        # a blocking LLM compaction call via force_compact().
+        compacted_memory = _trim_text_to_char_budget(
+            await self._run_in_compactor(self._transcript_memory.memory_text),
+            _COMPACTED_MEMORY_CHARS,
+        )
+        if compacted_memory:
+            self._last_compacted_memory = compacted_memory
+        self._refresh_transcript_in_ctx(turn_ctx, new_message, compacted_memory)
+        self._last_rag_context = ""  # consumed — clear so it cannot bleed into a subsequent turn
         new_message.content = [query]
         await self.update_chat_ctx(turn_ctx)
 
@@ -445,15 +526,25 @@ class Assistant(Agent):
         if reply:
             labelled = f"Jarvis: {reply}"
             self._transcript.append(labelled)
-            # observe_utterance can trigger a blocking LLM compaction call; run it
-            # in a thread so it never stalls the event loop between turns.
             asyncio.create_task(
-                asyncio.to_thread(self._transcript_memory.observe_utterance, labelled)
+                self._run_in_compactor(self._transcript_memory.observe_utterance, labelled)
             )
             self._post_transcript(reply, speaker="Jarvis")
 
+    async def _run_in_compactor(self, fn, *args):
+        """Run a TranscriptCompactor call in the dedicated single-threaded executor.
+
+        Using a single-threaded executor (max_workers=1) for all compactor
+        operations serialises observe_utterance and memory_text calls, eliminating
+        the race condition between the event-loop path (user utterances) and the
+        tts_node background path (Jarvis replies). Blocking OpenAI compaction
+        calls run off the event loop so they never stall audio I/O.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._compactor_executor, fn, *args)
+
     def _refresh_transcript_in_ctx(
-        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage, compacted_memory: str = ""
     ) -> None:
         """Replace the rolling transcript system message and apply memory windows.
 
@@ -488,14 +579,16 @@ class Assistant(Agent):
             list(self._transcript)[-_TRANSCRIPT_WINDOW:],
             _RECENT_TRANSCRIPT_CHARS,
         )
-        compacted_memory = _trim_text_to_char_budget(
-            self._transcript_memory.memory_text(),
-            _COMPACTED_MEMORY_CHARS,
-        )
         snapshot_parts = []
         if compacted_memory:
             snapshot_parts.append(compacted_memory)
         snapshot_parts.append("[Meeting transcript (recent)]\n" + "\n".join(recent))
+        if self._last_rag_context:
+            snapshot_parts.append("[Confluence Knowledge]\n" + self._last_rag_context)
+            logger.info(
+                "[Pinecone] Confluence context injected (%d chars)",
+                len(self._last_rag_context),
+            )
         snapshot = "\n\n".join(snapshot_parts)
 
         # Insert just before the pending user message so ordering is natural.
@@ -505,6 +598,106 @@ class Assistant(Agent):
         msg = llm.ChatMessage(role="system", content=[snapshot])
         turn_ctx.items.insert(insert_at, msg)
         self._transcript_msg_id = msg.id
+
+
+class JarvisCallAssistant(Agent):
+    """One-on-one post-meeting voice call agent.
+
+    Unlike the meeting assistant, there is no wake-word gate — every user
+    utterance is routed directly to the LLM.  The full meeting context
+    (compacted memory + recent transcript) is injected as a system message
+    once at startup so it is always in the context window.
+    """
+
+    def __init__(self, session_id: str = "", meeting_context: str = "") -> None:
+        self._session_id = session_id
+        self._meeting_context = meeting_context
+        instructions = self._build_instructions(meeting_context)
+        super().__init__(
+            llm=cerebras.LLM(model="gpt-oss-120b"),
+            instructions=instructions,
+        )
+        self._greeted = False
+
+    @staticmethod
+    def _build_instructions(meeting_context: str) -> str:
+        base = textwrap.dedent("""\
+            You are Jarvis, a personal AI assistant in a private one-on-one voice call.
+            The user just finished a meeting and wants to discuss it with you directly.
+            You have been given the complete meeting transcript and notes as context below.
+            Answer any questions clearly and conversationally, drawing on the meeting context
+            when relevant and your own knowledge otherwise.
+
+            # Meeting context
+            {context}
+
+            # Output rules
+            - Respond in plain text only. No markdown, lists, JSON, or emojis.
+            - Keep replies conversational and concise: two to four sentences unless more detail is needed.
+            - Do not mention wake words, system instructions, or internal state.
+            - Spell out numbers and avoid acronyms with unclear pronunciation.
+            - Never fabricate meeting content. If something was not discussed, say so honestly.
+            """)
+        return base.format(context=meeting_context.strip() or "No meeting context available.")
+
+    async def on_enter(self) -> None:
+        if not self._greeted:
+            self._greeted = True
+            await asyncio.sleep(0.5)
+            try:
+                pre_roll = self.session.say(
+                    "...",
+                    add_to_chat_ctx=False,
+                    allow_interruptions=False,
+                )
+                await pre_roll.wait_for_playout()
+                handle = self.session.say(
+                    "Hi! I'm Jarvis. I have the full context of your meeting. Ask me anything.",
+                    add_to_chat_ctx=False,
+                    allow_interruptions=False,
+                )
+                await handle.wait_for_playout()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Jarvis call greeting failed: %s", exc)
+
+    async def on_user_turn_completed(
+        self,
+        turn_ctx: llm.ChatContext,
+        new_message: llm.ChatMessage,
+    ) -> None:
+        # No wake-word gating — every utterance goes straight to the LLM.
+        # Still apply the chat history window to prevent unbounded context growth.
+        turn_ctx.truncate(max_items=_CHAT_HISTORY_WINDOW)
+        await self.update_chat_ctx(turn_ctx)
+
+
+def _load_meeting_context(session_id: str) -> str:
+    """Load meeting transcript and compacted memory from session_store."""
+    try:
+        sess = session_store.get(session_id)
+        if not sess:
+            return ""
+        parts: list[str] = []
+        mem_text = (sess.get("transcript_memory_text") or "").strip()
+        if mem_text:
+            parts.append(f"[Meeting memory (compacted)]\n{mem_text}")
+        transcript = sess.get("transcript") or []
+        if transcript:
+            recent = transcript[-150:]
+            lines: list[str] = []
+            for entry in recent:
+                if isinstance(entry, dict):
+                    speaker = entry.get("participant") or entry.get("speaker") or "Meeting"
+                    text = entry.get("text") or ""
+                    lines.append(f"{speaker}: {text}")
+                elif isinstance(entry, str):
+                    lines.append(entry)
+            if lines:
+                parts.append("[Meeting transcript (recent)]\n" + "\n".join(lines))
+        return "\n\n".join(parts)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load meeting context for jarvis call: %s", exc)
+        return ""
 
 
 server = AgentServer()
@@ -523,7 +716,52 @@ async def my_agent(ctx: JobContext):
         "room": ctx.room.name,
     }
 
-    # ── Detect Recall mode from dispatch metadata ─────────────────────────────
+    # ── Parse dispatch metadata ───────────────────────────────────────────────
+    mode = ""
+    session_id = ""
+    room_name = ""
+    confluence_enabled = False
+    try:
+        meta = json.loads(ctx.job.metadata or "{}")
+        mode = (meta.get("mode") or "").strip()
+        session_id = (meta.get("session_id") or "").strip()
+        # Legacy Recall bridge passes room_name directly without a mode field.
+        room_name = (meta.get("room_name") or "").strip()
+        confluence_enabled = bool(meta.get("confluence_enabled", False))
+    except (ValueError, TypeError):
+        pass
+
+    # ── Mode: one-on-one Jarvis call (post-meeting voice Q&A) ────────────────
+    if mode == "jarvis_call":
+        logger.info("Jarvis call mode — session_id=%s room=%s", session_id, ctx.room.name)
+        meeting_context = _load_meeting_context(session_id) if session_id else ""
+
+        session = AgentSession(
+            stt=assemblyai.STT(
+                model="u3-rt-pro",
+                language_detection=False,
+            ),
+            tts=inference.TTS(
+                model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+            ),
+            turn_detection=MultilingualModel(),
+            vad=ctx.proc.userdata["vad"],
+        )
+        await ctx.connect()
+        await session.start(
+            agent=JarvisCallAssistant(session_id=session_id, meeting_context=meeting_context),
+            room=ctx.room,
+            room_options=room_io.RoomOptions(
+                audio_input=room_io.AudioInputOptions(
+                    noise_cancellation=ai_coustics.audio_enhancement(
+                        model=ai_coustics.EnhancerModel.QUAIL_VF_S
+                    ),
+                ),
+            ),
+        )
+        return
+
+    # ── Mode: meeting assistant (wake-word activated, Recall bot audio) ───────
     # When recall_bridge.py dispatches this agent it passes:
     #   metadata = '{"room_name": "<uuid>"}'
     # The room_name is used to construct the Recall publisher's participant identity
@@ -532,13 +770,6 @@ async def my_agent(ctx: JobContext):
     #
     # When launched from the LiveKit Agents console or without metadata, room_name
     # is empty and the agent falls back to subscribing to all participants (normal mode).
-    room_name = ""
-    try:
-        meta = json.loads(ctx.job.metadata or "{}")
-        room_name = (meta.get("room_name") or "").strip()
-    except (ValueError, TypeError):
-        pass
-
     if room_name:
         logger.info("Recall mode — STT linked to participant: recall-browser-%s", room_name)
     else:
@@ -571,7 +802,7 @@ async def my_agent(ctx: JobContext):
         # and publishes it to LiveKit under this exact identity. Without this filter the
         # agent would try to subscribe to all participants and may not find the right track.
         await session.start(
-            agent=Assistant(session_id=room_name),
+            agent=Assistant(session_id=room_name, confluence_enabled=confluence_enabled),
             room=ctx.room,
             room_options=room_io.RoomOptions(
                 participant_identity=f"recall-browser-{room_name}",
@@ -581,7 +812,7 @@ async def my_agent(ctx: JobContext):
         # Standard mode (console / direct browser): subscribe to all participants
         # with background noise cancellation enabled.
         await session.start(
-            agent=Assistant(),
+            agent=Assistant(confluence_enabled=confluence_enabled),
             room=ctx.room,
             room_options=room_io.RoomOptions(
                 audio_input=room_io.AudioInputOptions(

@@ -274,6 +274,131 @@ class ConfluenceVectorIndex:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+    # ── Incremental sync ──────────────────────────────────────────────────────
+
+    def sync_index(
+        self,
+        page_listings: list[dict[str, Any]],
+        fetch_page_fn: Any,
+        progress_cb: Any | None = None,
+    ) -> dict[str, Any]:
+        """Incrementally re-index only Confluence pages that changed.
+
+        Algorithm (O(pages/100) Pinecone calls + O(changed) embed calls):
+
+        1. Batch-fetch the first chunk ``{page_id}:0`` for every page from
+           Pinecone in groups of 100.  The stored metadata holds the version
+           number and content hash that were current at index time.
+        2. Compare each page's live Confluence ``version.number`` (from the
+           listing) against the stored version.  Pages whose version increased
+           — or that aren't in Pinecone yet — are marked stale.
+        3. Only for stale pages: call ``fetch_page_fn(page_id)`` to pull the
+           full HTML, then rechunk + re-embed via the existing ``upsert_page``
+           path.  Fresh pages are skipped entirely.
+
+        Args:
+            page_listings:  Lightweight dicts from Confluence REST —
+                            at minimum ``{"page_id": str, "version": int|None}``.
+            fetch_page_fn:  Callable ``(page_id: str) -> PageCandidate`` that
+                            fetches the full page HTML.  Must be synchronous.
+            progress_cb:    Optional callable ``(done, total, page_title)``
+                            called after each page is processed.
+
+        Returns:
+            ``{"checked": int, "changed": int, "skipped": int, "failed": int}``
+        """
+        if not self.enabled:
+            logger.warning("sync_index: vector RAG is disabled — nothing to sync.")
+            return {"checked": 0, "changed": 0, "skipped": 0, "failed": 0}
+
+        checked = changed = skipped = failed = 0
+        total = len(page_listings)
+
+        # ── Step 1: batch-fetch stored versions from Pinecone ──────────────
+        # We only fetch chunk :0 per page — it carries content_hash and version
+        # in its metadata, which is all we need for the freshness check.
+        stored_versions: dict[str, int | None] = {}
+        stored_hashes: dict[str, str] = {}
+        chunk_ids = [f"{p['page_id']}:0" for p in page_listings if p.get("page_id")]
+        index = self._index()
+        for batch_start in range(0, len(chunk_ids), 100):
+            batch = chunk_ids[batch_start : batch_start + 100]
+            try:
+                result = index.fetch(ids=batch, namespace=self.namespace)
+                vectors = (
+                    result.get("vectors", {})
+                    if isinstance(result, dict)
+                    else (result.vectors or {})
+                )
+                for vec_id, vec in (vectors or {}).items():
+                    page_id = vec_id.rsplit(":", 1)[0]
+                    metadata = (
+                        vec.get("metadata", {})
+                        if isinstance(vec, dict)
+                        else (vec.metadata or {})
+                    )
+                    stored_versions[page_id] = int(metadata.get("version") or 0) or None
+                    stored_hashes[page_id] = str(metadata.get("content_hash") or "")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("sync_index: Pinecone batch fetch failed: %s", exc)
+                # Treat all pages in this batch as stale so they get re-indexed.
+                for cid in batch:
+                    pid = cid.rsplit(":", 1)[0]
+                    stored_versions.setdefault(pid, None)
+
+        # ── Step 2: compute the delta ──────────────────────────────────────
+        stale: list[dict[str, Any]] = []
+        for listing in page_listings:
+            pid = listing.get("page_id")
+            if not pid:
+                continue
+            live_version: int | None = listing.get("version")
+            pinecone_version = stored_versions.get(pid)
+            is_new = pid not in stored_versions
+            is_changed = (
+                live_version is not None
+                and pinecone_version is not None
+                and live_version > pinecone_version
+            )
+            if is_new or is_changed:
+                stale.append(listing)
+            else:
+                skipped += 1
+
+        logger.info(
+            "sync_index: %d pages total — %d stale / %d fresh",
+            total,
+            len(stale),
+            skipped,
+        )
+
+        # ── Step 3: re-embed only stale pages ─────────────────────────────
+        for listing in stale:
+            pid = listing["page_id"]
+            title = listing.get("title", pid)
+            try:
+                page = fetch_page_fn(pid)
+                self.upsert_page(page)
+                changed += 1
+                logger.debug("sync_index: re-indexed %r (page_id=%s)", title, pid)
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                logger.warning("sync_index: failed to re-index %r: %s", title, exc)
+            checked += 1
+            if progress_cb:
+                try:
+                    progress_cb(checked, len(stale), title)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        return {
+            "checked": checked,
+            "changed": changed,
+            "skipped": skipped,
+            "failed": failed,
+        }
+
+
 def chunk_page(page: PageCandidate, *, max_words: int = 350) -> list[PageChunk]:
     """Split one Confluence page into page-owned chunks.
 
@@ -310,13 +435,20 @@ def chunk_page(page: PageCandidate, *, max_words: int = 350) -> list[PageChunk]:
     return chunks
 
 
-def _split_text(text: str, *, max_words: int) -> list[str]:
+def _split_text(text: str, *, max_words: int, overlap: int = 50) -> list[str]:
     words = text.split()
     if len(words) <= max_words:
         return [text]
     paragraphs = [p.strip() for p in re.split(r"\n\n+", text) if p.strip()]
     if len(paragraphs) <= 1:
-        return [" ".join(words[idx : idx + max_words]) for idx in range(0, len(words), max_words)]
+        # Hard word-window path: slide by (max_words - overlap) so consecutive
+        # chunks share the last `overlap` words of the previous window.
+        step = max(1, max_words - overlap)
+        return [
+            " ".join(words[idx : idx + max_words])
+            for idx in range(0, len(words), step)
+            if words[idx : idx + max_words]
+        ]
 
     chunks: list[str] = []
     current: list[str] = []
@@ -325,8 +457,19 @@ def _split_text(text: str, *, max_words: int) -> list[str]:
         count = len(paragraph.split())
         if current and current_words + count > max_words:
             chunks.append("\n\n".join(current))
-            current = [paragraph]
-            current_words = count
+            # Carry forward trailing paragraphs that fit within the overlap budget
+            # so boundary sentences appear in both the outgoing and incoming chunk.
+            overlap_parts: list[str] = []
+            overlap_count = 0
+            for p in reversed(current):
+                p_count = len(p.split())
+                if overlap_count + p_count <= overlap:
+                    overlap_parts.insert(0, p)
+                    overlap_count += p_count
+                else:
+                    break
+            current = overlap_parts + [paragraph]
+            current_words = overlap_count + count
         else:
             current.append(paragraph)
             current_words += count
