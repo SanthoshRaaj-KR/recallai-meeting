@@ -607,6 +607,7 @@ async def _run_rag_sync(job_id: str) -> None:
             "changed": result["changed"],
             "skipped": result["skipped"],
             "failed": result["failed"],
+            "deleted": result.get("deleted", 0),
             "current_page": "",
             "finished_at": _utcnow(),
         })
@@ -646,6 +647,7 @@ async def start_rag_sync() -> dict:
         "changed": 0,
         "skipped": 0,
         "failed": 0,
+        "deleted": 0,
         "current_page": "Starting…",
         "error": None,
         "started_at": _utcnow(),

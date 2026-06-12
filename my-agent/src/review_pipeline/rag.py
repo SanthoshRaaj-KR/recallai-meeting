@@ -488,6 +488,30 @@ class ConfluenceVectorIndex:
             skipped,
         )
 
+        # ── Step 2.5: purge chunks for pages deleted from Confluence ───────
+        # The live set is everything Confluence returned. Any chunk in Pinecone
+        # whose page_id is NOT in this set belongs to a deleted page.
+        live_page_ids = {p["page_id"] for p in page_listings if p.get("page_id")}
+        deleted = 0
+        try:
+            orphan_ids: list[str] = []
+            for chunk_id in index.list(namespace=self.namespace):
+                pid = chunk_id.rsplit(":", 1)[0]
+                if pid not in live_page_ids:
+                    orphan_ids.append(chunk_id)
+            if orphan_ids:
+                for batch_start in range(0, len(orphan_ids), 1000):
+                    batch = orphan_ids[batch_start : batch_start + 1000]
+                    index.delete(ids=batch, namespace=self.namespace)
+                deleted = len(orphan_ids)
+                logger.info(
+                    "sync_index: purged %d orphan chunk(s) for %d deleted page(s)",
+                    deleted,
+                    len({cid.rsplit(":", 1)[0] for cid in orphan_ids}),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sync_index: orphan purge failed (non-fatal): %s", exc)
+
         # ── Step 3: re-embed only stale pages ─────────────────────────────
         for listing in stale:
             pid = listing["page_id"]
@@ -512,6 +536,7 @@ class ConfluenceVectorIndex:
             "changed": changed,
             "skipped": skipped,
             "failed": failed,
+            "deleted": deleted,
         }
 
 
