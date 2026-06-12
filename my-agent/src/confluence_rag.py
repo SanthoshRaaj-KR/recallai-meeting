@@ -100,9 +100,11 @@ class ConfluenceLiveRAG:
                 return cached_hits
         try:
             index = self._get_index()
+            # Fetch 3× more candidates than needed so the per-page diversity
+            # step below can deduplicate without running out of results.
             result = index.search(
                 namespace=self.namespace,
-                top_k=max(1, top_k),
+                top_k=max(1, top_k * 3),
                 inputs={"text": query.strip()},
                 fields=["page_id", "title", "space_key", "heading", "section_order", "text"],
             )
@@ -130,6 +132,20 @@ class ConfluenceLiveRAG:
                         "score": score,
                     }
                 )
+            # Per-page diversity: keep at most 1 chunk per page so a page with
+            # many indexed sections can't monopolise all top_k slots.  We fetch
+            # top_k * 3 from Pinecone, deduplicate by page_id, then truncate to
+            # top_k.  This ensures a second page always gets a slot when it
+            # scores above the threshold.
+            seen_pages: set[str] = set()
+            diverse_hits: list[dict[str, Any]] = []
+            for h in hits:
+                pid = h.get("page_id") or ""
+                if pid not in seen_pages:
+                    diverse_hits.append(h)
+                    seen_pages.add(pid)
+            hits = diverse_hits[:top_k]
+
             if hits:
                 titles = ", ".join(
                     f"{h['title']} › {h['heading']}" if h.get("heading") and h["heading"] != "Page intro"
@@ -208,6 +224,11 @@ class ConfluenceLiveRAG:
 
         The combined query is capped at JARVIS_CONFLUENCE_RAG_MAX_QUERY_CHARS
         (default 350) so the embedding model is never diluted by a wall of text.
+
+        topic_hint is only used when the question is vague (fewer than 5 words).
+        A specific question already carries enough topical signal — appending
+        compacted memory from a previous topic would bias the embedding toward
+        the old page instead of the one the user is now asking about.
         """
         q = re.sub(r"\s+", " ", question).strip()
 
@@ -230,9 +251,14 @@ class ConfluenceLiveRAG:
                 continue
             context_parts.append(text)
 
-        # Question first, then persistent topic hint, then recent transcript context.
+        # Question first, then persistent topic hint (only for vague questions),
+        # then recent transcript context.
         parts = [q]
-        if topic_hint:
+        # Only append topic_hint when the question itself is too short to carry
+        # enough topical signal (e.g. "what did we say?" or "elaborate on that").
+        # For specific multi-word questions the hint would pull the embedding
+        # toward the previous topic and cause the wrong page to be retrieved.
+        if topic_hint and len(q.split()) < 5:
             parts.append(topic_hint.strip())
         if context_parts:
             parts.append(" ".join(context_parts))

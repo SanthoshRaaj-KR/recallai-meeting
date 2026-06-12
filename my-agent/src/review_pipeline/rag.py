@@ -260,13 +260,17 @@ class ConfluenceVectorIndex:
         sorted_keys = sorted(rrf_scores, key=lambda k: rrf_scores[k], reverse=True)
         candidates = [best_hit[k] for k in sorted_keys[:50]]
 
-        if len(candidates) <= top_n:
-            for hit in candidates:
-                hit.score = rrf_scores.get(f"{hit.page_id}::{hit.heading}", 0.0)
-            return candidates
-
         # Step 3: Rerank merged candidates with Pinecone inference.
+        # Always rerank regardless of candidate count — without it, a page with many
+        # indexed sections dominates RRF purely by volume, not relevance.  The early
+        # exit that skipped reranking for small indices caused the wrong page to win
+        # when the index contains only 2–3 pages.
         rerank_query = normalize_ws(queries[0]) if queries else ""
+        if len(candidates) <= 1 or not rerank_query:
+            for hit in candidates[:top_n]:
+                hit.score = rrf_scores.get(f"{hit.page_id}::{hit.heading}", 0.0)
+            return candidates[:top_n]
+
         try:
             from pinecone import Pinecone
 
@@ -283,18 +287,36 @@ class ConfluenceVectorIndex:
                 model=rerank_model,
                 query=rerank_query,
                 documents=documents,
-                top_n=top_n,
+                top_n=min(top_n * 2, len(candidates)),  # fetch extra to allow diversity trim below
                 rank_fields=["text"],
                 return_documents=False,
                 parameters={"truncate": "END"},
             )
-            final: list[VectorSearchHit] = []
+            reranked: list[VectorSearchHit] = []
             for ranked in rerank_result.data:
                 idx = ranked.index
                 if idx < len(candidates):
                     hit = candidates[idx]
                     hit.score = float(ranked.score)
-                    final.append(hit)
+                    reranked.append(hit)
+
+            # Per-page diversity cap: no single page takes more than ceil(top_n/2) slots
+            # when multiple pages are candidates.  Prevents a large meeting-overview page
+            # from monopolising all slots for a topic-specific query.
+            unique_pages = {h.page_id for h in reranked}
+            if len(unique_pages) > 1:
+                per_page_cap = max(1, (top_n + 1) // 2)
+                page_counts: dict[str, int] = {}
+                final: list[VectorSearchHit] = []
+                for hit in reranked:
+                    if page_counts.get(hit.page_id, 0) < per_page_cap:
+                        final.append(hit)
+                        page_counts[hit.page_id] = page_counts.get(hit.page_id, 0) + 1
+                    if len(final) >= top_n:
+                        break
+            else:
+                final = reranked[:top_n]
+
             return final
         except Exception as exc:
             logger.warning("Reranking failed; falling back to RRF order: %s", exc)
