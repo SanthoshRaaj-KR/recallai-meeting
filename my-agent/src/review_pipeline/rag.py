@@ -2,17 +2,58 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from openai import OpenAI
-
 from .models import PageCandidate
 from .text_utils import extract_sections, html_to_text, normalize_ws
 
 logger = logging.getLogger(__name__)
+
+_BM25_K1 = 1.2
+_BM25_B = 0.75
+_BM25_BLEND = float(os.getenv("MY_AGENT_BM25_BLEND", "0.25"))
+
+
+def _tokenize_bm25(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _bm25_scores(query: str, texts: list[str]) -> list[float]:
+    """Compute BM25 scores for `texts` against `query`. Returns one score per text."""
+    q_terms = _tokenize_bm25(query)
+    if not q_terms or not texts:
+        return [0.0] * len(texts)
+
+    tokenized = [_tokenize_bm25(t) for t in texts]
+    lengths = [len(tok) for tok in tokenized]
+    avgdl = sum(lengths) / max(len(lengths), 1)
+    n = len(texts)
+
+    # document frequency per term
+    df: dict[str, int] = {}
+    for tok in tokenized:
+        for term in set(tok):
+            df[term] = df.get(term, 0) + 1
+
+    scores: list[float] = []
+    for tok, dl in zip(tokenized, lengths):
+        tf: dict[str, int] = {}
+        for term in tok:
+            tf[term] = tf.get(term, 0) + 1
+        score = 0.0
+        for term in q_terms:
+            if term not in df:
+                continue
+            idf = math.log((n - df[term] + 0.5) / (df[term] + 0.5) + 1)
+            f = tf.get(term, 0)
+            denom = f + _BM25_K1 * (1 - _BM25_B + _BM25_B * dl / max(avgdl, 1))
+            score += idf * (f * (_BM25_K1 + 1)) / max(denom, 1e-9)
+        scores.append(score)
+    return scores
 
 
 @dataclass
@@ -63,18 +104,6 @@ class ConfluenceVectorIndex:
             or os.getenv("PINECONE_NAMESPACE")
             or "confluence-review"
         ).strip()
-        self.embedding_model = (
-            os.getenv("MY_AGENT_RAG_EMBEDDING_MODEL")
-            or os.getenv("OPENAI_EMBEDDING_MODEL")
-            or "text-embedding-3-small"
-        ).strip()
-        configured_dims = (
-            os.getenv("MY_AGENT_RAG_EMBEDDING_DIMENSIONS")
-            or os.getenv("OPENAI_EMBEDDING_DIMENSIONS")
-            or os.getenv("PINECONE_INDEX_DIMENSION")
-            or ""
-        ).strip()
-        self.embedding_dimensions = int(configured_dims) if configured_dims else None
         self.max_chunk_words = int(os.getenv("MY_AGENT_RAG_CHUNK_WORDS", "350"))
         self.max_metadata_chars = int(os.getenv("MY_AGENT_RAG_METADATA_CHARS", "5000"))
         self.create_index = os.getenv("MY_AGENT_RAG_CREATE_INDEX", "0").strip().lower() in {
@@ -85,7 +114,6 @@ class ConfluenceVectorIndex:
         }
         self.cloud = os.getenv("PINECONE_CLOUD", "aws").strip()
         self.region = os.getenv("PINECONE_REGION", "us-east-1").strip()
-        self._openai: OpenAI | None = None
         self._pinecone_index: Any | None = None
         self._disabled_reason: str | None = None
 
@@ -111,30 +139,28 @@ class ConfluenceVectorIndex:
         chunks = chunk_page(page, max_words=self.max_chunk_words)
         if not chunks:
             return
-        embeddings = self._embed([self._embedding_text(chunk) for chunk in chunks])
-        vectors = []
-        for chunk, embedding in zip(chunks, embeddings):
-            vectors.append(
-                {
-                    "id": chunk.id,
-                    "values": embedding,
-                    "metadata": {
-                        "page_id": chunk.page_id,
-                        "title": chunk.title,
-                        "space_key": chunk.space_key,
-                        "heading": chunk.heading,
-                        "section_order": chunk.section_order,
-                        "chunk_order": chunk.chunk_order,
-                        "version": chunk.version or 0,
-                        "content_hash": content_hash,
-                        "chunk_count": len(chunks),
-                        "text": chunk.text[: self.max_metadata_chars],
-                    },
-                }
-            )
         index = self._index()
-        for start in range(0, len(vectors), 100):
-            index.upsert(vectors=vectors[start : start + 100], namespace=self.namespace)
+        # Integrated index: Pinecone embeds `chunk_text` server-side (llama-text-embed-v2).
+        # `text` is stored as display metadata; `chunk_text` is what gets embedded.
+        records = [
+            {
+                "_id": chunk.id,
+                "chunk_text": self._embedding_text(chunk)[: self.max_metadata_chars],
+                "text": chunk.text[: self.max_metadata_chars],
+                "page_id": chunk.page_id,
+                "title": chunk.title,
+                "space_key": chunk.space_key,
+                "heading": chunk.heading,
+                "section_order": chunk.section_order,
+                "chunk_order": chunk.chunk_order,
+                "version": chunk.version or 0,
+                "content_hash": content_hash,
+                "chunk_count": len(chunks),
+            }
+            for chunk in chunks
+        ]
+        for start in range(0, len(records), 96):
+            index.upsert_records(namespace=self.namespace, records=records[start : start + 96])
         self._delete_stale_chunks(page.page_id, len(chunks))
 
     def _indexed_page_is_fresh(self, page: PageCandidate, content_hash: str) -> bool:
@@ -142,13 +168,21 @@ class ConfluenceVectorIndex:
             return False
         try:
             result = self._index().fetch(ids=[f"{page.page_id}:0"], namespace=self.namespace)
-            vectors = result.get("vectors", {}) if isinstance(result, dict) else (result.vectors or {})
-            first = vectors.get(f"{page.page_id}:0")
+            # Standard index: result.vectors; integrated index fetch may return vectors or records.
+            if isinstance(result, dict):
+                records = result.get("vectors") or result.get("records") or {}
+            else:
+                records = getattr(result, "vectors", None) or getattr(result, "records", None) or {}
+            first = records.get(f"{page.page_id}:0")
             if not first:
                 return False
-            metadata = first.get("metadata", {}) if isinstance(first, dict) else (first.metadata or {})
-            indexed_hash = str(metadata.get("content_hash") or "")
-            indexed_version = int(metadata.get("version") or 0) or None
+            # Standard index stores fields in .metadata; integrated may use .fields.
+            if isinstance(first, dict):
+                fields = first.get("metadata") or first.get("fields") or {}
+            else:
+                fields = getattr(first, "metadata", None) or getattr(first, "fields", None) or {}
+            indexed_hash = str(fields.get("content_hash") or "")
+            indexed_version = int(fields.get("version") or 0) or None
             if page.version is not None and indexed_version == page.version and indexed_hash == content_hash:
                 return True
             if page.version is None and indexed_hash == content_hash:
@@ -165,34 +199,183 @@ class ConfluenceVectorIndex:
         clean_query = normalize_ws(query)
         if not clean_query:
             return []
-        embedding = self._embed([clean_query])[0]
-        result = self._index().query(
-            vector=embedding,
-            top_k=max(1, top_k),
+        result = self._index().search(
             namespace=self.namespace,
-            include_metadata=True,
-            include_values=False,
+            top_k=max(1, top_k),
+            inputs={"text": clean_query},
+            fields=["page_id", "title", "space_key", "heading", "text", "version"],
         )
-        matches = result.get("matches", []) if isinstance(result, dict) else result.matches
         hits: list[VectorSearchHit] = []
-        for match in matches or []:
-            metadata = match.get("metadata", {}) if isinstance(match, dict) else (match.metadata or {})
-            page_id = str(metadata.get("page_id") or "")
+        for match in getattr(getattr(result, "result", result), "hits", []):
+            fields = match.fields if hasattr(match, "fields") else {}
+            page_id = str(fields.get("page_id") or "")
             if not page_id:
                 continue
-            score = float(match.get("score", 0.0) if isinstance(match, dict) else (match.score or 0.0))
             hits.append(
                 VectorSearchHit(
                     page_id=page_id,
-                    title=str(metadata.get("title") or page_id),
-                    space_key=str(metadata.get("space_key") or ""),
-                    heading=str(metadata.get("heading") or ""),
-                    score=score,
-                    text=str(metadata.get("text") or ""),
-                    version=int(metadata.get("version") or 0) or None,
+                    title=str(fields.get("title") or page_id),
+                    space_key=str(fields.get("space_key") or ""),
+                    heading=str(fields.get("heading") or ""),
+                    score=float(getattr(match, "score", 0.0)),
+                    text=str(fields.get("text") or ""),
+                    version=int(fields.get("version") or 0) or None,
                 )
             )
         return hits
+
+    def search_with_rerank(
+        self,
+        queries: list[str],
+        *,
+        top_k_per_query: int = 25,
+        top_n: int = 8,
+        rerank_model: str = "bge-reranker-v2-m3",
+    ) -> list[VectorSearchHit]:
+        """Multi-query Pinecone search with RRF fusion and reranking.
+
+        1. Runs each query against the index at top_k_per_query.
+        2. Merges all hits via Reciprocal Rank Fusion keyed on (page_id, heading).
+        3. Reranks the top-50 merged candidates with the specified reranker.
+        4. Returns up to top_n hits ordered by rerank score.
+        """
+        if not self.enabled or not queries:
+            return []
+
+        index = self._index()
+
+        # Step 1: Search each query via Pinecone integrated inference (llama-text-embed-v2).
+        clean_queries = [normalize_ws(q) for q in queries[:5] if normalize_ws(q)]
+
+        query_hit_lists: list[list[tuple[int, VectorSearchHit]]] = []
+        for clean in clean_queries:
+            try:
+                logger.info("Querying index with top_k=%d", top_k_per_query)
+                result = index.search(
+                    namespace=self.namespace,
+                    top_k=max(1, top_k_per_query),
+                    inputs={"text": clean},
+                    fields=["page_id", "title", "space_key", "heading", "text", "version"],
+                )
+                ranked: list[tuple[int, VectorSearchHit]] = []
+                hits_iter = getattr(getattr(result, "result", result), "hits", [])
+                for rank, match in enumerate(hits_iter):
+                    fields = match.fields if hasattr(match, "fields") else {}
+                    page_id = str(fields.get("page_id") or "")
+                    if not page_id:
+                        continue
+                    ranked.append((
+                        rank,
+                        VectorSearchHit(
+                            page_id=page_id,
+                            title=str(fields.get("title") or page_id),
+                            space_key=str(fields.get("space_key") or ""),
+                            heading=str(fields.get("heading") or ""),
+                            score=float(getattr(match, "score", 0.0)),
+                            text=str(fields.get("text") or ""),
+                            version=int(fields.get("version") or 0) or None,
+                        ),
+                    ))
+                query_hit_lists.append(ranked)
+            except Exception as exc:
+                logger.warning("search_with_rerank query failed: %s", exc)
+                query_hit_lists.append([])
+
+        # Step 2: RRF fusion — key on (page_id, heading) so each unique section
+        # accumulates score from however many queries returned it.
+        _K = 60
+        rrf_scores: dict[str, float] = {}
+        best_hit: dict[str, VectorSearchHit] = {}
+        for ranked_list in query_hit_lists:
+            for rank, hit in ranked_list:
+                key = f"{hit.page_id}::{hit.heading}"
+                rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (_K + rank)
+                if key not in best_hit or hit.score > best_hit[key].score:
+                    best_hit[key] = hit
+
+        if not best_hit:
+            return []
+
+        # Blend BM25 scores into RRF scores so exact-term hits (version numbers,
+        # IDs, names) don't get buried by dense-only ranking.
+        if _BM25_BLEND > 0 and any(queries):
+            bm25_query = " ".join(q for q in queries[:5] if q)
+            candidate_texts = [normalize_ws(f"{best_hit[k].title} {best_hit[k].heading} {best_hit[k].text or ''}") for k in rrf_scores]
+            raw_bm25 = _bm25_scores(bm25_query, candidate_texts)
+            max_bm25 = max(raw_bm25) if raw_bm25 else 0.0
+            max_rrf = max(rrf_scores.values()) if rrf_scores else 0.0
+            for key, bm25_val in zip(list(rrf_scores.keys()), raw_bm25):
+                norm_bm25 = bm25_val / max(max_bm25, 1e-9)
+                norm_rrf = rrf_scores[key] / max(max_rrf, 1e-9)
+                rrf_scores[key] = (1 - _BM25_BLEND) * norm_rrf + _BM25_BLEND * norm_bm25
+
+        # Sort by blended score, take top-50 for reranking.
+        sorted_keys = sorted(rrf_scores, key=lambda k: rrf_scores[k], reverse=True)
+        candidates = [best_hit[k] for k in sorted_keys[:50]]
+
+        # Step 3: Rerank merged candidates with Pinecone inference.
+        # Always rerank regardless of candidate count — without it, a page with many
+        # indexed sections dominates RRF purely by volume, not relevance.  The early
+        # exit that skipped reranking for small indices caused the wrong page to win
+        # when the index contains only 2–3 pages.
+        rerank_query = normalize_ws(" ".join(q for q in queries[:5] if q)) if queries else ""
+        if len(candidates) <= 1 or not rerank_query:
+            for hit in candidates[:top_n]:
+                hit.score = rrf_scores.get(f"{hit.page_id}::{hit.heading}", 0.0)
+            return candidates[:top_n]
+
+        try:
+            from pinecone import Pinecone
+
+            pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY", "").strip())
+            documents = [
+                {
+                    "text": normalize_ws(
+                        f"Title: {hit.title}\nHeading: {hit.heading}\n{hit.text or ''}"
+                    )[:2000]
+                }
+                for hit in candidates
+            ]
+            rerank_result = pc.inference.rerank(
+                model=rerank_model,
+                query=rerank_query,
+                documents=documents,
+                top_n=min(top_n * 2, len(candidates)),  # fetch extra to allow diversity trim below
+                rank_fields=["text"],
+                return_documents=False,
+                parameters={"truncate": "END"},
+            )
+            reranked: list[VectorSearchHit] = []
+            for ranked in rerank_result.data:
+                idx = ranked.index
+                if idx < len(candidates):
+                    hit = candidates[idx]
+                    hit.score = float(ranked.score)
+                    reranked.append(hit)
+
+            # Per-page diversity cap: no single page takes more than ceil(top_n/2) slots
+            # when multiple pages are candidates.  Prevents a large meeting-overview page
+            # from monopolising all slots for a topic-specific query.
+            unique_pages = {h.page_id for h in reranked}
+            if len(unique_pages) > 1:
+                per_page_cap = max(1, (top_n + 1) // 2)
+                page_counts: dict[str, int] = {}
+                final: list[VectorSearchHit] = []
+                for hit in reranked:
+                    if page_counts.get(hit.page_id, 0) < per_page_cap:
+                        final.append(hit)
+                        page_counts[hit.page_id] = page_counts.get(hit.page_id, 0) + 1
+                    if len(final) >= top_n:
+                        break
+            else:
+                final = reranked[:top_n]
+
+            return final
+        except Exception as exc:
+            logger.warning("Reranking failed; falling back to RRF order: %s", exc)
+            for hit in candidates[:top_n]:
+                hit.score = rrf_scores.get(f"{hit.page_id}::{hit.heading}", 0.0)
+            return candidates[:top_n]
 
     def _index(self) -> Any:
         if self._pinecone_index is not None:
@@ -214,33 +397,20 @@ class ConfluenceVectorIndex:
             names = [item["name"] if isinstance(item, dict) else item.name for item in existing]
             if self.index_name in names:
                 return
-            from pinecone import ServerlessSpec
-
-            pc.create_index(
+            # Create an integrated index — llama-text-embed-v2 embeds server-side.
+            # chunk_text is the field sent to the embedding model (fieldMap.text).
+            pc.create_index_for_model(
                 name=self.index_name,
-                dimension=self._embedding_dimension(),
-                metric="cosine",
-                spec=ServerlessSpec(cloud=self.cloud, region=self.region),
+                cloud=self.cloud,
+                region=self.region,
+                embed={
+                    "model": "llama-text-embed-v2",
+                    "field_map": {"text": "chunk_text"},
+                },
             )
         except Exception as exc:
-            logger.warning("Could not ensure Pinecone index %s: %s", self.index_name, exc)
+            logger.warning("Could not ensure Pinecone integrated index %s: %s", self.index_name, exc)
             raise
-
-    def _embed(self, texts: list[str]) -> list[list[float]]:
-        if self._openai is None:
-            self._openai = OpenAI()
-        request: dict[str, Any] = {"model": self.embedding_model, "input": texts}
-        if self.embedding_dimensions and self.embedding_model.startswith("text-embedding-3"):
-            request["dimensions"] = self.embedding_dimensions
-        response = self._openai.embeddings.create(**request)
-        return [list(item.embedding) for item in response.data]
-
-    def _embedding_dimension(self) -> int:
-        if self.embedding_dimensions:
-            return self.embedding_dimensions
-        if self.embedding_model == "text-embedding-3-large":
-            return 3072
-        return 1536
 
     def _embedding_text(self, chunk: PageChunk) -> str:
         return normalize_ws(
@@ -325,20 +495,19 @@ class ConfluenceVectorIndex:
             batch = chunk_ids[batch_start : batch_start + 100]
             try:
                 result = index.fetch(ids=batch, namespace=self.namespace)
-                vectors = (
-                    result.get("vectors", {})
-                    if isinstance(result, dict)
-                    else (result.vectors or {})
-                )
-                for vec_id, vec in (vectors or {}).items():
-                    page_id = vec_id.rsplit(":", 1)[0]
-                    metadata = (
-                        vec.get("metadata", {})
-                        if isinstance(vec, dict)
-                        else (vec.metadata or {})
-                    )
-                    stored_versions[page_id] = int(metadata.get("version") or 0) or None
-                    stored_hashes[page_id] = str(metadata.get("content_hash") or "")
+                # Standard index: result.vectors; integrated index fetch may use records.
+                if isinstance(result, dict):
+                    records = result.get("vectors") or result.get("records") or {}
+                else:
+                    records = getattr(result, "vectors", None) or getattr(result, "records", None) or {}
+                for rec_id, rec in (records or {}).items():
+                    page_id = rec_id.rsplit(":", 1)[0]
+                    if isinstance(rec, dict):
+                        fields = rec.get("metadata") or rec.get("fields") or {}
+                    else:
+                        fields = getattr(rec, "metadata", None) or getattr(rec, "fields", None) or {}
+                    stored_versions[page_id] = int(fields.get("version") or 0) or None
+                    stored_hashes[page_id] = str(fields.get("content_hash") or "")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("sync_index: Pinecone batch fetch failed: %s", exc)
                 # Treat all pages in this batch as stale so they get re-indexed.
@@ -372,6 +541,30 @@ class ConfluenceVectorIndex:
             skipped,
         )
 
+        # ── Step 2.5: purge chunks for pages deleted from Confluence ───────
+        # The live set is everything Confluence returned. Any chunk in Pinecone
+        # whose page_id is NOT in this set belongs to a deleted page.
+        live_page_ids = {p["page_id"] for p in page_listings if p.get("page_id")}
+        deleted = 0
+        try:
+            orphan_ids: list[str] = []
+            for chunk_id in index.list(namespace=self.namespace):
+                pid = chunk_id.rsplit(":", 1)[0]
+                if pid not in live_page_ids:
+                    orphan_ids.append(chunk_id)
+            if orphan_ids:
+                for batch_start in range(0, len(orphan_ids), 1000):
+                    batch = orphan_ids[batch_start : batch_start + 1000]
+                    index.delete(ids=batch, namespace=self.namespace)
+                deleted = len(orphan_ids)
+                logger.info(
+                    "sync_index: purged %d orphan chunk(s) for %d deleted page(s)",
+                    deleted,
+                    len({cid.rsplit(":", 1)[0] for cid in orphan_ids}),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sync_index: orphan purge failed (non-fatal): %s", exc)
+
         # ── Step 3: re-embed only stale pages ─────────────────────────────
         for listing in stale:
             pid = listing["page_id"]
@@ -396,6 +589,7 @@ class ConfluenceVectorIndex:
             "changed": changed,
             "skipped": skipped,
             "failed": failed,
+            "deleted": deleted,
         }
 
 
