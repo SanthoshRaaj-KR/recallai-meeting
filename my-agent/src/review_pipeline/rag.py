@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -11,6 +12,48 @@ from .models import PageCandidate
 from .text_utils import extract_sections, html_to_text, normalize_ws
 
 logger = logging.getLogger(__name__)
+
+_BM25_K1 = 1.2
+_BM25_B = 0.75
+_BM25_BLEND = float(os.getenv("MY_AGENT_BM25_BLEND", "0.25"))
+
+
+def _tokenize_bm25(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _bm25_scores(query: str, texts: list[str]) -> list[float]:
+    """Compute BM25 scores for `texts` against `query`. Returns one score per text."""
+    q_terms = _tokenize_bm25(query)
+    if not q_terms or not texts:
+        return [0.0] * len(texts)
+
+    tokenized = [_tokenize_bm25(t) for t in texts]
+    lengths = [len(tok) for tok in tokenized]
+    avgdl = sum(lengths) / max(len(lengths), 1)
+    n = len(texts)
+
+    # document frequency per term
+    df: dict[str, int] = {}
+    for tok in tokenized:
+        for term in set(tok):
+            df[term] = df.get(term, 0) + 1
+
+    scores: list[float] = []
+    for tok, dl in zip(tokenized, lengths):
+        tf: dict[str, int] = {}
+        for term in tok:
+            tf[term] = tf.get(term, 0) + 1
+        score = 0.0
+        for term in q_terms:
+            if term not in df:
+                continue
+            idf = math.log((n - df[term] + 0.5) / (df[term] + 0.5) + 1)
+            f = tf.get(term, 0)
+            denom = f + _BM25_K1 * (1 - _BM25_B + _BM25_B * dl / max(avgdl, 1))
+            score += idf * (f * (_BM25_K1 + 1)) / max(denom, 1e-9)
+        scores.append(score)
+    return scores
 
 
 @dataclass
@@ -97,10 +140,11 @@ class ConfluenceVectorIndex:
         if not chunks:
             return
         index = self._index()
+        # Integrated index: Pinecone embeds `chunk_text` server-side (llama-text-embed-v2).
+        # `text` is stored as display metadata; `chunk_text` is what gets embedded.
         records = [
             {
                 "_id": chunk.id,
-                # chunk_text is the fieldMap.text field — embedded server-side by llama-text-embed-v2.
                 "chunk_text": self._embedding_text(chunk)[: self.max_metadata_chars],
                 "text": chunk.text[: self.max_metadata_chars],
                 "page_id": chunk.page_id,
@@ -159,23 +203,21 @@ class ConfluenceVectorIndex:
             namespace=self.namespace,
             top_k=max(1, top_k),
             inputs={"text": clean_query},
-            fields=["page_id", "title", "space_key", "heading", "section_order", "version", "text"],
+            fields=["page_id", "title", "space_key", "heading", "text", "version"],
         )
-        raw_hits = result.result.hits if hasattr(result, "result") else []
         hits: list[VectorSearchHit] = []
-        for hit in raw_hits:
-            fields = hit.fields if hasattr(hit, "fields") else {}
+        for match in getattr(getattr(result, "result", result), "hits", []):
+            fields = match.fields if hasattr(match, "fields") else {}
             page_id = str(fields.get("page_id") or "")
             if not page_id:
                 continue
-            score = float(hit.score if hasattr(hit, "score") else 0.0)
             hits.append(
                 VectorSearchHit(
                     page_id=page_id,
                     title=str(fields.get("title") or page_id),
                     space_key=str(fields.get("space_key") or ""),
                     heading=str(fields.get("heading") or ""),
-                    score=score,
+                    score=float(getattr(match, "score", 0.0)),
                     text=str(fields.get("text") or ""),
                     version=int(fields.get("version") or 0) or None,
                 )
@@ -201,26 +243,24 @@ class ConfluenceVectorIndex:
             return []
 
         index = self._index()
-        _FIELDS = ["page_id", "title", "space_key", "heading", "section_order", "version", "text"]
 
-        # Step 1: Run each query and collect ranked hits per query.
+        # Step 1: Search each query via Pinecone integrated inference (llama-text-embed-v2).
+        clean_queries = [normalize_ws(q) for q in queries[:5] if normalize_ws(q)]
+
         query_hit_lists: list[list[tuple[int, VectorSearchHit]]] = []
-        for q in queries[:5]:
-            clean = normalize_ws(q)
-            if not clean:
-                query_hit_lists.append([])
-                continue
+        for clean in clean_queries:
             try:
+                logger.info("Querying index with top_k=%d", top_k_per_query)
                 result = index.search(
                     namespace=self.namespace,
                     top_k=max(1, top_k_per_query),
                     inputs={"text": clean},
-                    fields=_FIELDS,
+                    fields=["page_id", "title", "space_key", "heading", "text", "version"],
                 )
-                raw_hits = result.result.hits if hasattr(result, "result") else []
                 ranked: list[tuple[int, VectorSearchHit]] = []
-                for rank, hit in enumerate(raw_hits):
-                    fields = hit.fields if hasattr(hit, "fields") else {}
+                hits_iter = getattr(getattr(result, "result", result), "hits", [])
+                for rank, match in enumerate(hits_iter):
+                    fields = match.fields if hasattr(match, "fields") else {}
                     page_id = str(fields.get("page_id") or "")
                     if not page_id:
                         continue
@@ -231,7 +271,7 @@ class ConfluenceVectorIndex:
                             title=str(fields.get("title") or page_id),
                             space_key=str(fields.get("space_key") or ""),
                             heading=str(fields.get("heading") or ""),
-                            score=float(hit.score if hasattr(hit, "score") else 0.0),
+                            score=float(getattr(match, "score", 0.0)),
                             text=str(fields.get("text") or ""),
                             version=int(fields.get("version") or 0) or None,
                         ),
@@ -256,7 +296,20 @@ class ConfluenceVectorIndex:
         if not best_hit:
             return []
 
-        # Sort by RRF score, take top-50 for reranking.
+        # Blend BM25 scores into RRF scores so exact-term hits (version numbers,
+        # IDs, names) don't get buried by dense-only ranking.
+        if _BM25_BLEND > 0 and any(queries):
+            bm25_query = " ".join(q for q in queries[:5] if q)
+            candidate_texts = [normalize_ws(f"{best_hit[k].title} {best_hit[k].heading} {best_hit[k].text or ''}") for k in rrf_scores]
+            raw_bm25 = _bm25_scores(bm25_query, candidate_texts)
+            max_bm25 = max(raw_bm25) if raw_bm25 else 0.0
+            max_rrf = max(rrf_scores.values()) if rrf_scores else 0.0
+            for key, bm25_val in zip(list(rrf_scores.keys()), raw_bm25):
+                norm_bm25 = bm25_val / max(max_bm25, 1e-9)
+                norm_rrf = rrf_scores[key] / max(max_rrf, 1e-9)
+                rrf_scores[key] = (1 - _BM25_BLEND) * norm_rrf + _BM25_BLEND * norm_bm25
+
+        # Sort by blended score, take top-50 for reranking.
         sorted_keys = sorted(rrf_scores, key=lambda k: rrf_scores[k], reverse=True)
         candidates = [best_hit[k] for k in sorted_keys[:50]]
 
@@ -265,7 +318,7 @@ class ConfluenceVectorIndex:
         # indexed sections dominates RRF purely by volume, not relevance.  The early
         # exit that skipped reranking for small indices caused the wrong page to win
         # when the index contains only 2–3 pages.
-        rerank_query = normalize_ws(queries[0]) if queries else ""
+        rerank_query = normalize_ws(" ".join(q for q in queries[:5] if q)) if queries else ""
         if len(candidates) <= 1 or not rerank_query:
             for hit in candidates[:top_n]:
                 hit.score = rrf_scores.get(f"{hit.page_id}::{hit.heading}", 0.0)

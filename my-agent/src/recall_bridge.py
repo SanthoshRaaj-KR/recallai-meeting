@@ -115,6 +115,10 @@ class PipelineStartBody(BaseModel):
     session_id: str
 
 
+class PipelineStartWithTranscriptBody(BaseModel):
+    transcript: str
+
+
 # ── Helpers: persist changes back to session store ────────────────────────────
 
 def _save_changes(session_id: str, changes: list[dict]) -> None:
@@ -360,6 +364,32 @@ async def pipeline_start(body: PipelineStartBody) -> dict:
     logger.info("Pipeline started — job_id=%s session=%s", job_id, body.session_id)
     asyncio.create_task(_run_pipeline_job(job_id), name=f"review-pipeline-{job_id}")
     return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/review/pipeline/start-with-transcript")
+async def pipeline_start_with_transcript(body: PipelineStartWithTranscriptBody) -> dict:
+    session_id = str(uuid.uuid4())
+    transcript = [{"participant": "Meeting", "text": body.transcript.strip()}]
+    session_store.upsert(session_id, {
+        "status": "ended",
+        "transcript": transcript,
+        "transcript_memory_text": "",
+        "changes": [],
+    })
+    job_id = str(uuid.uuid4())
+    _pipelines[job_id] = {
+        "job_id": job_id,
+        "session_id": session_id,
+        "status": "running",
+        "stage": None,
+        "created_at": _utcnow(),
+        "events": [],
+        "completed_at": None,
+        "error": None,
+    }
+    logger.info("Transcript pipeline started — job_id=%s session=%s", job_id, session_id)
+    asyncio.create_task(_run_pipeline_job(job_id), name=f"review-pipeline-{job_id}")
+    return {"job_id": job_id, "session_id": session_id, "status": "running"}
 
 
 def _record_pipeline_event(job_id: str, event: dict) -> None:

@@ -68,6 +68,8 @@ class Proposal:
     after_content: str | None
     timestamp: str
     session_id: str
+    context_before: str | None = None
+    context_after: str | None = None
     status: str = "pending"
     source: str = "my-agent-pipeline"
     rationale: str | None = None
@@ -92,6 +94,8 @@ class Proposal:
             "section_heading": self.section_heading,
             "before_content": self.before_content,
             "after_content": self.after_content,
+            "context_before": self.context_before,
+            "context_after": self.context_after,
             "timestamp": self.timestamp,
             "session_id": self.session_id,
             "status": self.status,

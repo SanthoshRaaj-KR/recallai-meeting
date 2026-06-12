@@ -83,6 +83,25 @@ def _human_only(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _extract_context_lines(section_text: str, before_content: str, n: int = 5) -> tuple[str, str]:
+    """Return up to n lines before and after before_content within section_text."""
+    lines = section_text.splitlines()
+    before_lines = before_content.strip().splitlines()
+    if not before_lines or not lines:
+        return "", ""
+    first_line = before_lines[0].strip()
+    start_idx = next(
+        (i for i, l in enumerate(lines) if first_line in l.strip() or l.strip() in first_line),
+        None,
+    )
+    if start_idx is None:
+        return "", ""
+    end_idx = start_idx + len(before_lines)
+    ctx_before = "\n".join(lines[max(0, start_idx - n):start_idx])
+    ctx_after = "\n".join(lines[end_idx:end_idx + n])
+    return ctx_before, ctx_after
+
+
 def _extract_json(raw: str) -> str:
     """Strip markdown code fences so json.loads can handle LLM output reliably."""
     stripped = raw.strip()
@@ -686,7 +705,7 @@ class ProposalPipeline:
                 for item in (data.get("action_items") or [])
             ],
             participants=participants,
-            change_intents=intents[:30],
+            change_intents=intents[:60],
         )
 
     def _heuristic_meeting(self, transcript: list[dict[str, Any]], transcript_text: str) -> ExtractedMeeting:
@@ -930,7 +949,7 @@ class ProposalPipeline:
         now = _utcnow()
         work_items: list[tuple[ChangeIntent, VectorSearchHit, str]] = []
         for intent, hits in intent_sections:
-            for hit in hits[:4]:
+            for hit in hits:
                 if not hit.page_id:
                     continue
                 section_text = section_cache.get((hit.page_id, hit.heading)) or hit.text or ""
@@ -1012,7 +1031,7 @@ class ProposalPipeline:
             "confluence_section": {
                 "page_title": hit.title,
                 "section_heading": hit.heading,
-                "current_text": section_text[:3000],
+                "current_text": section_text[:6000],
             },
         }
         opts: dict[str, Any] = {"model": self.model, "response_format": {"type": "json_object"}}
@@ -1051,6 +1070,8 @@ class ProposalPipeline:
         page = page_cache.get(hit.page_id or "")
         page_url = page.url if page else None
 
+        ctx_before, ctx_after = _extract_context_lines(section_text, before) if before else ("", "")
+
         anchored = edit_mode == "replace" and bool(before)
         confidence: Literal["high", "medium", "low"] = (
             "high" if anchored and intent.evidence
@@ -1070,6 +1091,8 @@ class ProposalPipeline:
             section_heading=section_heading,
             before_content=before,
             after_content=after,
+            context_before=ctx_before or None,
+            context_after=ctx_after or None,
             timestamp=timestamp,
             session_id=session_id,
             rationale=rationale,
@@ -1100,14 +1123,26 @@ class ProposalPipeline:
         proposals: list[dict[str, Any]],
         transcript_text: str,
     ) -> list[dict[str, Any]]:
+        def _token_set(text: str) -> set[str]:
+            return set(re.findall(r"[a-z0-9]{3,}", text.lower())) - {"the", "and", "for", "this", "that", "with"}
+
+        def _jaccard(a: set[str], b: set[str]) -> float:
+            if not a or not b:
+                return 0.0
+            return len(a & b) / len(a | b)
+
         covered: set[int] = set()
         for idx, intent in enumerate(meeting.change_intents):
             intent_new = normalize_for_match(intent.new_value)
             intent_subj = normalize_for_match(intent.subject or intent.target_hint)
+            intent_tokens = _token_set(
+                " ".join(filter(None, [intent.new_value, intent.subject, intent.target_hint, intent.instruction]))
+            )
             for proposal in proposals:
                 after = normalize_for_match(str(proposal.get("after_content") or ""))
                 title = normalize_for_match(str(proposal.get("page_title") or ""))
                 section = normalize_for_match(str(proposal.get("section_heading") or ""))
+                # Exact string match (original)
                 if intent_new and intent_new in after:
                     covered.add(idx)
                     break
@@ -1115,6 +1150,17 @@ class ProposalPipeline:
                     (title and (intent_subj in title or title in intent_subj))
                     or (section and (intent_subj in section or section in intent_subj))
                 ):
+                    covered.add(idx)
+                    break
+                # Semantic fallback: token Jaccard across combined proposal text
+                proposal_tokens = _token_set(
+                    " ".join(filter(None, [
+                        str(proposal.get("after_content") or ""),
+                        str(proposal.get("page_title") or ""),
+                        str(proposal.get("section_heading") or ""),
+                    ]))
+                )
+                if _jaccard(intent_tokens, proposal_tokens) >= 0.15:
                     covered.add(idx)
                     break
 
@@ -1275,7 +1321,7 @@ class ProposalPipeline:
             "\"missed_intents\": [{\"instruction\": string, \"reason\": string}]}"
         )
         payload = {
-            "transcript_excerpt": transcript_text[:12000],
+            "transcript_excerpt": transcript_text[:80000],
             "extracted_intents": [
                 {
                     "instruction": i.instruction,
