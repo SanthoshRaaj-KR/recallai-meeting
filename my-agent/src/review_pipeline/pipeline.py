@@ -69,6 +69,20 @@ class _MOMResponse(BaseModel):
     mom: list[_MOMEntry] = []
 
 
+def _human_only(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip Jarvis's own spoken replies from the transcript.
+
+    Jarvis replies are posted back to the transcript with speaker='Jarvis' so the
+    live agent has full context. But those replies embed RAG-retrieved Confluence
+    content — including them in summary/proposal generation causes the LLM to treat
+    wiki text as meeting discussion.
+    """
+    return [
+        e for e in transcript
+        if (e.get("participant") or e.get("speaker") or "").strip().lower() != "jarvis"
+    ]
+
+
 def _extract_json(raw: str) -> str:
     """Strip markdown code fences so json.loads can handle LLM output reliably."""
     stripped = raw.strip()
@@ -132,8 +146,10 @@ _ACTION_ITEMS_SCHEMA: dict[str, Any] = {
                         "type": "object",
                         "properties": {
                             "description": {"type": "string"},
-                            "owner": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                            "due": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                            # Cerebras strict mode does not support anyOf/nullable.
+                            # Use plain string; empty string means unassigned/unknown.
+                            "owner": {"type": "string"},
+                            "due": {"type": "string"},
                         },
                         "required": ["description", "owner", "due"],
                         "additionalProperties": False,
@@ -1581,7 +1597,8 @@ class ProposalPipeline:
                 "content": (
                     "List every concrete decision made in this meeting transcript. "
                     "Each decision is one clear sentence. Include all agreed outcomes, chosen options, and commitments. "
-                    "Omit open questions and vague discussion."
+                    "Omit open questions and vague discussion. "
+                    'Return JSON: {"decisions": ["<decision 1>", "<decision 2>", ...]}'
                 ),
             },
             {"role": "user", "content": transcript_text},
@@ -1601,7 +1618,10 @@ class ProposalPipeline:
                 "role": "system",
                 "content": (
                     "Extract every action item from this meeting transcript. "
-                    "description: what needs to be done. owner: person responsible (null if unassigned). due: deadline if mentioned (null otherwise)."
+                    "description: what needs to be done. "
+                    "owner: person responsible, empty string if unassigned. "
+                    "due: deadline if mentioned, empty string if not mentioned. "
+                    'Return JSON: {"action_items": [{"description": "...", "owner": "...", "due": "..."}, ...]}'
                 ),
             },
             {"role": "user", "content": transcript_text},
@@ -1610,7 +1630,11 @@ class ProposalPipeline:
         try:
             parsed = _ActionItemsResponse.model_validate(json.loads(raw))
             return [
-                {"description": item.description, "owner": item.owner, "due": item.due}
+                {
+                    "description": item.description,
+                    "owner": item.owner or None,
+                    "due": item.due or None,
+                }
                 for item in parsed.action_items
                 if item.description
             ]
@@ -1654,7 +1678,10 @@ class ProposalPipeline:
         Uses AsyncOpenAI directly (same pattern as the chat interface) so calls
         are native async — no thread pool overhead or sync-client quirks.
         """
-        transcript_text = format_transcript(transcript)
+        # Strip Jarvis's own spoken replies before summarising. Jarvis answers
+        # are informed by RAG-retrieved Confluence content — including them would
+        # cause the summary LLM to treat wiki knowledge as meeting discussion.
+        transcript_text = format_transcript(_human_only(transcript))
         if not transcript_text:
             return self.summary_response(session_id, None, transcript)
 

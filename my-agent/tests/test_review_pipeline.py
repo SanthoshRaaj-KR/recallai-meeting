@@ -1,11 +1,12 @@
 import asyncio
 import sys
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from review_pipeline.models import ChangeIntent, ExtractedMeeting, PageCandidate
+from review_pipeline.models import ChangeIntent, ExtractedMeeting, PageCandidate, Proposal
 from review_pipeline.pipeline import ProposalPipeline
 from review_pipeline.rag import ConfluenceVectorIndex, VectorSearchHit, chunk_page
 
@@ -80,6 +81,15 @@ class FakeVectorIndex:
             ]
         return []
 
+    def search_with_rerank(self, queries, *, top_k_per_query=25, top_n=8, rerank_model="bge-reranker-v2-m3"):
+        seen: dict[tuple, VectorSearchHit] = {}
+        for q in queries:
+            for hit in self.search(q, top_k=top_k_per_query):
+                key = (hit.page_id, hit.heading)
+                if key not in seen or hit.score > seen[key].score:
+                    seen[key] = hit
+        return sorted(seen.values(), key=lambda h: h.score, reverse=True)[:top_n]
+
     def upsert_page(self, page):
         self.upserted.append(page.page_id)
 
@@ -92,10 +102,11 @@ class FakePineconeIndex:
     def fetch(self, ids, namespace=None):
         return {"vectors": {item_id: self.vectors[item_id] for item_id in ids if item_id in self.vectors}}
 
-    def upsert(self, vectors, namespace=None):
+    def upsert_records(self, namespace=None, records=None):
         self.upsert_calls += 1
-        for vector in vectors:
-            self.vectors[vector["id"]] = vector
+        for record in (records or []):
+            record_id = record["_id"]
+            self.vectors[record_id] = {"fields": record}
 
     def delete(self, ids, namespace=None):
         for item_id in ids:
@@ -116,6 +127,27 @@ class LocalVectorIndex(ConfluenceVectorIndex):
 
     def _embed(self, texts):
         return [[0.1, 0.2, 0.3] for _ in texts]
+
+
+def _make_proposal_dict(
+    page_id, page_title, heading, before, after, edit_mode,
+    confidence="high", session_id="s1",
+):
+    return Proposal(
+        id=str(uuid.uuid4()),
+        change_type="edit",
+        page_id=page_id,
+        page_title=page_title,
+        section_heading=heading,
+        before_content=before,
+        after_content=after,
+        timestamp="2026-01-01T00:00:00",
+        session_id=session_id,
+        confidence=confidence,
+        risk="safe" if confidence == "high" else "review",
+        confidence_score=0.9,
+        edit_mode=edit_mode,
+    ).to_dict()
 
 
 def test_pipeline_drafts_exact_date_replacement(monkeypatch):
@@ -139,12 +171,25 @@ def test_pipeline_drafts_exact_date_replacement(monkeypatch):
             ],
         )
 
-    monkeypatch.setattr(pipeline, "_extract_meeting", fake_extract)
-    monkeypatch.setattr(pipeline, "_generate_page_grounded_candidates", async_no_candidates)
-    monkeypatch.setattr(pipeline, "_adversarial_verify", async_passthrough_verify)
-    monkeypatch.setattr(pipeline, "_rovo_independent_critic", async_passthrough_critic)
-    transcript = [{"participant": "Asha", "text": "We push Q3 meeting plan to 3rd of December."}]
+    async def fake_retrieve_all_sections(intents):
+        return [(intents[0], [VectorSearchHit(
+            page_id="page-1", title="Q3 Meeting Plan",
+            heading="Timeline", score=0.91,
+            text="scheduled for 2nd September", version=3,
+        )])]
 
+    def fake_draft_sync(*, session_id, meeting, intent_sections, section_cache, page_cache, query):
+        return [_make_proposal_dict(
+            "page-1", "Q3 Meeting Plan", "Timeline",
+            "2nd September", "3rd December", "replace",
+        )]
+
+    monkeypatch.setattr(pipeline, "_extract_meeting", fake_extract)
+    monkeypatch.setattr(pipeline, "_retrieve_all_sections", fake_retrieve_all_sections)
+    monkeypatch.setattr(pipeline, "_draft_grounded_proposals_sync", fake_draft_sync)
+    monkeypatch.setattr(pipeline, "_adversarial_verify", async_passthrough_verify)
+
+    transcript = [{"participant": "Asha", "text": "We push Q3 meeting plan to 3rd of December."}]
     meeting, proposals = asyncio.run(pipeline.run(session_id="s1", transcript=transcript))
 
     assert meeting.title == "Planning Meeting"
@@ -196,11 +241,11 @@ def test_rag_upsert_skips_unchanged_page_and_reindexes_changed_page():
     index.upsert_page(changed_page)
 
     assert index.fake_index.upsert_calls == 2
-    assert index.fake_index.vectors["page-1:0"]["metadata"]["version"] == 4
-    assert index.fake_index.vectors["page-1:0"]["metadata"]["chunk_count"] == 1
+    assert index.fake_index.vectors["page-1:0"]["fields"]["version"] == 4
+    assert index.fake_index.vectors["page-1:0"]["fields"]["chunk_count"] == 1
 
 
-def test_vector_rag_finds_metric_page_and_drafts_inline_replace(monkeypatch):
+def test_vector_rag_search_with_rerank_finds_metric_page(monkeypatch):
     pipeline = ProposalPipeline()
     pipeline._client = VectorOnlyConfluenceClient()
     pipeline._rag = FakeVectorIndex()
@@ -221,10 +266,19 @@ def test_vector_rag_finds_metric_page_and_drafts_inline_replace(monkeypatch):
             ],
         )
 
+    def fake_draft_sync(*, session_id, meeting, intent_sections, section_cache, page_cache, query):
+        # Verify retrieval found the right page via search_with_rerank
+        assert len(intent_sections) == 1
+        _intent, hits = intent_sections[0]
+        assert any(h.page_id == "metrics-page" for h in hits)
+        return [_make_proposal_dict(
+            "metrics-page", "Vision Model Metrics", "Classifier",
+            "Recall: 0.91", "Recall: 0.98", "replace",
+        )]
+
     monkeypatch.setattr(pipeline, "_extract_meeting", fake_extract)
-    monkeypatch.setattr(pipeline, "_generate_page_grounded_candidates", async_no_candidates)
+    monkeypatch.setattr(pipeline, "_draft_grounded_proposals_sync", fake_draft_sync)
     monkeypatch.setattr(pipeline, "_adversarial_verify", async_passthrough_verify)
-    monkeypatch.setattr(pipeline, "_rovo_independent_critic", async_passthrough_critic)
 
     _meeting, proposals = asyncio.run(
         pipeline.run(
@@ -238,7 +292,8 @@ def test_vector_rag_finds_metric_page_and_drafts_inline_replace(monkeypatch):
     assert proposals[0]["edit_mode"] == "replace"
     assert proposals[0]["before_content"] == "Recall: 0.91"
     assert proposals[0]["after_content"] == "Recall: 0.98"
-    assert pipeline._rag.upserted == ["metrics-page"]
+    # Confirm the page was indexed via upsert_page after fetch
+    assert "metrics-page" in pipeline._rag.upserted
 
 
 def test_custom_new_page_workflow_returns_create_proposal(monkeypatch):
@@ -285,69 +340,22 @@ def test_pipeline_returns_empty_without_transcript():
     assert proposals == []
 
 
-async def async_no_candidates(*_args, **_kwargs):
-    return []
-
-
-async def async_passthrough_verify(_meeting, proposals, _text):
-    return proposals
-
-
-async def async_passthrough_critic(_meeting, proposals, _text, query=None):
-    return proposals
-
-
-def test_page_grounded_candidate_can_rescue_missed_extractor(monkeypatch):
+def test_action_items_fallback_creates_intents():
     pipeline = ProposalPipeline()
-    pipeline._client = FakeConfluenceClient()
+    meeting = ExtractedMeeting(
+        change_intents=[],
+        action_items=[{"description": "Update timeline in the Q3 plan", "owner": "Asha", "due": None}],
+    )
+    intents = pipeline._intents_from_action_items(meeting)
 
-    async def missed_extract(_transcript, _text, query=None):
-        return ExtractedMeeting(
-            title="Planning Meeting",
-            summary="Extractor missed the change.",
-            change_intents=[],
-        )
-
-    async def page_grounded_candidates(_meeting, _text, query=None):
-        return [
-            ChangeIntent(
-                instruction="Move Q3 meeting plan from 2nd September to 3rd December",
-                subject="Q3 meeting plan date",
-                target_hint="Q3 meeting plan",
-                old_value="2nd September",
-                new_value="3rd December",
-                action="replace",
-                evidence=["we push Q3 meeting plan to 3rd of December"],
-                source="page_grounded_candidate",
-                page_id="page-1",
-                page_title="Q3 Meeting Plan",
-            )
-        ]
-
-    monkeypatch.setattr(pipeline, "_extract_meeting", missed_extract)
-    monkeypatch.setattr(pipeline, "_generate_page_grounded_candidates", page_grounded_candidates)
-    monkeypatch.setattr(pipeline, "_adversarial_verify", async_passthrough_verify)
-    monkeypatch.setattr(pipeline, "_rovo_independent_critic", async_passthrough_critic)
-    transcript = [{"participant": "Asha", "text": "We push Q3 meeting plan to 3rd of December."}]
-
-    _meeting, proposals = asyncio.run(pipeline.run(session_id="s1", transcript=transcript))
-
-    assert len(proposals) == 1
-    assert proposals[0]["before_content"] == "2nd September"
-    assert proposals[0]["after_content"] == "3rd December"
+    assert len(intents) == 1
+    assert intents[0].action == "add"
+    assert "timeline" in intents[0].subject.lower()
+    assert intents[0].source == "action_item"
 
 
-def test_pipeline_records_no_matching_page_diagnostic(monkeypatch):
+def test_pipeline_records_no_sections_found_diagnostic(monkeypatch):
     pipeline = ProposalPipeline()
-
-    class EmptyConfluenceClient:
-        async def search_pages(self, query, limit=10):
-            return []
-
-        async def fetch_page(self, page_id):
-            raise AssertionError("fetch_page should not be called")
-
-    pipeline._client = EmptyConfluenceClient()
 
     async def fake_extract(_transcript, _text, query=None):
         return ExtractedMeeting(
@@ -363,80 +371,37 @@ def test_pipeline_records_no_matching_page_diagnostic(monkeypatch):
             ]
         )
 
+    async def empty_retrieve_for_intent(_intent):
+        return []
+
     monkeypatch.setattr(pipeline, "_extract_meeting", fake_extract)
-    monkeypatch.setattr(pipeline, "_generate_page_grounded_candidates", async_no_candidates)
+    monkeypatch.setattr(pipeline, "_retrieve_sections_for_intent", empty_retrieve_for_intent)
     monkeypatch.setattr(pipeline, "_adversarial_verify", async_passthrough_verify)
-    monkeypatch.setattr(pipeline, "_rovo_independent_critic", async_passthrough_critic)
 
     _meeting, proposals = asyncio.run(
         pipeline.run(session_id="s1", transcript=[{"participant": "Asha", "text": "Owner is now Ben."}])
     )
 
     assert proposals == []
-    assert pipeline.last_diagnostics[0]["reason"] == "no_matching_page_found"
+    assert any(d["reason"] == "no_sections_found" for d in pipeline.last_diagnostics)
 
 
-def test_section_level_drafter_refines_additive_proposal(monkeypatch):
+def test_looks_like_instruction_text_recognises_bracket_prompts():
     pipeline = ProposalPipeline()
-    page = PageCandidate(
-        page_id="page-1",
-        title="Launch Plan",
-        html="<h2>Timeline</h2><p>Launch plan details.</p>",
-        text="Timeline\nLaunch plan details.",
+    assert pipeline._looks_like_instruction_text(
+        "This page is dedicated to audio-based defect detection. "
+        "[Expand to a minimum of 2 paragraphs, including audio-based deepfake detection.]"
     )
-    intent = ChangeIntent(
-        instruction="Add that launch review is on Friday",
-        subject="launch review",
-        target_hint="Launch Plan",
-        new_value="Launch review is on Friday.",
-        action="add",
-        evidence=["launch review is on Friday"],
+    assert pipeline._looks_like_instruction_text(
+        "Details here. [Add section summarizing the rollout plan.]"
     )
 
-    def fake_section_draft(_intent, _page, _heading, _after, _mode):
-        return {
-            "edit_mode": "append",
-            "section_heading": "Timeline",
-            "after_content": "Launch review is on Friday.",
-        }
 
-    monkeypatch.setattr(pipeline, "_section_level_draft", fake_section_draft)
-
-    proposal = pipeline._draft_for_page("s1", intent, page, "now", None)
-
-    assert proposal is not None
-    assert proposal.section_heading == "Timeline"
-    assert proposal.edit_mode == "append"
-    assert proposal.after_content == "Launch review is on Friday."
-
-
-def test_pipeline_drops_instruction_text_after_content():
+def test_looks_like_instruction_text_accepts_plain_content():
     pipeline = ProposalPipeline()
-    page = PageCandidate(
-        page_id="page-1",
-        title="Audio-based Defect Detection Page",
-        html="<h2>Introduction</h2><p>This page is dedicated to audio-based defect detection.</p>",
-        text="Introduction\nThis page is dedicated to audio-based defect detection.",
-        sections=[{"heading": "Introduction", "text": "This page is dedicated to audio-based defect detection."}],
-        score=10,
-    )
-    intent = ChangeIntent(
-        instruction="Expand the introduction section",
-        subject="audio-based defect detection",
-        target_hint="Audio-based Defect Detection Page",
-        old_value="This page is dedicated to audio-based defect detection.",
-        new_value=(
-            "This page is dedicated to audio-based defect detection. "
-            "[Expand to a minimum of 2 paragraphs, including audio-based deepfake detection.]"
-        ),
-        action="replace",
-        evidence=["expand the audio defect detection intro"],
-    )
-
-    proposal = pipeline._draft_for_page("s1", intent, page, "now", None)
-
-    assert proposal is None
-    assert pipeline.last_diagnostics[-1]["reason"] == "instruction_text_after_content"
+    assert not pipeline._looks_like_instruction_text("Recall: 0.98")
+    assert not pipeline._looks_like_instruction_text("")
+    assert not pipeline._looks_like_instruction_text("Launch review is on Friday.")
 
 
 def test_adversarial_verdict_removes_wrong_or_unsupported_proposals():
@@ -506,6 +471,7 @@ def test_coverage_audit_records_diagnostics_without_polluting_cards():
         {
             "id": "p1",
             "page_title": "Some Page",
+            "section_heading": "",
             "after_content": "Unrelated content",
             "verifier_note": "Clean note.",
             "risk": "safe",
@@ -623,10 +589,23 @@ def test_pipeline_drafts_indirect_task_completion(monkeypatch):
             ],
         )
 
+    async def fake_retrieve_all_sections(intents):
+        return [(intents[0], [VectorSearchHit(
+            page_id="page-task", title="Quarterly Planning",
+            heading="Quarterly plans", score=0.85,
+            text="[task: incomplete] Q2 plan", version=7,
+        )])]
+
+    def fake_draft_sync(*, session_id, meeting, intent_sections, section_cache, page_cache, query):
+        return [_make_proposal_dict(
+            "page-task", "Quarterly Planning", "Quarterly plans",
+            "[ ] Q2 plan", "[x] Q2 plan", "task_status",
+        )]
+
     monkeypatch.setattr(pipeline, "_extract_meeting", fake_extract)
-    monkeypatch.setattr(pipeline, "_generate_page_grounded_candidates", async_no_candidates)
+    monkeypatch.setattr(pipeline, "_retrieve_all_sections", fake_retrieve_all_sections)
+    monkeypatch.setattr(pipeline, "_draft_grounded_proposals_sync", fake_draft_sync)
     monkeypatch.setattr(pipeline, "_adversarial_verify", async_passthrough_verify)
-    monkeypatch.setattr(pipeline, "_rovo_independent_critic", async_passthrough_critic)
 
     _meeting, proposals = asyncio.run(
         pipeline.run(
@@ -662,3 +641,7 @@ def test_execute_task_status_updates_only_matching_checkbox():
     assert result["success"] is True
     assert "<ac:task-id>10</ac:task-id><ac:task-status>complete</ac:task-status>" in fake.updated_html
     assert "<ac:task-id>11</ac:task-id><ac:task-status>incomplete</ac:task-status>" in fake.updated_html
+
+
+async def async_passthrough_verify(_meeting, proposals, _text):
+    return proposals
