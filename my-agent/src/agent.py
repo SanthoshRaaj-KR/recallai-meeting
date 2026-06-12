@@ -26,6 +26,7 @@ from livekit.agents import (
     llm,
     mcp,
     room_io,
+    stt as lk_stt,
 )
 from livekit import rtc
 from livekit.plugins import ai_coustics, assemblyai, cerebras, silero
@@ -99,7 +100,7 @@ _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 # Optional default repo (owner/repo) used when the user doesn't name one.
 _GITHUB_DEFAULT_REPO = os.getenv("GITHUB_DEFAULT_REPO", "")
 _BRIDGE_INTERNAL_URL = os.getenv("BRIDGE_INTERNAL_URL", "http://127.0.0.1:8000").rstrip("/")
-_OPENING_GREETING_DELAY_S = float(os.getenv("JARVIS_OPENING_GREETING_DELAY_SECONDS", "0"))
+_OPENING_GREETING_DELAY_S = float(os.getenv("JARVIS_OPENING_GREETING_DELAY_SECONDS", "0.5"))
 
 
 def _trim_text_to_char_budget(text: str, max_chars: int) -> str:
@@ -266,6 +267,9 @@ class Assistant(Agent):
         # Ensures the opening greeting fires exactly once, even though LiveKit
         # can re-enter on_enter() after an interruption.
         self._greeted: bool = False
+        # Set to True when the partial-wake ack ("Yes?") fires from stt_node so
+        # on_user_turn_completed doesn't double-play it.
+        self._partial_wake_fired: bool = False
         # ID of the rolling transcript system message kept in the chat context.
         # Each turn we remove the old one and insert a fresh snapshot so the
         # chat history never accumulates multiple embedded transcripts.
@@ -283,30 +287,11 @@ class Assistant(Agent):
             time_phrase = "Good evening"
 
         options = [
-            (
-                f"{time_phrase}, everyone! Jarvis here, bright-eyed and ready to roll. "
-                "Whenever you need me, just say Hey Jarvis and I am on it!"
-            ),
-            (
-                f"{time_phrase}, team! I am Jarvis, your meeting companion for today. "
-                "Think of me as that colleague who actually reads the notes — "
-                "just call my name and I will jump right in."
-            ),
-            (
-                f"{time_phrase}! Jarvis has joined the room and is all set. "
-                "Ask me anything during the meeting — facts, summaries, quick calculations — "
-                "just say Hey Jarvis!"
-            ),
-            (
-                f"{time_phrase}, folks! Great to be here. I am Jarvis. "
-                "I will stay quietly in the background and be ready the moment you need me. "
-                "Just say Hey Jarvis!"
-            ),
-            (
-                f"{time_phrase}! Jarvis reporting for duty. "
-                "Whether it is a quick fact-check or a meeting recap, I have got you covered. "
-                "Give me a shout anytime — Hey Jarvis!"
-            ),
+            f"{time_phrase}, everyone! Jarvis here. Just say Hey Jarvis whenever you need me.",
+            f"{time_phrase}, team! I am Jarvis, your meeting assistant. Say Hey Jarvis to call on me.",
+            f"{time_phrase}! Jarvis has joined. Ask me anything — just say Hey Jarvis!",
+            f"{time_phrase}, folks! Jarvis is ready. Give me a shout anytime — Hey Jarvis.",
+            f"{time_phrase}! I am Jarvis, standing by. Just say Hey Jarvis and I am on it.",
         ]
         return random.choice(options)
 
@@ -367,6 +352,34 @@ class Assistant(Agent):
 
         await asyncio.gather(_greet(), _warmup_mcp(), _warmup_rag())
 
+    async def stt_node(
+        self,
+        audio: AsyncIterable[rtc.AudioFrame],
+        model_settings: ModelSettings,
+    ) -> AsyncIterable[lk_stt.SpeechEvent | str]:
+        """Spy on INTERIM transcripts to fire "Yes?" the moment "Jarvis" appears.
+
+        Fires ~200–400 ms before VAD silence + STT finalization, giving Jarvis
+        an instant audio acknowledgment while the LLM call is still pending.
+        """
+        async for event in Agent.default.stt_node(self, audio, model_settings):
+            if (
+                not self._partial_wake_fired
+                and isinstance(event, lk_stt.SpeechEvent)
+                and event.type == lk_stt.SpeechEventType.INTERIM_TRANSCRIPT
+            ):
+                text = event.alternatives[0].text if event.alternatives else ""
+                if _WAKE_PATTERN.search(text):
+                    self._partial_wake_fired = True
+                    logger.info("Partial wake detected in interim — firing ack early")
+                    session = self.session
+
+                    async def _say_ack() -> None:
+                        await session.say("Yes?", add_to_chat_ctx=False)
+
+                    asyncio.create_task(_say_ack())
+            yield event
+
     async def on_user_turn_completed(
         self,
         turn_ctx: llm.ChatContext,
@@ -380,6 +393,10 @@ class Assistant(Agent):
         """
         raw = new_message.text_content or ""
 
+        # Snapshot and reset so stt_node's partial ack doesn't double-fire.
+        partial_fired = self._partial_wake_fired
+        self._partial_wake_fired = False
+
         # Always buffer so the LLM has full meeting context when it is called.
         if raw.strip():
             self._transcript.append(raw.strip())
@@ -390,9 +407,17 @@ class Assistant(Agent):
 
         query = _extract_query(raw)
 
-        # ── No wake word or bare wake word — suppress the LLM silently ───────
-        if not query:
+        # ── No wake word — suppress the LLM silently ─────────────────────────
+        if query is None:
             logger.debug("No wake word — suppressing: %.60r", raw)
+            raise StopResponse()
+
+        # ── Bare wake word only — ack already played by stt_node; no query ───
+        if not query:
+            logger.info("Bare wake word — ack fired=%s, no query to dispatch", partial_fired)
+            if not partial_fired:
+                # stt_node didn't catch it in interim — play the ack now
+                await self.session.say("Yes?", add_to_chat_ctx=False)
             raise StopResponse()
 
         # ── Wake word + inline query — dispatch to LLM with meeting context ──

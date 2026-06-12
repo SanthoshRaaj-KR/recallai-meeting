@@ -22,9 +22,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _TOP_K_DEFAULT = int(os.getenv("JARVIS_CONFLUENCE_RAG_TOP_K", "3"))
-_SCORE_THRESHOLD = float(os.getenv("JARVIS_CONFLUENCE_RAG_SCORE_THRESHOLD", "0.35"))
+_SCORE_THRESHOLD = float(os.getenv("JARVIS_CONFLUENCE_RAG_SCORE_THRESHOLD", "0.1"))
 # Characters kept from each chunk in the LLM context — keeps tokens tight.
-_MAX_CHUNK_CHARS = int(os.getenv("JARVIS_CONFLUENCE_RAG_MAX_CHUNK_CHARS", "2000"))
+_MAX_CHUNK_CHARS = int(os.getenv("JARVIS_CONFLUENCE_RAG_MAX_CHUNK_CHARS", "800"))
 
 # How many recent transcript lines to harvest for query enrichment.
 _TRANSCRIPT_CONTEXT_LINES = int(os.getenv("JARVIS_CONFLUENCE_RAG_CONTEXT_LINES", "12"))
@@ -100,11 +100,9 @@ class ConfluenceLiveRAG:
                 return cached_hits
         try:
             index = self._get_index()
-            # Fetch 3× more candidates than needed so the per-page diversity
-            # step below can deduplicate without running out of results.
             result = index.search(
                 namespace=self.namespace,
-                top_k=max(1, top_k * 3),
+                top_k=max(1, top_k),
                 inputs={"text": query.strip()},
                 fields=["page_id", "title", "space_key", "heading", "section_order", "text"],
             )
@@ -113,12 +111,6 @@ class ConfluenceLiveRAG:
             for hit in raw_hits:
                 fields = hit.fields if hasattr(hit, "fields") else {}
                 score = float(hit.score if hasattr(hit, "score") else 0.0)
-                logger.debug(
-                    "[Pinecone] candidate score=%.3f page=%r heading=%r",
-                    score,
-                    fields.get("title", ""),
-                    fields.get("heading", ""),
-                )
                 if score < _SCORE_THRESHOLD:
                     continue
                 hits.append(
@@ -132,19 +124,6 @@ class ConfluenceLiveRAG:
                         "score": score,
                     }
                 )
-            # Per-page diversity: keep at most 1 chunk per page so a page with
-            # many indexed sections can't monopolise all top_k slots.  We fetch
-            # top_k * 3 from Pinecone, deduplicate by page_id, then truncate to
-            # top_k.  This ensures a second page always gets a slot when it
-            # scores above the threshold.
-            seen_pages: set[str] = set()
-            diverse_hits: list[dict[str, Any]] = []
-            for h in hits:
-                pid = h.get("page_id") or ""
-                if pid not in seen_pages:
-                    diverse_hits.append(h)
-                    seen_pages.add(pid)
-            hits = diverse_hits[:top_k]
 
             if hits:
                 titles = ", ".join(
