@@ -689,7 +689,9 @@ server = AgentServer()
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
-    proc.userdata["turn_detector"] = MultilingualModel()
+    # MultilingualModel requires get_job_context().inference_executor and cannot
+    # be instantiated in prewarm (no job context exists yet). It is created
+    # inside the job entrypoint instead.
 
 
 server.setup_fnc = prewarm
@@ -700,6 +702,10 @@ async def my_agent(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
+
+    # MultilingualModel needs a live JobContext (for inference_executor), so it
+    # must be created here rather than in prewarm.
+    turn_detector = MultilingualModel()
 
     # ── Parse dispatch metadata ───────────────────────────────────────────────
     mode = ""
@@ -732,7 +738,7 @@ async def my_agent(ctx: JobContext):
             tts=inference.TTS(
                 model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
             ),
-            turn_detection=ctx.proc.userdata["turn_detector"],
+            turn_detection=turn_detector,
             vad=ctx.proc.userdata["vad"],
         )
         await ctx.connect()
@@ -772,7 +778,7 @@ async def my_agent(ctx: JobContext):
         tts=inference.TTS(
             model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
         ),
-        turn_detection=ctx.proc.userdata["turn_detector"],
+        turn_detection=turn_detector,
         vad=ctx.proc.userdata["vad"],
         # Disabled: on_user_turn_completed always rewrites or clears the message,
         # so speculative output is always discarded → audio glitch at turn start.

@@ -182,6 +182,126 @@ class ConfluenceVectorIndex:
             )
         return hits
 
+    def search_with_rerank(
+        self,
+        queries: list[str],
+        *,
+        top_k_per_query: int = 25,
+        top_n: int = 8,
+        rerank_model: str = "bge-reranker-v2-m3",
+    ) -> list[VectorSearchHit]:
+        """Multi-query Pinecone search with RRF fusion and reranking.
+
+        1. Runs each query against the index at top_k_per_query.
+        2. Merges all hits via Reciprocal Rank Fusion keyed on (page_id, heading).
+        3. Reranks the top-50 merged candidates with the specified reranker.
+        4. Returns up to top_n hits ordered by rerank score.
+        """
+        if not self.enabled or not queries:
+            return []
+
+        index = self._index()
+        _FIELDS = ["page_id", "title", "space_key", "heading", "section_order", "version", "text"]
+
+        # Step 1: Run each query and collect ranked hits per query.
+        query_hit_lists: list[list[tuple[int, VectorSearchHit]]] = []
+        for q in queries[:5]:
+            clean = normalize_ws(q)
+            if not clean:
+                query_hit_lists.append([])
+                continue
+            try:
+                result = index.search(
+                    namespace=self.namespace,
+                    top_k=max(1, top_k_per_query),
+                    inputs={"text": clean},
+                    fields=_FIELDS,
+                )
+                raw_hits = result.result.hits if hasattr(result, "result") else []
+                ranked: list[tuple[int, VectorSearchHit]] = []
+                for rank, hit in enumerate(raw_hits):
+                    fields = hit.fields if hasattr(hit, "fields") else {}
+                    page_id = str(fields.get("page_id") or "")
+                    if not page_id:
+                        continue
+                    ranked.append((
+                        rank,
+                        VectorSearchHit(
+                            page_id=page_id,
+                            title=str(fields.get("title") or page_id),
+                            space_key=str(fields.get("space_key") or ""),
+                            heading=str(fields.get("heading") or ""),
+                            score=float(hit.score if hasattr(hit, "score") else 0.0),
+                            text=str(fields.get("text") or ""),
+                            version=int(fields.get("version") or 0) or None,
+                        ),
+                    ))
+                query_hit_lists.append(ranked)
+            except Exception as exc:
+                logger.warning("search_with_rerank query failed: %s", exc)
+                query_hit_lists.append([])
+
+        # Step 2: RRF fusion — key on (page_id, heading) so each unique section
+        # accumulates score from however many queries returned it.
+        _K = 60
+        rrf_scores: dict[str, float] = {}
+        best_hit: dict[str, VectorSearchHit] = {}
+        for ranked_list in query_hit_lists:
+            for rank, hit in ranked_list:
+                key = f"{hit.page_id}::{hit.heading}"
+                rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (_K + rank)
+                if key not in best_hit or hit.score > best_hit[key].score:
+                    best_hit[key] = hit
+
+        if not best_hit:
+            return []
+
+        # Sort by RRF score, take top-50 for reranking.
+        sorted_keys = sorted(rrf_scores, key=lambda k: rrf_scores[k], reverse=True)
+        candidates = [best_hit[k] for k in sorted_keys[:50]]
+
+        if len(candidates) <= top_n:
+            for hit in candidates:
+                hit.score = rrf_scores.get(f"{hit.page_id}::{hit.heading}", 0.0)
+            return candidates
+
+        # Step 3: Rerank merged candidates with Pinecone inference.
+        rerank_query = normalize_ws(queries[0]) if queries else ""
+        try:
+            from pinecone import Pinecone
+
+            pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY", "").strip())
+            documents = [
+                {
+                    "text": normalize_ws(
+                        f"Title: {hit.title}\nHeading: {hit.heading}\n{hit.text or ''}"
+                    )[:2000]
+                }
+                for hit in candidates
+            ]
+            rerank_result = pc.inference.rerank(
+                model=rerank_model,
+                query=rerank_query,
+                documents=documents,
+                top_n=top_n,
+                rank_fields=["text"],
+                return_documents=False,
+                parameters={"truncate": "END"},
+            )
+            final: list[VectorSearchHit] = []
+            for ranked in rerank_result.data:
+                idx = ranked.index
+                if idx < len(candidates):
+                    hit = candidates[idx]
+                    hit.score = float(ranked.score)
+                    final.append(hit)
+            return final
+        except Exception as exc:
+            logger.warning("Reranking failed; falling back to RRF order: %s", exc)
+            for hit in candidates[:top_n]:
+                hit.score = rrf_scores.get(f"{hit.page_id}::{hit.heading}", 0.0)
+            return candidates[:top_n]
+
     def _index(self) -> Any:
         if self._pinecone_index is not None:
             return self._pinecone_index
