@@ -947,10 +947,17 @@ class ProposalPipeline:
         import concurrent.futures
 
         now = _utcnow()
+        _MIN_RERANK_SCORE = 0.3
         work_items: list[tuple[ChangeIntent, VectorSearchHit, str]] = []
         for intent, hits in intent_sections:
             for hit in hits:
                 if not hit.page_id:
+                    continue
+                if hit.score < _MIN_RERANK_SCORE:
+                    logger.debug(
+                        "Skipping hit %r / %r — rerank score %.3f below threshold %.1f",
+                        hit.title, hit.heading, hit.score, _MIN_RERANK_SCORE,
+                    )
                     continue
                 section_text = section_cache.get((hit.page_id, hit.heading)) or hit.text or ""
                 if section_text:
@@ -1038,9 +1045,9 @@ class ProposalPipeline:
         }
         opts: dict[str, Any] = {"model": self.model, "response_format": {"type": "json_object"}}
         if self.model.startswith(("gpt-5", "o1", "o3", "o4")):
-            opts["max_completion_tokens"] = 900
+            opts["max_completion_tokens"] = 3000
         else:
-            opts["max_tokens"] = 900
+            opts["max_tokens"] = 3000
             opts["temperature"] = 0.1
         response = client.chat.completions.create(
             **opts,
@@ -1353,9 +1360,9 @@ class ProposalPipeline:
         }
         opts: dict[str, Any] = {"model": self.model, "response_format": {"type": "json_object"}}
         if self.model.startswith(("gpt-5", "o1", "o3", "o4")):
-            opts["max_completion_tokens"] = 1800
+            opts["max_completion_tokens"] = 6000
         else:
-            opts["max_tokens"] = 1800
+            opts["max_tokens"] = 6000
             opts["temperature"] = 0.0
         response = client.chat.completions.create(
             **opts,
