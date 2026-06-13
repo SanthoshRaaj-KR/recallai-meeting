@@ -220,7 +220,7 @@ class ProposalPipeline:
     _CEREBRAS_MODEL = "gpt-oss-120b"
 
     def __init__(self) -> None:
-        self.model = os.getenv("MY_AGENT_REVIEW_MODEL", os.getenv("JARVIS_REVIEW_MODEL", "gpt-4o-mini")).strip()
+        self.model = os.getenv("MY_AGENT_REVIEW_MODEL", os.getenv("JARVIS_REVIEW_MODEL", "gpt-5-mini")).strip()
         self.max_candidate_pages = int(os.getenv("MY_AGENT_PIPELINE_MAX_PAGES", "16"))
         self.max_search_terms = int(os.getenv("MY_AGENT_PIPELINE_MAX_SEARCH_TERMS", "24"))
         self.rag_top_k = int(os.getenv("MY_AGENT_PIPELINE_RAG_TOP_K", "8"))
@@ -1001,16 +1001,18 @@ class ProposalPipeline:
             )
 
         prompt = (
-            "You are a precise Confluence section editor. Given meeting evidence and a live page "
-            "section, produce the smallest correct inline edit.\n\n"
+            "You are a surgical Confluence editor. Produce the smallest possible text replacement.\n\n"
             "Rules:\n"
-            "- before_content: the EXACT text substring to replace, copied verbatim from the section. "
-            "Null if appending new information.\n"
-            "- after_content: replacement text (replace) or new content to add (append). "
-            "Use only facts from the evidence. Do not invent.\n"
-            "- edit_mode: 'replace' when replacing specific existing text, 'append' when adding new info.\n"
-            "- Return edit_mode 'null' if the evidence does not clearly warrant a change here.\n"
-            "- Never rewrite the entire section — only touch the affected fragment."
+            "- before_content: the SHORTEST verbatim substring from the section that contains the "
+            "outdated value. If only a single token changed (a number, a name, a date), "
+            "before_content is just that token — never the whole sentence.\n"
+            "- after_content: the same substring with ONLY the changed value swapped in. "
+            "Do NOT copy transcript phrasing into after_content. Do NOT rewrite the sentence. "
+            "Only replace what actually changed.\n"
+            "- edit_mode: 'replace' when substituting existing text, 'append' only when adding "
+            "genuinely new information that has no existing counterpart in the section.\n"
+            "- Return edit_mode 'null' if the evidence does not clearly justify a change here.\n"
+            "- NEVER rewrite a full sentence when only a single token (number, name, date) changed."
             + task_extra
             + "\n\nReturn JSON only: "
             "{\"edit_mode\": \"replace|append|null\", "
