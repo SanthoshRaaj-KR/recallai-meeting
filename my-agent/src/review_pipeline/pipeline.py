@@ -35,6 +35,15 @@ from .text_utils import (
 
 logger = logging.getLogger(__name__)
 
+# Action items that imply documentation updates (used to filter noise in _intents_from_action_items).
+_DOC_ACTION_RE = re.compile(
+    r"\b(update|edit|revise|add to|document[s]?|confluence|wiki|"
+    r"page[s]?|doc[s]?|documentation|section[s]?|notes?|memo[s]?|report[s]?|"
+    r"capture|reflect|log|track in|write up|jot down|publish|"
+    r"create a page|new page|new section|release notes?|readme)\b",
+    re.IGNORECASE,
+)
+
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
 
 
@@ -602,6 +611,10 @@ class ProposalPipeline:
             )
             if already_covered:
                 continue
+            # Only escalate action items that explicitly reference documentation or a named page.
+            # Generic tasks (schedule, send, review PR, etc.) have no Confluence target.
+            if not _DOC_ACTION_RE.search(desc):
+                continue
             rationale = f"Action item from meeting: {desc}"
             if owner:
                 rationale += f" (owner: {owner})"
@@ -623,21 +636,33 @@ class ProposalPipeline:
     def _extract_meeting_sync(self, transcript_text: str, query: str) -> dict[str, Any]:
         client = self._get_openai()
         prompt = (
-            "You extract structured facts from meeting transcripts that need to be reflected in "
-            "Confluence documentation. Identify every concrete fact, decision, metric, status update, "
-            "ownership change, date change, completed/reopened task, or agreed action that could be "
-            "documented somewhere in Confluence.\n\n"
+            "You identify Confluence documentation changes that are DIRECTLY REQUIRED by this meeting. "
+            "Only emit a change_intent when the transcript contains EXPLICIT evidence that a specific "
+            "piece of Confluence content is now stale, wrong, or newly required.\n\n"
+            "INCLUDE only when:\n"
+            "- A concrete value changed (metric, date, status, owner, version number) and the old "
+            "value is clearly different from the new value discussed.\n"
+            "- A decision was made that contradicts or supersedes existing documented content.\n"
+            "- A task/action item was completed or reopened where a Confluence task checkbox tracks it.\n"
+            "- A speaker explicitly says a page, section, or doc needs updating.\n\n"
+            "EXCLUDE — do NOT emit intents for:\n"
+            "- General discussion, opinions, or exploratory ideas not yet decided.\n"
+            "- Action items with no direct Confluence page (e.g. 'schedule a meeting', 'send an email', "
+            "'review a PR') unless a specific Confluence page was explicitly named.\n"
+            "- Facts already known to be correct in Confluence.\n"
+            "- Social niceties, recaps, or process meta-comments.\n\n"
             "Return JSON only. Rules:\n"
-            "- Capture the FINAL agreed state of each fact, not intermediate suggestions.\n"
+            "- Capture the FINAL agreed state, not intermediate suggestions.\n"
             "- One change_intent per distinct fact or update.\n"
             "- subject: the specific thing being changed (metric name, project, task, date, person).\n"
-            "- target_hint: the most likely Confluence page or section name where this lives.\n"
-            "- new_value: the new fact/value if clearly stated in the meeting — leave empty if not explicit.\n"
-            "- action: replace (updating existing content), add (new content to record), "
+            "- target_hint: the EXACT Confluence page or section name mentioned in the transcript; "
+            "if none mentioned, your most specific guess — NEVER use the action item description as the target.\n"
+            "- new_value: the new fact/value clearly stated — leave empty if not explicit.\n"
+            "- action: replace (updating existing content), add (new content with no existing counterpart), "
             "complete_task (task was finished), reopen_task (task was re-opened).\n"
             "- evidence: exact transcript lines that support this fact (up to 3).\n"
             "- Leave old_value empty — the pipeline finds the current value from the live page.\n"
-            "- Do NOT invent facts. Skip social niceties, vague filler, and process meta-comments.\n\n"
+            "- Be conservative — fewer, higher-confidence intents are better than many weak ones.\n\n"
             "JSON shape:\n"
             "{"
             '"title": string, "summary": string, "key_topics": string[], "decisions": string[], '
@@ -866,7 +891,11 @@ class ProposalPipeline:
         )
 
     def _queries_for_intent_v2(self, intent: ChangeIntent) -> list[str]:
-        """Up to 4 diverse query variants for multi-query retrieval."""
+        """Up to 5 diverse query variants for multi-query retrieval.
+
+        Priority order: explicit page title > target hint > subject+context > instruction > new value.
+        The explicit page title and target hint carry the strongest signal for finding the right page.
+        """
         queries: list[str] = []
         seen: set[str] = set()
 
@@ -876,11 +905,18 @@ class ProposalPipeline:
                 seen.add(q.lower())
                 queries.append(q)
 
-        _add(" ".join(p for p in [intent.subject, intent.target_hint] if normalize_ws(p)))
-        _add(intent.instruction)
-        _add(" ".join(p for p in [intent.new_value, intent.subject] if normalize_ws(p)))
+        # Strongest signal: explicit page title or target hint (often the actual page name)
+        if intent.page_title:
+            _add(intent.page_title)
         _add(intent.target_hint)
-        return queries[:4]
+        # Subject in the context of its target — helps section-level matching
+        _add(" ".join(p for p in [intent.subject, intent.target_hint] if normalize_ws(p)))
+        # Full instruction for semantic coverage
+        _add(intent.instruction)
+        # New value + subject: ensures exact-term BM25 hits for numbers, names, dates
+        if intent.new_value:
+            _add(" ".join(p for p in [intent.new_value, intent.subject] if normalize_ws(p)))
+        return queries[:5]
 
     # ── Section fetch ─────────────────────────────────────────────────────────
 
@@ -947,7 +983,7 @@ class ProposalPipeline:
         import concurrent.futures
 
         now = _utcnow()
-        _MIN_RERANK_SCORE = 0.3
+        _MIN_RERANK_SCORE = 0.55
         work_items: list[tuple[ChangeIntent, VectorSearchHit, str]] = []
         for intent, hits in intent_sections:
             for hit in hits:
@@ -1069,10 +1105,10 @@ class ProposalPipeline:
             return None
 
         # Verify the replace anchor actually exists in the section.
+        # Silently downgrading to append risks adding duplicate content to an unrelated section.
         if edit_mode == "replace" and before:
             if normalize_for_match(before) not in normalize_for_match(section_text):
-                edit_mode = "append"
-                before = None
+                return None
 
         section_heading = normalize_ws(str(data.get("section_heading") or hit.heading)) or hit.heading
         rationale = normalize_ws(str(data.get("rationale") or intent.rationale or intent.instruction))
@@ -1169,7 +1205,7 @@ class ProposalPipeline:
                         str(proposal.get("section_heading") or ""),
                     ]))
                 )
-                if _jaccard(intent_tokens, proposal_tokens) >= 0.15:
+                if _jaccard(intent_tokens, proposal_tokens) >= 0.35:
                     covered.add(idx)
                     break
 
@@ -1426,17 +1462,24 @@ class ProposalPipeline:
                 existing = proposal.get("verifier_note") or ""
                 proposal["verifier_note"] = " ".join([existing, *warnings]).strip()
 
-            if not supported or page_fit == "wrong":
+            confidence_after = str(proposal.get("confidence") or "medium").lower()
+            should_reject = (
+                not supported
+                or page_fit == "wrong"
+                or (page_fit == "uncertain" and confidence_after == "low")
+            )
+            if should_reject:
                 rejected_ids.add(str(proposal.get("id")))
+                if not supported:
+                    reject_reason = "Verifier rejected proposal as unsupported."
+                elif page_fit == "wrong":
+                    reject_reason = "Verifier rejected proposal because it targets the wrong page."
+                else:
+                    reject_reason = "Verifier rejected uncertain proposal with low confidence."
                 self._add_diagnostic(
                     None,
                     "verifier_rejected_proposal",
-                    note
-                    or (
-                        "Verifier rejected proposal as unsupported."
-                        if not supported
-                        else "Verifier rejected proposal because it targets the wrong page."
-                    ),
+                    note or reject_reason,
                     severity="risky",
                     page_title=str(proposal.get("page_title") or "") or None,
                 )
