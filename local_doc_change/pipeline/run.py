@@ -343,11 +343,20 @@ def _detect_target_documents(transcript: str, chunks: list) -> tuple:
                if t in _doc_identifier_tokens(transcript)]
     if not matched:
         return None, None
-    # The most distinctive named identifier tags the FEWEST documents (a specific
-    # company/page, not a broad category). Require it to point at a minority of
-    # the corpus so a stray word can't capture everything.
-    matched.sort(key=lambda kv: len(kv[1]))
+    # Scope to the BROADEST named identifier family the transcript mentions, not
+    # the rarest token. A meeting names an ORG/page whose identifier tags a
+    # *family* of that entity's documents (e.g. "acme" -> every Acme doc); a
+    # rarer token is usually a content word that merely appears in one unrelated
+    # document's title (e.g. "graph" in a Neo4j-schema page, "gateway" in a
+    # deployment guide). Picking the rarest token lets such a content word
+    # hijack a multi-document meeting and scope every change onto one wrong doc.
+    matched.sort(key=lambda kv: len(kv[1]), reverse=True)
     token, paths = matched[0]
+    # If even the broadest named identifier spans most of the corpus, the meeting
+    # references the whole (single-org) document set — don't scope to any
+    # sub-document; let each change find its own document via global retrieval.
+    # (A stray word can't capture everything: it tags few docs, so it is never
+    # the broadest match here.)
     if len(paths) > max(1, int(len(all_paths) * 0.5)):
         return None, None
     return token, paths
