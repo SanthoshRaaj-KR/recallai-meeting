@@ -74,7 +74,7 @@ class RestConfluenceClient:
             headers={"Accept": "application/json"},
             params={
                 "cql": "type = page order by lastmodified desc",
-                "limit": max(1, min(limit, 100)),
+                "limit": max(1, min(limit, 200)),
                 "expand": "space,version,_links",
             },
             timeout=15,
