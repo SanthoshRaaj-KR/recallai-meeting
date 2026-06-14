@@ -1,0 +1,45 @@
+# VM-B — low-compute box: confluence-service (8001) + org-service (8003) + Caddy TLS.
+# NOT on Azure Container Apps — ACA's 240s ingress timeout would kill the 20-min
+# proposal-pipeline SSE. Caddy has no such cap.
+#
+# Build images once (Docker Desktop running):
+#   docker build -t my-agent:latest  ../../my-agent
+#   docker build -t jarvis-org:latest ../../user_service
+
+services:
+  confluence-service:
+    image: my-agent:latest
+    build:
+      context: ../../my-agent
+    command: ["uv", "run", "uvicorn", "src.recall_bridge:app", "--host", "0.0.0.0", "--port", "8001"]
+    env_file: [.env]
+    expose:
+      - "8001"
+    restart: unless-stopped
+
+  org-service:
+    image: jarvis-org:latest
+    build:
+      context: ../../user_service
+    env_file: [.env]
+    expose:
+      - "8003"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - confluence-service
+      - org-service
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

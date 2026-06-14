@@ -1,0 +1,33 @@
+# VM-A — realtime box: bot-service (8000) + agent worker.
+#
+# Phase 3 (local test): LIVEKIT_URL points at LiveKit Cloud; run this alone.
+# Phase 6 (prod VM):    run ALONGSIDE the livekit/generate compose on the VM.
+#   On Linux prod, prefer host networking so agent→127.0.0.1:8000 and
+#   agent→local livekit work; then set BRIDGE_INTERNAL_URL=http://127.0.0.1:8000.
+#   (Locally on Win/Mac, the bridge network + service DNS below is simpler.)
+#
+# Build the image once: `docker build -t my-agent:latest ../../my-agent`
+# (requires Docker Desktop running).
+
+services:
+  bot-service:
+    image: my-agent:latest
+    build:
+      context: ../../my-agent
+    command: ["uv", "run", "uvicorn", "src.bot_service:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: [.env]
+    ports:
+      - "8000:8000"        # public (Recall loads /bot-page, posts /recall-webhook)
+    restart: unless-stopped
+
+  agent:
+    image: my-agent:latest
+    command: ["uv", "run", "src/agent.py", "start"]
+    env_file: [.env]
+    environment:
+      # Bridge network → reach bot-service by its compose service name.
+      # On the prod host-network VM, override to http://127.0.0.1:8000.
+      BRIDGE_INTERNAL_URL: "http://bot-service:8000"
+    depends_on:
+      - bot-service
+    restart: unless-stopped

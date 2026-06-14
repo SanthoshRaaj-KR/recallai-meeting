@@ -248,43 +248,13 @@ def test_refresh_falls_back_to_local_transcript_when_no_diarized() -> None:
     assert "fallback line" in ctx.items[0].content[0]
 
 
-# ── bot_service: recording_config in bot creation payload ────────────────────
-
-def test_create_recall_bot_includes_recording_config() -> None:
-    """_create_recall_bot must include audio_separate_raw and realtime_endpoints."""
-    with patch("bot_service.requests") as mock_req, \
-         patch("bot_service._mint_token", return_value="tok"):
-        mock_resp = MagicMock()
-        mock_resp.ok = True
-        mock_resp.json.return_value = {"id": "bot-abc"}
-        mock_req.post.return_value = mock_resp
-
-        import bot_service
-        bot_service.RECALL_API_KEY = "test-key"
-        bot_service.SERVER_URL = "https://example.com"
-        bot_service.LIVEKIT_URL = "wss://lk.example.com"
-        bot_service.LIVEKIT_API_KEY = "lk-key"
-        bot_service.LIVEKIT_API_SECRET = "lk-secret"
-
-        bot_service._create_recall_bot("https://meet.google.com/abc", "room-123")
-
-    payload = mock_req.post.call_args.kwargs["json"]
-
-    assert "recording_config" in payload
-    rc = payload["recording_config"]
-    assert "audio_separate_raw" in rc
-    assert "realtime_endpoints" in rc
-    assert len(rc["realtime_endpoints"]) == 1
-
-    ep = rc["realtime_endpoints"][0]
-    assert ep["type"] == "websocket"
-    assert ep["url"].startswith("wss://")
-    assert "/ws/audio/room-123" in ep["url"]
-    assert "audio_separate_raw.data" in ep["events"]
-
-
 def test_create_recall_bot_ws_url_uses_wss_scheme() -> None:
-    """The WebSocket audio URL must use wss://, not https:// or ws://."""
+    """The LiveKit URL embedded in the Recall bot-page must use wss://, not ws:// or https://.
+
+    Current architecture: the Recall bot renders bot.html as its camera webpage
+    (output_media.camera). bot.html joins LiveKit using the LIVEKIT_URL passed as a
+    query param, so that URL must be wss://.
+    """
     with patch("bot_service.requests") as mock_req, \
          patch("bot_service._mint_token", return_value="tok"):
         mock_resp = MagicMock()
@@ -302,7 +272,8 @@ def test_create_recall_bot_ws_url_uses_wss_scheme() -> None:
         bot_service._create_recall_bot("https://zoom.us/j/123", "room-456")
 
     payload = mock_req.post.call_args.kwargs["json"]
-    ws_url = payload["recording_config"]["realtime_endpoints"][0]["url"]
+    bot_page_url = payload["output_media"]["camera"]["config"]["url"]
 
-    assert ws_url.startswith("wss://my-server.example.com")
-    assert "https://" not in ws_url
+    assert "url=wss://lk.example.com" in bot_page_url
+    assert "url=ws://" not in bot_page_url
+    assert "url=https://lk" not in bot_page_url
