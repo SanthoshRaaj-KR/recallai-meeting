@@ -149,10 +149,11 @@
    - `agent` → `agent.py start`; env `LIVEKIT_URL/KEY/SECRET=self-hosted`, `BRIDGE_INTERNAL_URL=http://127.0.0.1:8000`, Cerebras/AssemblyAI/Cartesia/Supabase/Pinecone/Atlassian.
    - `bot-service` → `uvicorn src.bot_service:app --port 8000`; env LiveKit self-hosted, `RECALL_API_KEY`, **`BRIDGE_SERVER_URL=https://<vm-a-domain>`**, `AGENT_NAME=my-agent`, Supabase/Pinecone, explicit `CORS_ORIGINS`.
 2. Caddy on VM-A: public `:443` → `:8000` for `/bot-page`, `/recall-webhook`, `/bot/*`, `/sessions/*`, `/history`, `/rag/*`.
+3. **Startup refinement (carry into all compose CMDs):** the image's default `uv run …` **rebuilds the package at container start (~20 s)**. In prod compose, invoke the prebuilt venv directly to start instantly — e.g. `uv run --no-sync uvicorn …` or `/app/.venv/bin/uvicorn …` (and `/app/.venv/bin/python src/agent.py start` for the agent). Deps are already installed at image build (`uv sync --locked`), so no runtime sync is needed.
 
 **Tests**
 - `https://<vm-a-domain>/health` (bot-service) green.
-- Trigger `jarvis-call/token` → join the room → STT→Cerebras→**Cartesia** TTS works on self-hosted LiveKit.
+- Trigger `jarvis-call/token` → join the room → STT→Cerebras→**edge-tts** TTS works on self-hosted LiveKit.
 - Transcript POST hits `127.0.0.1:8000` (check bot-service logs); `GET /sessions/{id}/review/transcript` returns lines.
 
 **Exit Gate:** agent + bot-service healthy on VM-A against self-hosted LiveKit; a voice session completes; localhost transcript ingest confirmed.
