@@ -11,7 +11,8 @@ services:
     image: my-agent:latest
     build:
       context: ../../my-agent
-    command: ["uv", "run", "uvicorn", "src.recall_bridge:app", "--host", "0.0.0.0", "--port", "8001"]
+    # --no-sync: skip the runtime package rebuild (~20s). Deps are baked at image build.
+    command: ["uv", "run", "--no-sync", "uvicorn", "src.recall_bridge:app", "--host", "0.0.0.0", "--port", "8001"]
     env_file: [.env]
     expose:
       - "8001"

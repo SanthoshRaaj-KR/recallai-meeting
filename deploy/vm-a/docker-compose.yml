@@ -14,7 +14,8 @@ services:
     image: my-agent:latest
     build:
       context: ../../my-agent
-    command: ["uv", "run", "uvicorn", "src.bot_service:app", "--host", "0.0.0.0", "--port", "8000"]
+    # --no-sync: skip the runtime package rebuild (~20s). Deps are baked at image build.
+    command: ["uv", "run", "--no-sync", "uvicorn", "src.bot_service:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file: [.env]
     ports:
       - "8000:8000"        # public (Recall loads /bot-page, posts /recall-webhook)
@@ -22,7 +23,7 @@ services:
 
   agent:
     image: my-agent:latest
-    command: ["uv", "run", "src/agent.py", "start"]
+    command: ["uv", "run", "--no-sync", "src/agent.py", "start"]
     env_file: [.env]
     environment:
       # Bridge network → reach bot-service by its compose service name.

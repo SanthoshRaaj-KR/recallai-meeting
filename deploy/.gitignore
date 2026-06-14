@@ -1,0 +1,4 @@
+# Never commit real env files — only .env.example is tracked.
+.env
+*/.env
+**/.env
