@@ -8,9 +8,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install deps first for layer caching.
-COPY requirements.txt /app/user_service/requirements.txt
-RUN pip install --no-cache-dir -r /app/user_service/requirements.txt
+# Install pinned deps first for layer caching + reproducible builds.
+# requirements.lock is the fully-resolved freeze; requirements.txt is the human-readable source.
+COPY requirements.txt requirements.lock /app/user_service/
+RUN pip install --no-cache-dir -r /app/user_service/requirements.lock
 
 # Copy the package. Run context is user_service/, so contents land in /app/user_service
 # and the app is importable as `user_service.main:app` (relative imports require this layout).
