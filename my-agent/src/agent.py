@@ -22,24 +22,25 @@ from livekit.agents import (
     ModelSettings,
     StopResponse,
     cli,
-    inference,
     llm,
     mcp,
     room_io,
     stt as lk_stt,
 )
 from livekit import rtc
-from livekit.plugins import ai_coustics, assemblyai, cerebras, silero
+from livekit.plugins import assemblyai, cerebras, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from typing import AsyncIterable
 
 try:
     from .memory_compaction import TranscriptCompactor
     from .confluence_rag import ConfluenceLiveRAG
+    from .edge_tts_plugin import EdgeTTS
     from . import session_store
 except ImportError:  # Allows `python src/agent.py ...` from my-agent.
     from memory_compaction import TranscriptCompactor
     from confluence_rag import ConfluenceLiveRAG
+    from edge_tts_plugin import EdgeTTS
     import session_store
 
 logger = logging.getLogger("agent")
@@ -760,9 +761,7 @@ async def my_agent(ctx: JobContext):
                 model="u3-rt-pro",
                 language_detection=False,
             ),
-            tts=inference.TTS(
-                model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
-            ),
+            tts=EdgeTTS(),
             turn_detection=turn_detector,
             vad=ctx.proc.userdata["vad"],
         )
@@ -800,9 +799,7 @@ async def my_agent(ctx: JobContext):
             keyterms_prompt=["Jarvis", "Hey Jarvis"],
             language_detection=False,
         ),
-        tts=inference.TTS(
-            model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
-        ),
+        tts=EdgeTTS(),
         turn_detection=turn_detector,
         vad=ctx.proc.userdata["vad"],
         # Disabled: on_user_turn_completed always rewrites or clears the message,
@@ -825,18 +822,11 @@ async def my_agent(ctx: JobContext):
             ),
         )
     else:
-        # Standard mode (console / direct browser): subscribe to all participants
-        # with background noise cancellation enabled.
+        # Standard mode (console / direct browser): subscribe to all participants.
+        # (LiveKit Cloud-only ai_coustics noise cancellation removed for self-hosting.)
         await session.start(
             agent=Assistant(confluence_enabled=confluence_enabled),
             room=ctx.room,
-            room_options=room_io.RoomOptions(
-                audio_input=room_io.AudioInputOptions(
-                    noise_cancellation=ai_coustics.audio_enhancement(
-                        model=ai_coustics.EnhancerModel.QUAIL_VF_S
-                    ),
-                ),
-            ),
         )
 
 
