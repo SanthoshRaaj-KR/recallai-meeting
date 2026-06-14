@@ -19,13 +19,22 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from agent import _extract_query, _extract_topic_hint  # noqa: E402
-from confluence_rag import ConfluenceLiveRAG, _SCORE_THRESHOLD  # noqa: E402
+from confluence_rag import _SCORE_THRESHOLD, ConfluenceLiveRAG  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _enable_pinecone(monkeypatch):
+    """ConfluenceLiveRAG.enabled reads PINECONE_API_KEY; set a dummy so search() runs
+    against the mocked index. Real Pinecone is never contacted (index is a MagicMock)."""
+    monkeypatch.setenv("PINECONE_API_KEY", "test-key")
 
 
 # ── Fake Pinecone result builder ──────────────────────────────────────────────

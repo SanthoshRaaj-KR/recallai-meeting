@@ -1,23 +1,19 @@
-"""Tests for diarized-transcript integration in agent.py.
+"""Tests for the bot_service Recall payload + the transcript-posting gate in agent.py.
 
-Covers:
-- _load_diarized_context: reads speaker names + active_speaker from session_store
-- _post_transcript: skips user entries when diarized_active=True, writes when False
-- _refresh_transcript_in_ctx: prefers diarized_lines over local deque
-- bot_service: recording_config in _create_recall_bot payload
+NOTE: the former `_load_diarized_context` / `_refresh_transcript_in_ctx(diarized_lines=...)`
+tests were removed — that diarization mechanism was taken out of agent.py. Named
+diarization is being rebuilt on Recall native transcription, which will ship with
+its own fresh tests.
 """
 
+import os
+import sys
 import time
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
-
-import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import agent as agent_module
-from agent import Assistant, _TRANSCRIPT_WINDOW
-
+from agent import Assistant
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -38,72 +34,6 @@ def _make_assistant(session_id: str = "sess-xyz") -> Assistant:
         return a
 
 
-# ── _load_diarized_context ────────────────────────────────────────────────────
-
-def test_load_diarized_context_returns_speaker_lines() -> None:
-    assistant = _make_assistant("sess-001")
-    fake_session = {
-        "transcript": [
-            {"participant": "Alice", "text": "can we deploy Friday?", "source": "recall_participant"},
-            {"participant": "Bob",   "text": "I need more testing time", "source": "recall_participant"},
-        ],
-        "active_speaker": "Alice",
-    }
-    with patch("agent.session_store") as mock_store:
-        mock_store.get.return_value = fake_session
-        lines, speaker = assistant._load_diarized_context()
-
-    assert speaker == "Alice"
-    assert "Alice: can we deploy Friday?" in lines
-    assert "Bob: I need more testing time" in lines
-
-
-def test_load_diarized_context_defaults_when_no_session() -> None:
-    assistant = _make_assistant("sess-002")
-    with patch("agent.session_store") as mock_store:
-        mock_store.get.return_value = None
-        lines, speaker = assistant._load_diarized_context()
-
-    assert lines == []
-    assert speaker == "Meeting"
-
-
-def test_load_diarized_context_defaults_on_exception() -> None:
-    assistant = _make_assistant("sess-003")
-    with patch("agent.session_store") as mock_store:
-        mock_store.get.side_effect = RuntimeError("db unavailable")
-        lines, speaker = assistant._load_diarized_context()
-
-    assert lines == []
-    assert speaker == "Meeting"
-
-
-def test_load_diarized_context_limits_to_window() -> None:
-    """Only the most recent _TRANSCRIPT_WINDOW entries are returned."""
-    assistant = _make_assistant("sess-004")
-    entries = [
-        {"participant": "Alice", "text": f"line {i}", "source": "recall_participant"}
-        for i in range(_TRANSCRIPT_WINDOW + 50)
-    ]
-    with patch("agent.session_store") as mock_store:
-        mock_store.get.return_value = {"transcript": entries, "active_speaker": None}
-        lines, _ = assistant._load_diarized_context()
-
-    assert len(lines) <= _TRANSCRIPT_WINDOW
-
-
-def test_load_diarized_context_no_session_id_returns_empty() -> None:
-    """Without a session_id (console mode) returns empty immediately."""
-    assistant = _make_assistant()
-    assistant._session_id = ""
-    with patch("agent.session_store") as mock_store:
-        lines, speaker = assistant._load_diarized_context()
-
-    mock_store.get.assert_not_called()
-    assert lines == []
-    assert speaker == "Meeting"
-
-
 # ── _post_transcript diarized_active gate ────────────────────────────────────
 
 def test_post_transcript_skips_user_when_diarized_active() -> None:
@@ -114,20 +44,11 @@ def test_post_transcript_skips_user_when_diarized_active() -> None:
     assistant._diarized_active_checked_at = time.time()
 
     with patch("agent.requests") as mock_requests:
-        # Run _post_transcript synchronously by calling the inner _send directly
-        # We simulate what asyncio.to_thread would execute
-        session_id = assistant._session_id
         is_jarvis = False
         diarized_active = assistant._diarized_active
-        checked_at = assistant._diarized_active_checked_at
 
-        # Replicate the _send closure logic inline
-        now = time.time()
-        if now - checked_at >= 30.0:
-            pass  # cache is fresh, no refresh needed
         if not is_jarvis and diarized_active:
-            # Should return early — no HTTP call
-            pass
+            pass  # Should return early — no HTTP call
         else:
             mock_requests.post("should_not_be_called")
 
@@ -145,9 +66,7 @@ def test_post_transcript_sends_user_when_not_diarized_active() -> None:
         session_id = assistant._session_id
         is_jarvis = False
         diarized_active = assistant._diarized_active
-        checked_at = assistant._diarized_active_checked_at
 
-        # Replicate _send logic
         now = time.time()
         if not (not is_jarvis and diarized_active):
             mock_requests.post(
@@ -178,75 +97,7 @@ def test_post_transcript_always_sends_jarvis_reply() -> None:
         mock_requests.post.assert_called_once()
 
 
-# ── _refresh_transcript_in_ctx ────────────────────────────────────────────────
-
-def test_refresh_uses_diarized_lines_when_provided() -> None:
-    """When diarized_lines is given, it is injected into the LLM context snapshot."""
-    assistant = _make_assistant("sess-020")
-    assistant._last_rag_context = ""
-    assistant._transcript_msg_id = None
-
-    diarized = ["Alice: can we deploy Friday?", "Bob: I need more testing"]
-
-    turn_ctx = MagicMock()
-    turn_ctx.index_by_id.return_value = None
-    turn_ctx.items = []
-
-    new_msg = MagicMock()
-    new_msg.id = "msg-001"
-    turn_ctx.index_by_id.return_value = None
-
-    with patch("agent.llm") as mock_llm:
-        mock_llm.ChatMessage.return_value = MagicMock(id="snapshot-msg")
-        agent_module._tail_lines_to_char_budget  # just import check
-
-    # Call directly — no mocking needed since we just inspect the snapshot string
-    # Build a minimal real ChatContext substitute
-    class _FakeChatCtx:
-        def __init__(self):
-            self.items = []
-        def index_by_id(self, _id):
-            return None
-        def truncate(self, max_items):
-            pass
-
-    from livekit.agents import llm as lk_llm
-    ctx = _FakeChatCtx()
-    msg = lk_llm.ChatMessage(role="user", content=["placeholder"])
-
-    assistant._refresh_transcript_in_ctx(ctx, msg, diarized_lines=diarized)
-
-    # A snapshot system message must have been inserted
-    assert len(ctx.items) == 1
-    snapshot_text = ctx.items[0].content[0]
-    assert "Alice: can we deploy Friday?" in snapshot_text
-    assert "Bob: I need more testing" in snapshot_text
-
-
-def test_refresh_falls_back_to_local_transcript_when_no_diarized() -> None:
-    """When diarized_lines is empty, local self._transcript deque is used."""
-    assistant = _make_assistant("sess-021")
-    assistant._last_rag_context = ""
-    assistant._transcript_msg_id = None
-    assistant._transcript.append("Meeting: some old fallback line")
-
-    class _FakeChatCtx:
-        def __init__(self):
-            self.items = []
-        def index_by_id(self, _id):
-            return None
-        def truncate(self, max_items):
-            pass
-
-    from livekit.agents import llm as lk_llm
-    ctx = _FakeChatCtx()
-    msg = lk_llm.ChatMessage(role="user", content=["placeholder"])
-
-    assistant._refresh_transcript_in_ctx(ctx, msg, diarized_lines=[])
-
-    assert len(ctx.items) == 1
-    assert "fallback line" in ctx.items[0].content[0]
-
+# ── bot_service: LiveKit URL scheme in the Recall bot-page payload ────────────
 
 def test_create_recall_bot_ws_url_uses_wss_scheme() -> None:
     """The LiveKit URL embedded in the Recall bot-page must use wss://, not ws:// or https://.

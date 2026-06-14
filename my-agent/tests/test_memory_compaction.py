@@ -10,18 +10,6 @@ from review_pipeline.models import ExtractedMeeting  # noqa: E402
 from review_pipeline.pipeline import ProposalPipeline  # noqa: E402
 
 
-async def async_no_candidates(*_args, **_kwargs):
-    return []
-
-
-async def async_passthrough_verify(_meeting, proposals, _text):
-    return proposals
-
-
-async def async_passthrough_critic(_meeting, proposals, _text, query=None):
-    return proposals
-
-
 def test_compactor_uses_llm_summary_for_lines_that_leave_recent_window():
     calls = []
 
@@ -101,9 +89,8 @@ def test_pipeline_includes_optional_compacted_memory_context(monkeypatch):
         )
 
     monkeypatch.setattr(pipeline, "_extract_meeting", fake_extract)
-    monkeypatch.setattr(pipeline, "_generate_page_grounded_candidates", async_no_candidates)
-    monkeypatch.setattr(pipeline, "_adversarial_verify", async_passthrough_verify)
-    monkeypatch.setattr(pipeline, "_rovo_independent_critic", async_passthrough_critic)
+    # Stubbed extraction returns no change_intents, so run() returns early
+    # (before RAG/drafting/verification) — those stages need no stubbing here.
 
     meeting, proposals = asyncio.run(
         pipeline.run(
