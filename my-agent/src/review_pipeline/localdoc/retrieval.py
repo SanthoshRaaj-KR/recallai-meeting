@@ -141,8 +141,13 @@ class PineconeHybridIndex:
 
     # ── Indexing ─────────────────────────────────────────────────────────────
 
-    def upsert_chunks(self, chunks: list[ChunkRecord], page_map: dict[str, dict] | None = None) -> int:
-        """Upsert chunks into BOTH the dense and sparse indexes. Returns count."""
+    def upsert_chunks(
+        self,
+        chunks: list[ChunkRecord],
+        page_map: dict[str, dict] | None = None,
+        indexes: tuple[str, ...] = ("dense", "sparse"),
+    ) -> int:
+        """Upsert chunks into the named indexes (default both). Returns count."""
         if not chunks:
             return 0
         page_map = page_map or {}
@@ -160,7 +165,7 @@ class PineconeHybridIndex:
                 "doc_title": c.doc_title,
                 "page_id": str(meta.get("page_id") or ""),
             })
-        for which in ("dense", "sparse"):
+        for which in indexes:
             index = self._index(which)
             if index is None:
                 logger.info("skipping %s upsert (index unavailable)", which)
