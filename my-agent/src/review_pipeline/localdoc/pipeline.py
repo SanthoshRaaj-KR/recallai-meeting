@@ -42,7 +42,12 @@ class PipelineConfig(BaseModel):
     max_targets_per_intent: int = 1
     cross_cutting_top_k: int = 40
     cross_cutting_max_targets: int = 30
-    min_fulfillment: float = 0.4
+    # Precision-first: drop drafts the verifier isn't confident actually applied
+    # the change. Correct edits score ~0.85-1.0; 0.6 cuts the weak/uncertain ones
+    # (the user prefers a missed change over a wrong card).
+    min_fulfillment: float = 0.6
+    # Drop cards whose draft fails verification on factual consistency.
+    min_factual: float = 0.6
 
 
 # ── Deterministic recall helpers (ported verbatim) ────────────────────────────
@@ -114,6 +119,21 @@ def _phrase_overlap_match(intent: LocalDocIntent, chunk: ChunkRecord) -> bool:
 
 def _has_concrete_value(i: LocalDocIntent) -> bool:
     return (i.new_value or "").strip().lower() not in _PLACEHOLDER_VALUES
+
+
+def _meaningful_change(before: str, after: str) -> bool:
+    """True only if a real token actually changed.
+
+    Drops cards where before/after differ only in whitespace or punctuation (a
+    near-no-op that slipped past the strict strip() check) — those are the weak,
+    review-noise cards. Compares the multiset of alphanumeric/value tokens.
+    """
+    from collections import Counter
+
+    pat = r"[a-z0-9][a-z0-9$%./-]*"
+    b = Counter(re.findall(pat, (before or "").lower()))
+    a = Counter(re.findall(pat, (after or "").lower()))
+    return b != a
 
 
 def _query_text(intent: LocalDocIntent) -> str:
@@ -229,12 +249,16 @@ async def propose(
     proposals: list[LocalDocProposal] = []
     for (intent, chunk), draft, ver in zip(qualified, drafts, verifications):
         before, after = draft.before_content, draft.after_content
-        if after.strip() == before.strip():
-            logger.info("localdoc.propose: dropping no-op edit on %r", chunk.section_heading)
+        if after.strip() == before.strip() or not _meaningful_change(before, after):
+            logger.info("localdoc.propose: dropping no-op/trivial edit on %r", chunk.section_heading)
             continue
         if ver.intent_fulfillment < cfg.min_fulfillment:
             logger.info("localdoc.propose: dropping unfulfilled edit on %r (%.2f)",
                         chunk.section_heading, ver.intent_fulfillment)
+            continue
+        if ver.factual_consistency < cfg.min_factual:
+            logger.info("localdoc.propose: dropping factually-weak edit on %r (%.2f)",
+                        chunk.section_heading, ver.factual_consistency)
             continue
         edit_type = draft.edit_type if draft.edit_type in ("replace", "append", "delete_section") else "replace"
         prop = LocalDocProposal.create(cfg.session_id, intent, chunk)
