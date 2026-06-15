@@ -1,4 +1,4 @@
-"""Vendored local-doc proposal pipeline for Confluence (Pinecone-hybrid retrieval).
+"""Vendored Confluence proposal pipeline for Confluence (Pinecone-hybrid retrieval).
 
 The proposal agents (intent extraction, evaluation, editing, verification,
 structural classification) are copied byte-for-byte from the confluence branch's
@@ -8,14 +8,14 @@ nothing runs on a local vector store and the embeddings are Pinecone's own.
 """
 
 from .chunker import chunk_file, chunk_folder, chunk_markdown_text
-from .models import ChunkRecord, LocalDocIntent, LocalDocProposal
+from .models import ChunkRecord, ConfluenceIntent, ConfluenceProposal
 from .pipeline import PipelineConfig, propose
 from .retrieval import PineconeHybridIndex
 
 __all__ = [
     "ChunkRecord",
-    "LocalDocIntent",
-    "LocalDocProposal",
+    "ConfluenceIntent",
+    "ConfluenceProposal",
     "PipelineConfig",
     "PineconeHybridIndex",
     "propose",

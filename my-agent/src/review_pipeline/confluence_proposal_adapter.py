@@ -1,14 +1,14 @@
-"""Confluence adapter for the vendored local-doc proposal pipeline.
+"""Confluence adapter for the vendored Confluence proposal pipeline.
 
-Drives the proven local-doc proposal *logic* (vendored byte-for-byte into
-``review_pipeline.localdoc``) against Confluence pages, using Pinecone-native
+Drives the proven Confluence proposal *logic* (vendored byte-for-byte into
+``review_pipeline.confluence_pipeline``) against Confluence pages, using Pinecone-native
 hybrid retrieval (dense + sparse integrated inference + rerank) — nothing runs on
 a local vector store. The proposal agents (intent extraction → evaluation →
 editing → verification) are unchanged; only retrieval is Pinecone-backed.
 
 Flow:
-  transcript → localdoc.propose(retriever=PineconeHybridIndex)
-            → LocalDocProposal[]  (source_chunk.source_path = corpus filename)
+  transcript → confluence_pipeline.propose(retriever=PineconeHybridIndex)
+            → ConfluenceProposal[]  (source_chunk.source_path = corpus filename)
             → map filename → Confluence page_id via corpus_page_map.json
             → my-agent Proposal[]  (only pages with a real page_id survive)
 
@@ -25,8 +25,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from .localdoc import PineconeHybridIndex, PipelineConfig, propose
-from .localdoc.models import LocalDocProposal
+from .confluence_pipeline import PineconeHybridIndex, PipelineConfig, propose
+from .confluence_pipeline.models import ConfluenceProposal
 from .models import ExtractedMeeting, Proposal
 from .pipeline import ProposalPipeline
 from .text_utils import format_transcript, normalize_ws
@@ -75,11 +75,11 @@ def _confidence_bin(score: float) -> str:
 
 
 def _proposal_from_native(
-    p: LocalDocProposal,
+    p: ConfluenceProposal,
     page_map: dict[str, dict],
     session_id: str,
 ) -> dict[str, Any] | None:
-    """Map a vendored LocalDocProposal to a my-agent Proposal dict.
+    """Map a vendored ConfluenceProposal to a my-agent Proposal dict.
 
     Returns None when the source document does not map to a Confluence page —
     those are dropped so only real Confluence pages become review cards (this
@@ -129,14 +129,14 @@ def _proposal_from_native(
         edit_mode=edit_mode,  # type: ignore[arg-type]
         change_summary=(f"Update '{heading}' on {page_title}" if heading else f"Update {topic}".strip()) or None,
         page_url=str(meta.get("url") or "") or None,
-        source="local-doc-pipeline",
+        source="confluence-pipeline",
         confidence_score=quality,
         confidence_bin=bin_,  # type: ignore[arg-type]
     )
     return proposal.to_dict()
 
 
-async def run_local_doc_pipeline(
+async def run_confluence_pipeline(
     *,
     session_id: str,
     transcript: list[dict[str, Any]],
@@ -144,7 +144,7 @@ async def run_local_doc_pipeline(
     emit: EmitFn | None = None,
     pipeline: ProposalPipeline | None = None,  # accepted for signature compat; unused
 ) -> tuple[ExtractedMeeting, list[dict[str, Any]]]:
-    """Drop-in replacement for ProposalPipeline.run that proposes via local-doc logic."""
+    """Drop-in replacement for ProposalPipeline.run that proposes via Confluence logic."""
     from memory_compaction import add_memory_context
 
     async def _emit(event: dict[str, Any]) -> None:
@@ -184,7 +184,7 @@ async def run_local_doc_pipeline(
         ),
     )
     logger.info(
-        "localdoc adapter: %d intents -> %d proposals (%d dropped: no Confluence page)",
+        "confluence_pipeline adapter: %d intents -> %d proposals (%d dropped: no Confluence page)",
         len(intents), len(proposals), dropped,
     )
     return meeting, proposals

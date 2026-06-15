@@ -1,4 +1,4 @@
-"""Vendored local-doc proposal pipeline (Confluence, Pinecone-hybrid retrieval).
+"""Vendored Confluence proposal pipeline (Confluence, Pinecone-hybrid retrieval).
 
 This is the confluence-branch ``pipeline/run.py`` EDIT path, ported into my-agent
 with one change: document retrieval goes through the Pinecone-native hybrid index
@@ -22,10 +22,10 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from .editor import LocalDocEditorAgent
+from .editor import ConfluenceEditorAgent
 from .evaluation import EvaluationAgent
 from .intent_extraction import IntentExtractionAgent
-from .models import ChunkRecord, LocalDocIntent, LocalDocProposal
+from .models import ChunkRecord, ConfluenceIntent, ConfluenceProposal
 from .retrieval import PineconeHybridIndex
 from .structural import classify_kind, is_cross_cutting
 from .verifier import VerifierAgent
@@ -92,7 +92,7 @@ def _field_labels(content: str) -> list[str]:
     return labels
 
 
-def _field_label_match(intent: LocalDocIntent, chunk: ChunkRecord) -> bool:
+def _field_label_match(intent: ConfluenceIntent, chunk: ChunkRecord) -> bool:
     topic_toks = _sig_tokens(getattr(intent, "affected_topic", ""))
     if len(topic_toks) < 2:
         return False
@@ -107,7 +107,7 @@ def _field_label_match(intent: LocalDocIntent, chunk: ChunkRecord) -> bool:
     return False
 
 
-def _phrase_overlap_match(intent: LocalDocIntent, chunk: ChunkRecord) -> bool:
+def _phrase_overlap_match(intent: ConfluenceIntent, chunk: ChunkRecord) -> bool:
     verbatim = " ".join(getattr(intent, "verbatim_snippets", None) or [])
     vtoks = set(_sig_tokens(verbatim))
     if len(vtoks) < 4:
@@ -117,7 +117,7 @@ def _phrase_overlap_match(intent: LocalDocIntent, chunk: ChunkRecord) -> bool:
     return matched >= 3 and matched >= 0.6 * len(vtoks)
 
 
-def _has_concrete_value(i: LocalDocIntent) -> bool:
+def _has_concrete_value(i: ConfluenceIntent) -> bool:
     return (i.new_value or "").strip().lower() not in _PLACEHOLDER_VALUES
 
 
@@ -136,7 +136,7 @@ def _meaningful_change(before: str, after: str) -> bool:
     return b != a
 
 
-def _query_text(intent: LocalDocIntent) -> str:
+def _query_text(intent: ConfluenceIntent) -> str:
     return " ".join(
         p for p in (
             intent.affected_topic, intent.old_value, intent.new_value,
@@ -154,7 +154,7 @@ async def propose(
     retriever: PineconeHybridIndex,
     config: Optional[PipelineConfig] = None,
     emit: Optional[EmitFn] = None,
-) -> tuple[list[LocalDocIntent], list[LocalDocProposal]]:
+) -> tuple[list[ConfluenceIntent], list[ConfluenceProposal]]:
     """Run the proven edit pipeline over Pinecone-hybrid retrieval.
 
     Returns ``(intents, proposals)``. ``intents`` is every extracted intent (for
@@ -178,14 +178,14 @@ async def propose(
         i for i in intents
         if classify_kind(i) == "edit" and _has_concrete_value(i)
     ]
-    logger.info("localdoc.propose: %d intents (%d editable)", len(intents), len(edit_intents))
+    logger.info("confluence_pipeline.propose: %d intents (%d editable)", len(intents), len(edit_intents))
     if not edit_intents:
         return intents, []
 
     # ── Stage 3-4: per-intent hybrid retrieval ───────────────────────────────
     await _emit("rag_retrieval")
 
-    async def _retrieve(intent: LocalDocIntent) -> tuple[LocalDocIntent, list[ChunkRecord], int]:
+    async def _retrieve(intent: ConfluenceIntent) -> tuple[ConfluenceIntent, list[ChunkRecord], int]:
         cross = is_cross_cutting(intent)
         top_k = cfg.cross_cutting_top_k if cross else cfg.retrieval_top_k
         max_targets = cfg.cross_cutting_max_targets if cross else cfg.max_targets_per_intent
@@ -198,7 +198,7 @@ async def propose(
     await _emit("evaluation")
     eval_agent = EvaluationAgent()
 
-    async def _score_pool(intent: LocalDocIntent, chunks: list[ChunkRecord], max_targets: int):
+    async def _score_pool(intent: ConfluenceIntent, chunks: list[ChunkRecord], max_targets: int):
         if not chunks:
             return []
         raw = await asyncio.gather(*[eval_agent.score(intent, c) for c in chunks])
@@ -210,7 +210,7 @@ async def propose(
                 s = max(s, _PHRASE_FLOOR)
             scores.append(s)
         ranked = sorted(zip(chunks, scores), key=lambda cs: cs[1], reverse=True)
-        kept: list[tuple[LocalDocIntent, ChunkRecord]] = []
+        kept: list[tuple[ConfluenceIntent, ChunkRecord]] = []
         seen: set[tuple[str, str]] = set()
         for chunk, score in ranked:
             if score < cfg.relevance_threshold:
@@ -233,7 +233,7 @@ async def propose(
 
     # ── Stage 6: drafting ────────────────────────────────────────────────────
     await _emit("drafting")
-    editor = LocalDocEditorAgent()
+    editor = ConfluenceEditorAgent()
     drafts = await asyncio.gather(*[editor.draft(i, c.content) for i, c in qualified])
 
     # ── Stage 7: verification ────────────────────────────────────────────────
@@ -246,22 +246,22 @@ async def propose(
 
     # ── Stage 8: assemble, suppress no-ops + unfulfilled ─────────────────────
     await _emit("ready_for_review")
-    proposals: list[LocalDocProposal] = []
+    proposals: list[ConfluenceProposal] = []
     for (intent, chunk), draft, ver in zip(qualified, drafts, verifications):
         before, after = draft.before_content, draft.after_content
         if after.strip() == before.strip() or not _meaningful_change(before, after):
-            logger.info("localdoc.propose: dropping no-op/trivial edit on %r", chunk.section_heading)
+            logger.info("confluence_pipeline.propose: dropping no-op/trivial edit on %r", chunk.section_heading)
             continue
         if ver.intent_fulfillment < cfg.min_fulfillment:
-            logger.info("localdoc.propose: dropping unfulfilled edit on %r (%.2f)",
+            logger.info("confluence_pipeline.propose: dropping unfulfilled edit on %r (%.2f)",
                         chunk.section_heading, ver.intent_fulfillment)
             continue
         if ver.factual_consistency < cfg.min_factual:
-            logger.info("localdoc.propose: dropping factually-weak edit on %r (%.2f)",
+            logger.info("confluence_pipeline.propose: dropping factually-weak edit on %r (%.2f)",
                         chunk.section_heading, ver.factual_consistency)
             continue
         edit_type = draft.edit_type if draft.edit_type in ("replace", "append", "delete_section") else "replace"
-        prop = LocalDocProposal.create(cfg.session_id, intent, chunk)
+        prop = ConfluenceProposal.create(cfg.session_id, intent, chunk)
         prop.before_content = before
         prop.after_content = after
         prop.edit_type = edit_type
@@ -273,6 +273,6 @@ async def propose(
         prop.verifier_note = ver.verifier_note
         proposals.append(prop)
 
-    logger.info("localdoc.propose: %d proposal(s) from %d qualified section(s)",
+    logger.info("confluence_pipeline.propose: %d proposal(s) from %d qualified section(s)",
                 len(proposals), len(qualified))
     return intents, proposals

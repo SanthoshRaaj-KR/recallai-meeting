@@ -1,4 +1,4 @@
-"""Data models for the vendored local-doc proposal pipeline.
+"""Data models for the vendored Confluence proposal pipeline.
 
 These are copied verbatim (semantics-preserving) from the confluence-branch
 ``local_doc_change/models/`` so the proposal logic is byte-for-byte the same.
@@ -28,7 +28,7 @@ IntentType = Literal[
 ]
 
 
-class LocalDocIntent(BaseModel):
+class ConfluenceIntent(BaseModel):
     """A single actionable document-change intent extracted from a transcript."""
 
     # The LLM frequently returns numeric old/new values as JSON numbers (e.g.
@@ -81,12 +81,12 @@ class RetrievalResult(BaseModel):
 ProposalStatus = Literal["pending", "accepted", "rejected"]
 
 
-class LocalDocProposal(BaseModel):
+class ConfluenceProposal(BaseModel):
     """A proposed edit to a document, pending human review."""
 
     proposal_id: str  # uuid4
     session_id: str
-    intent: LocalDocIntent
+    intent: ConfluenceIntent
     source_chunk: ChunkRecord
     before_content: str
     after_content: str
@@ -104,9 +104,9 @@ class LocalDocProposal(BaseModel):
     def create(
         cls,
         session_id: str,
-        intent: LocalDocIntent,
+        intent: ConfluenceIntent,
         chunk: ChunkRecord,
-    ) -> "LocalDocProposal":
+    ) -> "ConfluenceProposal":
         return cls(
             proposal_id=str(uuid.uuid4()),
             session_id=session_id,

@@ -1,4 +1,4 @@
-"""Pinecone-native hybrid retrieval for the vendored local-doc pipeline.
+"""Pinecone-native hybrid retrieval for the vendored Confluence pipeline.
 
 Replaces the confluence-branch FAISS+BM25+OpenAI retriever with a fully managed,
 server-side hybrid on Pinecone — nothing local, so it scales with the product:

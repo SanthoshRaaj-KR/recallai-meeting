@@ -6,7 +6,7 @@ indexes. Each chunk carries its mapped Confluence ``page_id`` (from a
 filename -> page_id map) so proposals can be attributed to the right page.
 
 Usage:
-    python -m review_pipeline.localdoc.reindex [corpus_dir] [page_map.json]
+    python -m review_pipeline.confluence_pipeline.reindex [corpus_dir] [page_map.json]
 
 Defaults: corpus_dir = ../local_doc_change/stress_corpus/docs (combined
 smarthub + stress corpus), page_map = ../local_doc_change/corpus_page_map.json.
@@ -26,8 +26,8 @@ _REPO = _MY_AGENT.parent
 
 load_dotenv(_MY_AGENT / ".env.local")
 
-from review_pipeline.localdoc.chunker import chunk_folder  # noqa: E402
-from review_pipeline.localdoc.retrieval import PineconeHybridIndex  # noqa: E402
+from review_pipeline.confluence_pipeline.chunker import chunk_folder  # noqa: E402
+from review_pipeline.confluence_pipeline.retrieval import PineconeHybridIndex  # noqa: E402
 
 
 def _default_corpus() -> str:

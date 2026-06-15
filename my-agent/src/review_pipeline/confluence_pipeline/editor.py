@@ -1,4 +1,4 @@
-"""LocalDocEditorAgent — drafts document edits given a change intent and section content.
+"""ConfluenceEditorAgent — drafts document edits given a change intent and section content.
 
 Uses the OpenAI Agents SDK (agents.Agent + agents.Runner) with structured output
 to return an EditorDraft with before_content and after_content strings.
@@ -13,7 +13,7 @@ from agents import Agent, Runner
 from pydantic import BaseModel
 
 from .llm_runtime import guarded_run
-from .models import LocalDocIntent
+from .models import ConfluenceIntent
 
 logger = logging.getLogger(__name__)
 
@@ -44,19 +44,19 @@ class EditorDraft(BaseModel):
     edit_type: str  # "replace" | "append" | "delete_section"
 
 
-class LocalDocEditorAgent:
+class ConfluenceEditorAgent:
     """Drafts before/after content for a document section given a change intent."""
 
     def __init__(self, model: str = None):
         self.model = model or os.getenv("LDOC_EDITOR_MODEL", "gpt-4o-mini")
         self._agent = Agent(
-            name="LocalDocEditor",
+            name="ConfluenceEditor",
             model=self.model,
             instructions=EDITOR_INSTRUCTIONS,
             output_type=EditorDraft,
         )
 
-    async def draft(self, intent: LocalDocIntent, section_content: str) -> EditorDraft:
+    async def draft(self, intent: ConfluenceIntent, section_content: str) -> EditorDraft:
         """Produce a before/after draft for the given section and intent.
 
         On exception, returns an identity draft (before == after) and logs the error.
@@ -75,7 +75,7 @@ class LocalDocEditorAgent:
             return result.final_output
         except Exception:
             logger.error(
-                "LocalDocEditorAgent.draft() failed for topic=%s",
+                "ConfluenceEditorAgent.draft() failed for topic=%s",
                 intent.affected_topic,
                 exc_info=True,
             )

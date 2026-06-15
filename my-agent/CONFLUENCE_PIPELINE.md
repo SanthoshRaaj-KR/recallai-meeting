@@ -10,8 +10,8 @@ vector store, so it scales with the product.
 ## Where the code lives
 
 ```
-my-agent/src/review_pipeline/localdoc/
-  models.py            # ChunkRecord, LocalDocIntent, LocalDocProposal (vendored)
+my-agent/src/review_pipeline/confluence_pipeline/
+  models.py            # ChunkRecord, LocalDocIntent, ConfluenceProposal (vendored)
   llm_runtime.py       # guarded_run throttle/retry          (vendored, unchanged)
   intent_extraction.py # IntentExtractionAgent                (vendored, unchanged)
   evaluation.py        # EvaluationAgent                      (vendored, unchanged)
@@ -22,7 +22,7 @@ my-agent/src/review_pipeline/localdoc/
   retrieval.py         # PineconeHybridIndex (dense+sparse+rerank)    [new]
   pipeline.py          # ported run.py edit path over Pinecone        [new]
   reindex.py           # one-shot corpus → Pinecone indexer           [new]
-confluence_proposal_adapter.py  # maps LocalDocProposal → my-agent Proposal (+page_id)
+confluence_proposal_adapter.py  # maps ConfluenceProposal → my-agent Proposal (+page_id)
 ```
 
 `local_doc_change/` is **not** imported or modified at runtime (the confluence
@@ -46,11 +46,11 @@ dense + rerank**.
 
 ```
 meeting transcript
-  → localdoc.propose(retriever = PineconeHybridIndex)
+  → confluence_pipeline.propose(retriever = PineconeHybridIndex)
       IntentExtractionAgent → per-intent hybrid retrieve (dense+sparse+rerank)
       → EvaluationAgent (≥0.70, + field-label / phrase-overlap recall floors)
       → LocalDocEditorAgent → VerifierAgent → drop no-ops / unfulfilled
-  → LocalDocProposal[]   (source_chunk.source_path = corpus filename)
+  → ConfluenceProposal[]   (source_chunk.source_path = corpus filename)
   → map filename → Confluence page_id via local_doc_change/corpus_page_map.json
   → my-agent Proposal[]  (only pages with a real page_id survive)
   → session_store → review cards (sync-sage-bot) → accept → Confluence
@@ -71,7 +71,7 @@ meeting transcript
 
 ```bash
 cd my-agent
-PYTHONPATH=src ./.venv/Scripts/python.exe -m review_pipeline.localdoc.reindex \
+PYTHONPATH=src ./.venv/Scripts/python.exe -m review_pipeline.confluence_pipeline.reindex \
     ../local_doc_change/stress_corpus/docs \
     ../local_doc_change/corpus_page_map.json
 ```

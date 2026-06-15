@@ -1,6 +1,6 @@
-"""Markdown section chunker for the vendored local-doc pipeline.
+"""Markdown section chunker for the vendored Confluence pipeline.
 
-The local-doc pipeline operates on documents split into *sections* (one
+The Confluence pipeline operates on documents split into *sections* (one
 ChunkRecord per heading-delimited section). The confluence-branch chunker uses
 docling for office formats; here the inputs are Confluence pages materialized as
 markdown (and the combined corpus's .md/.txt files), so a lightweight,

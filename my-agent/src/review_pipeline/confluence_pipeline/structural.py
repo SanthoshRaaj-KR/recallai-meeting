@@ -28,7 +28,7 @@ from agents import Agent, Runner
 from pydantic import BaseModel
 
 from .llm_runtime import guarded_run
-from .models import ChunkRecord, LocalDocIntent
+from .models import ChunkRecord, ConfluenceIntent
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ _CROSS_CUTTING_RE = re.compile(
 )
 
 
-def is_cross_cutting(intent: LocalDocIntent) -> bool:
+def is_cross_cutting(intent: ConfluenceIntent) -> bool:
     """True if a change is meant to propagate across MANY documents at once.
 
     A normal edit targets a single section; a cross-cutting edit ("change X to Y
@@ -71,7 +71,7 @@ def is_cross_cutting(intent: LocalDocIntent) -> bool:
     return bool(_CROSS_CUTTING_RE.search(_intent_text(intent)))
 
 
-def _intent_text(intent: LocalDocIntent) -> str:
+def _intent_text(intent: ConfluenceIntent) -> str:
     """Flatten the human-meaningful fields of an intent into one string."""
     parts = [
         intent.affected_topic or "",
@@ -83,7 +83,7 @@ def _intent_text(intent: LocalDocIntent) -> str:
     return " ".join(parts)
 
 
-def has_explicit_removal_verb(intent: LocalDocIntent) -> bool:
+def has_explicit_removal_verb(intent: ConfluenceIntent) -> bool:
     """True only if a removal verb appears in the speaker's QUOTED words.
 
     Removals delete whole sections and skip the relevance-score gate that guards
@@ -96,7 +96,7 @@ def has_explicit_removal_verb(intent: LocalDocIntent) -> bool:
     return bool(_REMOVAL_RE.search(" ".join(intent.verbatim_snippets or [])))
 
 
-def classify_kind(intent: LocalDocIntent) -> str:
+def classify_kind(intent: ConfluenceIntent) -> str:
     """Return "rename", "removal", or "edit" for a single intent.
 
     Precedence: rename > removal > edit. Rename wins because a "rename the X to
@@ -275,7 +275,7 @@ _NAMED_STOPWORDS = {
 }
 
 
-def subject_keywords(intent: LocalDocIntent) -> set[str]:
+def subject_keywords(intent: ConfluenceIntent) -> set[str]:
     """The content words that name WHAT a removal targets (minus filler/verbs)."""
     text = (
         f"{intent.affected_topic} {intent.new_value} "
@@ -292,7 +292,7 @@ def heading_match_score(heading: str, keywords: set[str]) -> int:
 
 
 def best_named_removal_target(
-    intent: LocalDocIntent, chunks: list[ChunkRecord]
+    intent: ConfluenceIntent, chunks: list[ChunkRecord]
 ) -> ChunkRecord | None:
     """Pick the section a named removal targets by heading-keyword overlap.
 
@@ -357,7 +357,7 @@ class RemovalResolverAgent:
     def __init__(self, model: str = None):
         self.model = model or os.getenv("LDOC_REMOVAL_MODEL", "gpt-4o-mini")
         self._agent = Agent(
-            name="LocalDocRemovalResolver",
+            name="ConfluenceRemovalResolver",
             model=self.model,
             instructions=REMOVAL_INSTRUCTIONS,
             output_type=_RemovalPlan,

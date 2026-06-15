@@ -1,7 +1,7 @@
 """IntentExtractionAgent — extracts actionable document-change intents from meeting transcripts.
 
 Uses the OpenAI Agents SDK (agents.Agent + agents.Runner) with structured output
-to return a list of LocalDocIntent objects. Filters out low-confidence intents
+to return a list of ConfluenceIntent objects. Filters out low-confidence intents
 (confidence < 0.5) before returning.
 """
 
@@ -16,7 +16,7 @@ from agents import Agent, AgentOutputSchema, Runner
 from pydantic import BaseModel
 
 from .llm_runtime import guarded_run
-from .models import LocalDocIntent
+from .models import ConfluenceIntent
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +67,14 @@ def _value_key(value: str | None) -> str:
     return nums[0].replace(",", "") if nums else v
 
 
-def _dedupe_intents(intents: list[LocalDocIntent]) -> list[LocalDocIntent]:
+def _dedupe_intents(intents: list[ConfluenceIntent]) -> list[ConfluenceIntent]:
     """Collapse intents that overlapping segments extracted twice.
 
     Two intents are the same change when their affected_topic and the numeric
     core of their new_value match (so "208 days" and "208" collapse); keep the
     higher-confidence one.
     """
-    best: dict[tuple[str, str], LocalDocIntent] = {}
+    best: dict[tuple[str, str], ConfluenceIntent] = {}
     for i in intents:
         key = (_norm(i.affected_topic), _value_key(i.new_value))
         if key not in best or i.confidence > best[key].confidence:
@@ -128,7 +128,7 @@ Rules:
 
 
 class _IntentList(BaseModel):
-    intents: list[LocalDocIntent]
+    intents: list[ConfluenceIntent]
 
 
 class IntentExtractionAgent:
@@ -136,17 +136,17 @@ class IntentExtractionAgent:
 
     def __init__(self, model: str = None):
         self.model = model or os.getenv("LDOC_INTENT_MODEL", "gpt-4o-mini")
-        # Use strict_json_schema=False because LocalDocIntent.metadata is an
+        # Use strict_json_schema=False because ConfluenceIntent.metadata is an
         # untyped dict, which generates additionalProperties=True in JSON schema —
         # incompatible with the Agents SDK strict schema mode. (Rule 1 auto-fix)
         self._agent = Agent(
-            name="LocalDocIntentExtractor",
+            name="ConfluenceIntentExtractor",
             model=self.model,
             instructions=INSTRUCTIONS,
             output_type=AgentOutputSchema(_IntentList, strict_json_schema=False),
         )
 
-    async def _extract_segment(self, segment: str) -> list[LocalDocIntent]:
+    async def _extract_segment(self, segment: str) -> list[ConfluenceIntent]:
         try:
             result = await guarded_run(
                 self._agent, f"Meeting transcript:\n\n{segment}"
@@ -157,7 +157,7 @@ class IntentExtractionAgent:
             logger.error("IntentExtractionAgent segment extract failed", exc_info=True)
             return []
 
-    async def extract(self, transcript: str) -> list[LocalDocIntent]:
+    async def extract(self, transcript: str) -> list[ConfluenceIntent]:
         """Extract document-change intents from a meeting transcript.
 
         Long transcripts are segmented and extracted in parallel, then merged —

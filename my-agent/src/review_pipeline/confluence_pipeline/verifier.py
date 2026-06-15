@@ -62,7 +62,7 @@ class VerifierAgent:
     def __init__(self, model: str = None):
         self.model = model or os.getenv("LDOC_VERIFIER_MODEL", "gpt-4o-mini")
         self._agent = Agent(
-            name="LocalDocVerifier",
+            name="ConfluenceVerifier",
             model=self.model,
             instructions=VERIFIER_INSTRUCTIONS,
             output_type=_VerifierRaw,

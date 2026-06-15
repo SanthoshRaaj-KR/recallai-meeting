@@ -50,12 +50,12 @@ async def _propose(
     query: str | None = None,
     emit=None,
 ):
-    """Generate proposals via the local-doc pipeline (default) or the built-in one.
+    """Generate proposals via the Confluence pipeline (default) or the built-in one.
 
     Toggle with MY_AGENT_USE_LOCAL_DOC_PIPELINE=0 to fall back to ProposalPipeline.run.
     """
     if confluence_proposal_adapter.enabled():
-        return await confluence_proposal_adapter.run_local_doc_pipeline(
+        return await confluence_proposal_adapter.run_confluence_pipeline(
             session_id=session_id,
             transcript=transcript,
             memory_context=memory_context,
@@ -278,7 +278,7 @@ async def test_propose_from_transcript(body: TestTranscriptBody) -> dict:
     """Paste a transcript → get Confluence proposal cards back directly.
 
     Convenience test endpoint that mirrors the local_doc_change test flow: it runs
-    the local-doc proposal adapter on the given transcript (no bot/meeting/session
+    the Confluence proposal adapter on the given transcript (no bot/meeting/session
     required) and returns the cards synchronously. Proposals target real Confluence
     pages via the v2 RAG. Toggle the engine with MY_AGENT_USE_LOCAL_DOC_PIPELINE.
     """

@@ -15,7 +15,7 @@ from agents import Agent, Runner
 from pydantic import BaseModel, Field
 
 from .llm_runtime import guarded_run
-from .models import ChunkRecord, LocalDocIntent
+from .models import ChunkRecord, ConfluenceIntent
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +66,13 @@ class EvaluationAgent:
     def __init__(self, model: str = None):
         self.model = model or os.getenv("LDOC_EVAL_MODEL", "gpt-4o-mini")
         self._agent = Agent(
-            name="LocalDocEvaluator",
+            name="ConfluenceEvaluator",
             model=self.model,
             instructions=EVAL_INSTRUCTIONS,
             output_type=_EvalResult,
         )
 
-    async def score(self, intent: LocalDocIntent, chunk: ChunkRecord) -> float:
+    async def score(self, intent: ConfluenceIntent, chunk: ChunkRecord) -> float:
         """Score how relevant a document section is for a change intent.
 
         Returns a float in [0.0, 1.0]. Returns 0.0 on any exception.
@@ -117,7 +117,7 @@ class EvaluationAgent:
 
     async def score_batch(
         self,
-        intent: LocalDocIntent,
+        intent: ConfluenceIntent,
         chunks: list[ChunkRecord],
     ) -> list[float]:
         """Score all chunks concurrently for the given intent.

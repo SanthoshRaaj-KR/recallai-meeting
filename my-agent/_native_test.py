@@ -1,4 +1,4 @@
-"""End-to-end test of the vendored local-doc pipeline (Pinecone-hybrid) on the
+"""End-to-end test of the vendored Confluence pipeline (Pinecone-hybrid) on the
 user's exact SmartHub transcript, over the combined corpus. Prints extracted
 intents, each proposal with page attribution + line-level diff, and which intents
 produced no card (recall)."""
@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env.local")
 
-from review_pipeline.localdoc import PineconeHybridIndex, PipelineConfig, propose  # noqa: E402
+from review_pipeline.confluence_pipeline import PineconeHybridIndex, PipelineConfig, propose  # noqa: E402
 from review_pipeline.confluence_proposal_adapter import _page_map, _proposal_from_native  # noqa: E402
 
 TRANSCRIPT_TEXT = (
@@ -39,9 +39,14 @@ def diff(before: str, after: str):
 
 
 async def main() -> int:
+    # Optional: pass a path to a .txt transcript file, else use the built-in one.
+    text = TRANSCRIPT_TEXT
+    if len(sys.argv) > 1 and Path(sys.argv[1]).exists():
+        text = Path(sys.argv[1]).read_text(encoding="utf-8")
+        print(f"(using transcript from {sys.argv[1]})")
     retriever = PineconeHybridIndex()
     cfg = PipelineConfig(session_id="native-test")
-    intents, ld_props = await propose(TRANSCRIPT_TEXT, retriever=retriever, config=cfg)
+    intents, ld_props = await propose(text, retriever=retriever, config=cfg)
 
     print(f"\n=== EXTRACTED INTENTS ({len(intents)}) ===")
     for i in intents:
