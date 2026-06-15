@@ -1,0 +1,292 @@
+"""Pinecone-native hybrid retrieval for the vendored local-doc pipeline.
+
+Replaces the confluence-branch FAISS+BM25+OpenAI retriever with a fully managed,
+server-side hybrid on Pinecone — nothing local, so it scales with the product:
+
+  * dense embeddings:  llama-text-embed-v2        (integrated inference)
+  * sparse embeddings: pinecone-sparse-english-v0 (integrated inference; the
+                       managed lexical/BM25 equivalent — exact terms like
+                       "Kuzu", "P0", "$6")
+  * fusion:            Reciprocal Rank Fusion over both result sets
+  * rerank:            bge-reranker-v2-m3          (Pinecone inference)
+
+Both indexes are created with ``create_index_for_model`` so Pinecone embeds the
+``chunk_text`` field server-side at upsert and query time. Documents are stored
+with all fields needed to reconstruct a full ``ChunkRecord`` (the editor needs
+the complete section body to make a surgical edit).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from .models import ChunkRecord
+
+logger = logging.getLogger(__name__)
+
+_DENSE_MODEL = os.getenv("MY_AGENT_LDOC_DENSE_MODEL", "llama-text-embed-v2")
+_SPARSE_MODEL = os.getenv("MY_AGENT_LDOC_SPARSE_MODEL", "pinecone-sparse-english-v0")
+_RERANK_MODEL = os.getenv("MY_AGENT_LDOC_RERANK_MODEL", "bge-reranker-v2-m3")
+
+_CONTENT_CHARS = int(os.getenv("MY_AGENT_LDOC_CONTENT_CHARS", "12000"))
+# What gets embedded (kept smaller than stored content to stay under Pinecone's
+# embedding tokens-per-minute ceiling; the heading + section head carries the
+# topic signal needed for retrieval, while the full content is still stored for
+# the editor to make a surgical edit).
+_EMBED_CHARS = int(os.getenv("MY_AGENT_LDOC_EMBED_CHARS", "4000"))
+_RRF_K = 60
+
+# Upsert pacing — Pinecone integrated embedding has a tokens-per-minute ceiling
+# (e.g. 250k TPM for llama-text-embed-v2). Small batches + a short pace + 429
+# backoff keep a large corpus reindex under the limit.
+_UPSERT_BATCH = int(os.getenv("MY_AGENT_LDOC_UPSERT_BATCH", "40"))
+_UPSERT_PACE_S = float(os.getenv("MY_AGENT_LDOC_UPSERT_PACE_S", "1.5"))
+_UPSERT_MAX_RETRIES = int(os.getenv("MY_AGENT_LDOC_UPSERT_RETRIES", "8"))
+
+_FIELDS = [
+    "content", "source_path", "source_format", "section_heading",
+    "section_index", "doc_title", "page_id",
+]
+
+
+def _embedding_text(chunk: ChunkRecord) -> str:
+    head = f"{chunk.doc_title} — {chunk.section_heading}".strip(" —")
+    return (head + "\n" + chunk.content).strip()
+
+
+class PineconeHybridIndex:
+    """Dense + sparse Pinecone indexes with RRF fusion and reranking."""
+
+    def __init__(
+        self,
+        *,
+        dense_index: str | None = None,
+        sparse_index: str | None = None,
+        namespace: str | None = None,
+        create: bool | None = None,
+    ) -> None:
+        self.dense_index = dense_index or os.getenv("MY_AGENT_LDOC_DENSE_INDEX", "confluence-corpus-dense")
+        self.sparse_index = sparse_index or os.getenv("MY_AGENT_LDOC_SPARSE_INDEX", "confluence-corpus-sparse")
+        self.namespace = namespace or os.getenv("MY_AGENT_LDOC_NAMESPACE", "smarthub")
+        self.cloud = os.getenv("PINECONE_CLOUD", "aws").strip()
+        self.region = os.getenv("PINECONE_REGION", "us-east-1").strip()
+        env_create = os.getenv("MY_AGENT_LDOC_CREATE_INDEX", "1").strip().lower() in {"1", "true", "yes", "on"}
+        self.create = env_create if create is None else create
+        self._pc: Any | None = None
+        self._dense: Any | None = None
+        self._sparse: Any | None = None
+        self._sparse_disabled = False  # set when the sparse index can't be created/reached
+
+    # ── Pinecone plumbing ────────────────────────────────────────────────────
+
+    def _client(self) -> Any:
+        if self._pc is None:
+            from pinecone import Pinecone
+
+            self._pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY", "").strip())
+        return self._pc
+
+    def _ensure(self, name: str, model: str) -> None:
+        pc = self._client()
+        existing = pc.list_indexes()
+        names = [it["name"] if isinstance(it, dict) else it.name for it in existing]
+        if name in names:
+            return
+        logger.info("Creating Pinecone integrated index %r (%s)", name, model)
+        pc.create_index_for_model(
+            name=name,
+            cloud=self.cloud,
+            region=self.region,
+            embed={"model": model, "field_map": {"text": "chunk_text"}},
+        )
+        # Wait until the new index is ready before upserting into it.
+        import time
+
+        for _ in range(120):
+            try:
+                if pc.describe_index(name).status.get("ready"):
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+
+    def _index(self, which: str) -> Any:
+        pc = self._client()
+        if which == "dense":
+            if self._dense is None:
+                if self.create:
+                    self._ensure(self.dense_index, _DENSE_MODEL)
+                self._dense = pc.Index(self.dense_index)
+            return self._dense
+        # Sparse index is optional: if it can't be created (e.g. Pinecone project
+        # serverless-index cap reached) or reached, disable it once and fall back
+        # to dense + rerank so retrieval keeps working.
+        if self._sparse_disabled:
+            return None
+        if self._sparse is None:
+            try:
+                if self.create:
+                    self._ensure(self.sparse_index, _SPARSE_MODEL)
+                self._sparse = pc.Index(self.sparse_index)
+            except Exception as exc:
+                self._sparse_disabled = True
+                logger.warning(
+                    "sparse index %r unavailable (%s) — using dense + rerank only.",
+                    self.sparse_index, str(exc)[:160],
+                )
+                return None
+        return self._sparse
+
+    # ── Indexing ─────────────────────────────────────────────────────────────
+
+    def upsert_chunks(self, chunks: list[ChunkRecord], page_map: dict[str, dict] | None = None) -> int:
+        """Upsert chunks into BOTH the dense and sparse indexes. Returns count."""
+        if not chunks:
+            return 0
+        page_map = page_map or {}
+        records = []
+        for c in chunks:
+            meta = page_map.get(os.path.basename(c.source_path), {})
+            records.append({
+                "_id": c.chunk_id,
+                "chunk_text": _embedding_text(c)[:_EMBED_CHARS],
+                "content": c.content[:_CONTENT_CHARS],
+                "source_path": c.source_path,
+                "source_format": c.source_format,
+                "section_heading": c.section_heading,
+                "section_index": c.section_index,
+                "doc_title": c.doc_title,
+                "page_id": str(meta.get("page_id") or ""),
+            })
+        for which in ("dense", "sparse"):
+            index = self._index(which)
+            if index is None:
+                logger.info("skipping %s upsert (index unavailable)", which)
+                continue
+            for start in range(0, len(records), _UPSERT_BATCH):
+                batch = records[start:start + _UPSERT_BATCH]
+                self._upsert_batch_with_backoff(index, batch)
+        return len(records)
+
+    def _upsert_batch_with_backoff(self, index: Any, batch: list[dict]) -> None:
+        """Upsert one batch, backing off on Pinecone embedding TPM (429) limits."""
+        import time
+
+        delay = 2.0
+        for attempt in range(_UPSERT_MAX_RETRIES):
+            try:
+                index.upsert_records(namespace=self.namespace, records=batch)
+                if _UPSERT_PACE_S > 0:
+                    time.sleep(_UPSERT_PACE_S)  # stay under tokens-per-minute
+                return
+            except Exception as exc:
+                is_rate = "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc) or "rate" in str(exc).lower()
+                if attempt < _UPSERT_MAX_RETRIES - 1 and is_rate:
+                    logger.warning("upsert 429 (attempt %d); backing off %.1fs", attempt + 1, delay)
+                    time.sleep(delay)
+                    delay = min(delay * 2, 60.0)
+                    continue
+                raise
+
+    # ── Retrieval ────────────────────────────────────────────────────────────
+
+    def _search_one(self, which: str, query: str, top_k: int) -> list[tuple[int, dict, float]]:
+        index = self._index(which)
+        if index is None:
+            return []
+        try:
+            result = index.search(
+                namespace=self.namespace,
+                top_k=max(1, top_k),
+                inputs={"text": query},
+                fields=_FIELDS,
+            )
+        except Exception as exc:
+            logger.warning("hybrid %s search failed: %s", which, exc)
+            return []
+        out: list[tuple[int, dict, float]] = []
+        hits = getattr(getattr(result, "result", result), "hits", [])
+        for rank, match in enumerate(hits):
+            raw_fields = getattr(match, "fields", None) or {}
+            cid = str(getattr(match, "id", "") or "")
+            if not cid:
+                continue
+            score = float(getattr(match, "score", 0.0) or 0.0)
+            fields = dict(raw_fields)
+            fields["_id"] = cid
+            out.append((rank, fields, score))
+        return out
+
+    def _to_chunk(self, fields: dict) -> ChunkRecord | None:
+        cid = str(fields.get("_id") or "")
+        if not cid:
+            return None
+        try:
+            section_index = int(float(fields.get("section_index") or 0))
+        except (TypeError, ValueError):
+            section_index = 0
+        return ChunkRecord(
+            chunk_id=cid,
+            source_path=str(fields.get("source_path") or ""),
+            source_format=str(fields.get("source_format") or "md"),
+            section_heading=str(fields.get("section_heading") or ""),
+            section_index=section_index,
+            content=str(fields.get("content") or ""),
+            doc_title=str(fields.get("doc_title") or ""),
+        )
+
+    def query(self, query_text: str, top_k: int = 12, *, rerank: bool = True) -> list[ChunkRecord]:
+        """Hybrid retrieve: dense + sparse, RRF-fused, reranked. Returns ChunkRecords."""
+        q = (query_text or "").strip()
+        if not q:
+            return []
+        per_index = max(top_k, 12)
+        dense_hits = self._search_one("dense", q, per_index)
+        sparse_hits = self._search_one("sparse", q, per_index)
+
+        # RRF fusion keyed on chunk_id.
+        rrf: dict[str, float] = {}
+        fields_by_id: dict[str, dict] = {}
+        for hit_list in (dense_hits, sparse_hits):
+            for rank, fields, _score in hit_list:
+                cid = str(fields.get("_id") or "")
+                if not cid:
+                    continue
+                rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (_RRF_K + rank)
+                fields_by_id.setdefault(cid, fields)
+        if not rrf:
+            return []
+
+        ranked_ids = sorted(rrf, key=lambda c: rrf[c], reverse=True)
+        candidates = [self._to_chunk(fields_by_id[c]) for c in ranked_ids[:50]]
+        candidates = [c for c in candidates if c is not None]
+
+        if not rerank or len(candidates) <= 1:
+            return candidates[:top_k]
+
+        # Rerank fused candidates with Pinecone inference (server-side).
+        try:
+            pc = self._client()
+            documents = [
+                {"text": f"{c.doc_title} — {c.section_heading}\n{c.content}"[:2000]}
+                for c in candidates
+            ]
+            res = pc.inference.rerank(
+                model=_RERANK_MODEL,
+                query=q,
+                documents=documents,
+                top_n=min(top_k, len(candidates)),
+                rank_fields=["text"],
+                return_documents=False,
+                parameters={"truncate": "END"},
+            )
+            reranked: list[ChunkRecord] = []
+            for r in res.data:
+                if r.index < len(candidates):
+                    reranked.append(candidates[r.index])
+            return reranked[:top_k]
+        except Exception as exc:
+            logger.warning("hybrid rerank failed (%s); using RRF order", exc)
+            return candidates[:top_k]

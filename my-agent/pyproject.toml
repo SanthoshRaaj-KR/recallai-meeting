@@ -18,6 +18,7 @@ dependencies = [
     "requests>=2.31",
     "livekit-api>=0.7",
     "openai>=1.0",
+    "openai-agents>=0.1",  # vendored local-doc proposal agents (intent/eval/editor/verifier)
     "mcp>=1.0",
     "pinecone>=5.0",
 ]
