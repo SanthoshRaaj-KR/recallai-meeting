@@ -15,6 +15,11 @@ ENV PYTHONUNBUFFERED=1
 # expense of a slightly longer build.
 ENV UV_COMPILE_BYTECODE=1
 
+# Cache HuggingFace models (Silero VAD + turn-detector) under /app so the files
+# downloaded by `download-files` in the build stage are included when /app is
+# copied into the final image (otherwise they land in /root/.cache and are lost).
+ENV HF_HOME=/app/.cache/huggingface
+
 # --- Build stage ---
 # Install dependencies, build native extensions, and prepare the application
 FROM base AS build
