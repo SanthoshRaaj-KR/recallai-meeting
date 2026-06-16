@@ -48,7 +48,7 @@ class ConfluenceEditorAgent:
     """Drafts before/after content for a document section given a change intent."""
 
     def __init__(self, model: str = None):
-        self.model = model or os.getenv("LDOC_EDITOR_MODEL", "gpt-5.4-mini")
+        self.model = model or os.getenv("LDOC_EDITOR_MODEL", "gpt-4o-mini")
         self._agent = Agent(
             name="ConfluenceEditor",
             model=self.model,

@@ -135,7 +135,7 @@ class IntentExtractionAgent:
     """Extracts document-change intents from a meeting transcript using GPT."""
 
     def __init__(self, model: str = None):
-        self.model = model or os.getenv("LDOC_INTENT_MODEL", "gpt-5.4-mini")
+        self.model = model or os.getenv("LDOC_INTENT_MODEL", "gpt-4o-mini")
         # Use strict_json_schema=False because ConfluenceIntent.metadata is an
         # untyped dict, which generates additionalProperties=True in JSON schema —
         # incompatible with the Agents SDK strict schema mode. (Rule 1 auto-fix)
