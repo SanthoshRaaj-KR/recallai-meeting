@@ -37,8 +37,17 @@ EmitFn = Callable[[str], Awaitable[None]]
 
 class PipelineConfig(BaseModel):
     session_id: str = "confluence"
+    # Keep a HIGH precision bar on the eval score — wrong sections score <=0.5 and
+    # the "plausibly related but wrong" band (0.5-0.69) is exactly what produced the
+    # wrong-row landings (response-time on the P4 row). Lowering this hurt precision
+    # without fixing recall, so it stays at 0.70.
     relevance_threshold: float = 0.70
     retrieval_top_k: int = 20
+    # One target per intent. Allowing 2 was tested and reverted: every intent sprayed
+    # a second card onto a plausible-but-wrong chunk (response-times on the wrong SLA
+    # row, +5ms on unrelated API endpoints), and the verifier can't catch a locally-
+    # plausible-but-misplaced edit. Recall is driven by the intent funnel + retrieval,
+    # not by widening targets.
     max_targets_per_intent: int = 1
     cross_cutting_top_k: int = 40
     cross_cutting_max_targets: int = 30
@@ -273,6 +282,31 @@ async def propose(
         prop.verifier_note = ver.verifier_note
         proposals.append(prop)
 
+    # ── Stage 9: collapse same-row collisions ────────────────────────────────
+    # Different intents can land on the SAME row (e.g. standard- and enterprise-
+    # response-time both rewriting the one P1 row, or a method edit and a no-op
+    # twin on the same classifier row). For `replace` edits sharing identical
+    # before_content, keep only the highest-quality draft. Appends never collide
+    # on a before-row, so they pass through untouched.
+    proposals = _dedupe_same_row(proposals)
+
     logger.info("confluence_pipeline.propose: %d proposal(s) from %d qualified section(s)",
                 len(proposals), len(qualified))
     return intents, proposals
+
+
+def _dedupe_same_row(proposals: list[ConfluenceProposal]) -> list[ConfluenceProposal]:
+    """Keep the best `replace` per identical before-row; pass appends through."""
+    best: dict[tuple[str, str], ConfluenceProposal] = {}
+    passthrough: list[ConfluenceProposal] = []
+    for p in proposals:
+        if p.edit_type != "replace" or not (p.before_content or "").strip():
+            passthrough.append(p)
+            continue
+        key = (p.source_chunk.source_path, " ".join((p.before_content or "").split()).lower())
+        cur = best.get(key)
+        if cur is None or (p.quality_score, p.confidence) > (cur.quality_score, cur.confidence):
+            best[key] = p
+    # Preserve original order: walk proposals, emit each kept item once.
+    kept = set(id(p) for p in best.values()) | set(id(p) for p in passthrough)
+    return [p for p in proposals if id(p) in kept]

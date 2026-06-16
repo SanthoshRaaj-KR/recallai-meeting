@@ -60,7 +60,11 @@ class VerifierAgent:
     """Verifies the quality of a proposed before/after document edit."""
 
     def __init__(self, model: str = None):
-        self.model = model or os.getenv("LDOC_VERIFIER_MODEL", "gpt-4o-mini")
+        # The verifier is the last precision gate before a card reaches review, so
+        # it must reliably reject edits that don't actually fulfill the intent.
+        # gpt-4o-mini waved some of those through; this runs only on the handful of
+        # qualified drafts (not fanned out like eval), so the stronger model is cheap.
+        self.model = model or os.getenv("LDOC_VERIFIER_MODEL", "gpt-5.4-mini")
         self._agent = Agent(
             name="ConfluenceVerifier",
             model=self.model,
