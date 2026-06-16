@@ -60,7 +60,7 @@ class VerifierAgent:
     """Verifies the quality of a proposed before/after document edit."""
 
     def __init__(self, model: str = None):
-        self.model = model or os.getenv("LDOC_VERIFIER_MODEL", "gpt-4o-mini")
+        self.model = model or os.getenv("LDOC_VERIFIER_MODEL", "gpt-5.4-mini")
         self._agent = Agent(
             name="ConfluenceVerifier",
             model=self.model,

@@ -64,7 +64,7 @@ class EvaluationAgent:
     """Scores how relevant a document section is for a given change intent."""
 
     def __init__(self, model: str = None):
-        self.model = model or os.getenv("LDOC_EVAL_MODEL", "gpt-4o-mini")
+        self.model = model or os.getenv("LDOC_EVAL_MODEL", "gpt-5.4-mini")
         self._agent = Agent(
             name="ConfluenceEvaluator",
             model=self.model,
