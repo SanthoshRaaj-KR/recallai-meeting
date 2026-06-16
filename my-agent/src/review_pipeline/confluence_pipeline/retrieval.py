@@ -26,7 +26,14 @@ from .models import ChunkRecord
 
 logger = logging.getLogger(__name__)
 
-_DENSE_MODEL = os.getenv("MY_AGENT_LDOC_DENSE_MODEL", "llama-text-embed-v2")
+# Dense backend: "openai" embeds with OpenAI text-embedding-3-small (large quota,
+# what the original local_doc_change / local-doc-rag index use) and stores plain
+# vectors in a standard Pinecone index; "pinecone" uses integrated inference
+# (llama-text-embed-v2) which has a 5M-tokens/month free-tier cap.
+_DENSE_BACKEND = os.getenv("MY_AGENT_LDOC_DENSE_BACKEND", "openai").strip().lower()
+_DENSE_MODEL = os.getenv("MY_AGENT_LDOC_DENSE_MODEL", "llama-text-embed-v2")  # pinecone-integrated mode
+_OAI_EMBED_MODEL = os.getenv("MY_AGENT_LDOC_OAI_EMBED_MODEL", "text-embedding-3-small")
+_OAI_EMBED_DIM = int(os.getenv("MY_AGENT_LDOC_OAI_EMBED_DIM", "1536"))
 _SPARSE_MODEL = os.getenv("MY_AGENT_LDOC_SPARSE_MODEL", "pinecone-sparse-english-v0")
 _RERANK_MODEL = os.getenv("MY_AGENT_LDOC_RERANK_MODEL", "bge-reranker-v2-m3")
 
@@ -88,19 +95,60 @@ class PineconeHybridIndex:
             self._pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY", "").strip())
         return self._pc
 
-    def _ensure(self, name: str, model: str) -> None:
+    def _oai(self) -> Any:
+        if getattr(self, "_oai_client", None) is None:
+            import openai
+
+            self._oai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", "").strip())
+        return self._oai_client
+
+    def _embed_openai(self, texts: list[str]) -> list[list[float]]:
+        """Embed texts with OpenAI text-embedding-3-small (batched, with retry)."""
+        import time
+
+        out: list[list[float]] = []
+        client = self._oai()
+        for start in range(0, len(texts), 100):
+            batch = [t or " " for t in texts[start:start + 100]]
+            delay = 2.0
+            for attempt in range(6):
+                try:
+                    resp = client.embeddings.create(model=_OAI_EMBED_MODEL, input=batch)
+                    out.extend([d.embedding for d in resp.data])
+                    break
+                except Exception as exc:
+                    if attempt < 5 and ("429" in str(exc) or "rate" in str(exc).lower()):
+                        time.sleep(delay)
+                        delay = min(delay * 2, 30.0)
+                        continue
+                    raise
+        return out
+
+    def _ensure(self, name: str, model: str, *, standard_dim: int | None = None) -> None:
         pc = self._client()
         existing = pc.list_indexes()
         names = [it["name"] if isinstance(it, dict) else it.name for it in existing]
         if name in names:
             return
-        logger.info("Creating Pinecone integrated index %r (%s)", name, model)
-        pc.create_index_for_model(
-            name=name,
-            cloud=self.cloud,
-            region=self.region,
-            embed={"model": model, "field_map": {"text": "chunk_text"}},
-        )
+        if standard_dim:
+            # Standard (non-integrated) index for externally-computed OpenAI vectors.
+            from pinecone import ServerlessSpec
+
+            logger.info("Creating standard Pinecone index %r (dim=%d, OpenAI vectors)", name, standard_dim)
+            pc.create_index(
+                name=name,
+                dimension=standard_dim,
+                metric="cosine",
+                spec=ServerlessSpec(cloud=self.cloud, region=self.region),
+            )
+        else:
+            logger.info("Creating Pinecone integrated index %r (%s)", name, model)
+            pc.create_index_for_model(
+                name=name,
+                cloud=self.cloud,
+                region=self.region,
+                embed={"model": model, "field_map": {"text": "chunk_text"}},
+            )
         # Wait until the new index is ready before upserting into it.
         import time
 
@@ -117,7 +165,10 @@ class PineconeHybridIndex:
         if which == "dense":
             if self._dense is None:
                 if self.create:
-                    self._ensure(self.dense_index, _DENSE_MODEL)
+                    if _DENSE_BACKEND == "openai":
+                        self._ensure(self.dense_index, _DENSE_MODEL, standard_dim=_OAI_EMBED_DIM)
+                    else:
+                        self._ensure(self.dense_index, _DENSE_MODEL)
                 self._dense = pc.Index(self.dense_index)
             return self._dense
         # Sparse index is optional: if it can't be created (e.g. Pinecone project
@@ -170,10 +221,28 @@ class PineconeHybridIndex:
             if index is None:
                 logger.info("skipping %s upsert (index unavailable)", which)
                 continue
+            if which == "dense" and _DENSE_BACKEND == "openai":
+                self._upsert_openai_dense(index, records)
+                continue
             for start in range(0, len(records), _UPSERT_BATCH):
                 batch = records[start:start + _UPSERT_BATCH]
                 self._upsert_batch_with_backoff(index, batch)
         return len(records)
+
+    def _upsert_openai_dense(self, index: Any, records: list[dict]) -> None:
+        """Embed records' chunk_text with OpenAI and upsert plain vectors + metadata."""
+        for start in range(0, len(records), 100):
+            batch = records[start:start + 100]
+            vectors = self._embed_openai([r["chunk_text"] for r in batch])
+            items = [
+                {
+                    "id": r["_id"],
+                    "values": vec,
+                    "metadata": {k: v for k, v in r.items() if k not in ("_id", "chunk_text")},
+                }
+                for r, vec in zip(batch, vectors)
+            ]
+            index.upsert(vectors=items, namespace=self.namespace)
 
     def _upsert_batch_with_backoff(self, index: Any, batch: list[dict]) -> None:
         """Upsert one batch, backing off on Pinecone embedding TPM (429) limits."""
@@ -201,6 +270,8 @@ class PineconeHybridIndex:
         index = self._index(which)
         if index is None:
             return []
+        if which == "dense" and _DENSE_BACKEND == "openai":
+            return self._search_openai_dense(index, query, top_k)
         try:
             result = index.search(
                 namespace=self.namespace,
@@ -220,6 +291,33 @@ class PineconeHybridIndex:
                 continue
             score = float(getattr(match, "score", 0.0) or 0.0)
             fields = dict(raw_fields)
+            fields["_id"] = cid
+            out.append((rank, fields, score))
+        return out
+
+    def _search_openai_dense(self, index: Any, query: str, top_k: int) -> list[tuple[int, dict, float]]:
+        """Embed the query with OpenAI and query a standard Pinecone index by vector."""
+        try:
+            vec = self._embed_openai([query])[0]
+            result = index.query(
+                namespace=self.namespace,
+                vector=vec,
+                top_k=max(1, top_k),
+                include_metadata=True,
+                include_values=False,
+            )
+        except Exception as exc:
+            logger.warning("openai dense search failed: %s", exc)
+            return []
+        matches = result.get("matches", []) if isinstance(result, dict) else getattr(result, "matches", [])
+        out: list[tuple[int, dict, float]] = []
+        for rank, m in enumerate(matches):
+            meta = (m.get("metadata") if isinstance(m, dict) else getattr(m, "metadata", None)) or {}
+            cid = str((m.get("id") if isinstance(m, dict) else getattr(m, "id", "")) or "")
+            if not cid:
+                continue
+            score = float((m.get("score") if isinstance(m, dict) else getattr(m, "score", 0.0)) or 0.0)
+            fields = dict(meta)
             fields["_id"] = cid
             out.append((rank, fields, score))
         return out

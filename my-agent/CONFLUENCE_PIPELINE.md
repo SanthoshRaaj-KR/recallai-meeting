@@ -28,19 +28,23 @@ confluence_proposal_adapter.py  # maps ConfluenceProposal → my-agent Proposal 
 `local_doc_change/` is **not** imported or modified at runtime (the confluence
 branch remains the source of truth for the agents).
 
-## Retrieval: Pinecone built-in embeddings, no local vector store
+## Retrieval: hybrid (OpenAI dense + Pinecone sparse + rerank)
 
 | Stage | Model | Where |
 |-------|-------|-------|
-| dense embedding  | `llama-text-embed-v2`        | Pinecone integrated inference (server-side) |
-| sparse embedding | `pinecone-sparse-english-v0` | Pinecone integrated inference (the managed BM25/lexical half) |
-| fusion           | Reciprocal Rank Fusion        | in `retrieval.py` |
-| rerank           | `bge-reranker-v2-m3`          | Pinecone inference |
+| dense embedding  | `text-embedding-3-small` (OpenAI) | embedded by us, stored as plain vectors in a standard Pinecone index |
+| sparse embedding | `pinecone-sparse-english-v0`      | Pinecone integrated inference (the managed BM25/lexical half) |
+| fusion           | Reciprocal Rank Fusion             | in `retrieval.py` |
+| rerank           | `bge-reranker-v2-m3`               | Pinecone inference |
 
-Two integrated indexes (`confluence-corpus-dense`, `confluence-corpus-sparse`)
-in namespace `smarthub`. If the sparse index can't be created (e.g. the Pinecone
-project's serverless-index cap is reached), retrieval **degrades gracefully to
-dense + rerank**.
+Dense uses **OpenAI embeddings** (same as the original `local_doc_change` and the
+`local-doc-rag` index) — Pinecone's integrated `llama-text-embed-v2` has a
+5M-tokens/month free-tier cap that blocks both indexing *and* querying once hit,
+whereas OpenAI embeddings have a far larger quota. Switch back to Pinecone
+integrated dense with `MY_AGENT_LDOC_DENSE_BACKEND=pinecone`. Indexes:
+`confluence-corpus-dense` (standard, 1536-d OpenAI vectors) + `confluence-corpus-sparse`
+(integrated), namespace `smarthub`. If sparse is unavailable, retrieval degrades to
+dense + rerank.
 
 ## Data flow
 
