@@ -13,6 +13,11 @@ WORKDIR /app
 COPY requirements.txt requirements.lock /app/user_service/
 RUN pip install --no-cache-dir -r /app/user_service/requirements.lock
 
+# Observability deps in an ISOLATED layer so requirements.lock stays pristine.
+# See deploy/observability/README.md.
+COPY requirements-otel.txt /app/user_service/
+RUN pip install --no-cache-dir -r /app/user_service/requirements-otel.txt
+
 # Copy the package. Run context is user_service/, so contents land in /app/user_service
 # and the app is importable as `user_service.main:app` (relative imports require this layout).
 COPY . /app/user_service

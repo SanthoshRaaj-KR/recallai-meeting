@@ -831,4 +831,15 @@ async def my_agent(ctx: JobContext):
 
 
 if __name__ == "__main__":
+    # Observability: worker Prometheus metrics + optional OTLP tracing.
+    # No-op unless deps installed and OTEL_*/METRICS_* env set — see deploy/observability/.
+    try:
+        try:
+            from .observability import setup_worker_observability
+        except ImportError:
+            from observability import setup_worker_observability
+        setup_worker_observability("agent-worker")
+    except Exception as _obs_exc:  # never let observability break the worker
+        logger.warning("observability setup skipped: %s", _obs_exc)
+
     cli.run_app(server)

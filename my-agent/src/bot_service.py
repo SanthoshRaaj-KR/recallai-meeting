@@ -90,6 +90,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Observability: Prometheus /metrics + optional OTLP tracing. No-op unless the
+# observability deps are installed and OTEL_* env is set — see deploy/observability/.
+try:
+    from .observability import setup_fastapi_observability
+except ImportError:
+    from observability import setup_fastapi_observability
+setup_fastapi_observability(app, "bot-service")
+
 
 # ── In-process caches ────────────────────────────────────────────────────────
 # TranscriptCompactor is not serialisable so it lives only in this process;

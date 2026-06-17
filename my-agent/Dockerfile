@@ -49,6 +49,11 @@ RUN mkdir -p src
 # Ensure your uv.lock file is checked in for consistency across environments
 RUN uv sync --locked
 
+# Observability deps in an ISOLATED layer so uv.lock stays pristine and
+# `uv sync --locked` above keeps working. See deploy/observability/README.md.
+COPY requirements-otel.txt ./
+RUN uv pip install --python /app/.venv/bin/python -r requirements-otel.txt
+
 # Copy all remaining application files into the container
 # This includes source code, configuration files, and dependency specifications
 # (Excludes files specified in .dockerignore)

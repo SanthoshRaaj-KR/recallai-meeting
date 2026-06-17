@@ -17,6 +17,11 @@ services:
     # --no-sync: skip the runtime package rebuild (~20s). Deps are baked at image build.
     command: ["uv", "run", "--no-sync", "uvicorn", "src.bot_service:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file: [.env]
+    environment:
+      # Observability → local Alloy collector. On a host-network VM use 127.0.0.1.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_SERVICE_NAME: "bot-service"
     ports:
       - "8000:8000"        # public (Recall loads /bot-page, posts /recall-webhook)
     restart: unless-stopped
@@ -29,6 +34,29 @@ services:
       # Bridge network → reach bot-service by its compose service name.
       # On the prod host-network VM, override to http://127.0.0.1:8000.
       BRIDGE_INTERNAL_URL: "http://bot-service:8000"
+      # Observability → local Alloy collector (host-network VM: 127.0.0.1).
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_SERVICE_NAME: "agent-worker"
+      METRICS_PORT: "9464"   # Prometheus scrape target (Alloy → agent:9464)
     depends_on:
       - bot-service
+    restart: unless-stopped
+
+  # Grafana Alloy — per-VM metrics scrape + OTLP trace receiver → Grafana Cloud.
+  # Config + creds live in ../observability/ (repo is cloned whole onto the VM).
+  alloy:
+    image: grafana/alloy:latest
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+    env_file: [../observability/alloy.env]
+    volumes:
+      - ../observability/alloy/config-vm-a.alloy:/etc/alloy/config.alloy:ro
+      - /:/host/root:ro,rslave
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    ports:
+      - "127.0.0.1:12345:12345"   # Alloy debug UI — localhost only
     restart: unless-stopped
