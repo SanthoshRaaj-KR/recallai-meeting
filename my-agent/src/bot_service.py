@@ -41,11 +41,13 @@ from pydantic import BaseModel
 try:
     from .memory_compaction import TranscriptCompactor
     from . import session_store
+    from . import org_activity
     from .review_pipeline.rag import ConfluenceVectorIndex
     from .review_pipeline.confluence import RestConfluenceClient
 except ImportError:
     from memory_compaction import TranscriptCompactor
     import session_store
+    import org_activity
     from review_pipeline.rag import ConfluenceVectorIndex
     from review_pipeline.confluence import RestConfluenceClient
 
@@ -333,6 +335,8 @@ async def session_bot_status(session_id: str) -> dict:
                         updates["ended_at"] = _utcnow()
                     session_store.patch(session_id, updates)
                     s = {**s, **updates}
+                    if new_status == "ended":
+                        org_activity.record_meeting_activity(s)
         except Exception as exc:
             logger.debug("Recall status poll error: %s", exc)
 
@@ -380,6 +384,7 @@ async def stop_bot(session_id: str) -> dict:
 
     session_store.patch(session_id, {"status": "ended", "ended_at": _utcnow()})
     s = session_store.get(session_id) or s
+    org_activity.record_meeting_activity(s)
     return {
         "status": "ended", "session_id": session_id, "bot_id": s.get("bot_id"),
         "meeting_url": s.get("meeting_url"), "change_count": len(s.get("changes") or []),
@@ -494,6 +499,8 @@ async def recall_webhook(request: Request) -> dict:
                         updates["ended_at"] = _utcnow()
                     session_store.patch(s["session_id"], updates)
                     logger.info("Webhook %s → session %s status=%s", event, s["session_id"], new_status)
+                    if new_status == "ended":
+                        org_activity.record_meeting_activity({**s, **updates})
 
     return {"ok": True}
 

@@ -419,6 +419,15 @@ def main() -> None:
                 "team_id": team["id"], "user_id": manager_ids[i], "role": "MANAGER",
             })
 
+    # Real skeleton ends here. Demo members + fake sessions are OPT-IN so a
+    # normal run never reintroduces dummy data (use --with-dummy for a demo org).
+    if "--with-dummy" not in sys.argv:
+        print(f"\nOK Real skeleton seeded. Org ID: {org_id}")
+        print(f"  CEO + {len(manager_ids)} managers + {len(team_id_map)} teams.")
+        print(f"  Add people via the app (create team → invite by email), or re-run")
+        print(f"  with --with-dummy to populate demo members + sessions.\n")
+        return
+
     # 5. Add dummy members to each team
     print(f"\n5. Dummy members:")
     team_member_ids: dict[str, list[str]] = {}  # team_id → [user_ids] (incl. manager)

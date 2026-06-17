@@ -6,11 +6,11 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..auth import get_current_user, verify_admin_secret
+from ..auth import get_current_user
 from ..database import select, select_one, insert, update, delete, DBError
 from ..models import (
     TeamCreate, TeamOut, TeamUpdate,
-    AddMemberRequest, RemoveMemberRequest, MemberOut, UserOut,
+    AddMemberRequest, MemberOut, UserOut,
     TeamInviteCreate, TeamInviteOut,
     OrgRole, TeamRole,
 )
@@ -136,8 +136,7 @@ def list_members(team_id: str, claims: dict = Depends(get_current_user)):
 
 @router.post("/{team_id}/members", response_model=MemberOut, status_code=status.HTTP_201_CREATED)
 def add_member(team_id: str, body: AddMemberRequest, claims: dict = Depends(get_current_user)):
-    """Add a user to a team. Requires admin_secret in body; only CEO or team manager may call."""
-    verify_admin_secret(body.admin_secret)
+    """Add an existing user to a team. CEO/ADMIN, or the team's MANAGER, may call."""
     team = select_one("org_teams", {"id": f"eq.{team_id}"})
     if not team:
         raise HTTPException(404, "Team not found")
@@ -171,8 +170,8 @@ def add_member(team_id: str, body: AddMemberRequest, claims: dict = Depends(get_
 
 
 @router.delete("/{team_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-def remove_member(team_id: str, user_id: str, body: RemoveMemberRequest, claims: dict = Depends(get_current_user)):
-    verify_admin_secret(body.admin_secret)
+def remove_member(team_id: str, user_id: str, claims: dict = Depends(get_current_user)):
+    """Remove a member from a team. CEO/ADMIN, or the team's MANAGER, may call."""
     team = select_one("org_teams", {"id": f"eq.{team_id}"})
     if not team:
         raise HTTPException(404, "Team not found")
