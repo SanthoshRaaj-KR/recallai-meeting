@@ -36,6 +36,12 @@ _OAI_EMBED_MODEL = os.getenv("MY_AGENT_LDOC_OAI_EMBED_MODEL", "text-embedding-3-
 _OAI_EMBED_DIM = int(os.getenv("MY_AGENT_LDOC_OAI_EMBED_DIM", "1536"))
 _SPARSE_MODEL = os.getenv("MY_AGENT_LDOC_SPARSE_MODEL", "pinecone-sparse-english-v0")
 _RERANK_MODEL = os.getenv("MY_AGENT_LDOC_RERANK_MODEL", "bge-reranker-v2-m3")
+# Hybrid retrieval: dense (OpenAI text-embedding-3-small) + sparse. Sparse uses
+# pinecone-sparse-english-v0 (OpenAI has no sparse model) and carries the lexical /
+# exact-token matching that dense is weak on — it's what reliably catches exact
+# values like "$250", "512", "2 ms". Default ON; set MY_AGENT_LDOC_USE_SPARSE=0 for
+# dense-only.
+_USE_SPARSE = os.getenv("MY_AGENT_LDOC_USE_SPARSE", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 _CONTENT_CHARS = int(os.getenv("MY_AGENT_LDOC_CONTENT_CHARS", "12000"))
 # What gets embedded (kept smaller than stored content to stay under Pinecone's
@@ -84,7 +90,8 @@ class PineconeHybridIndex:
         self._pc: Any | None = None
         self._dense: Any | None = None
         self._sparse: Any | None = None
-        self._sparse_disabled = False  # set when the sparse index can't be created/reached
+        # Disabled by config (OpenAI-dense-only) or when the index can't be reached.
+        self._sparse_disabled = not _USE_SPARSE
 
     # ── Pinecone plumbing ────────────────────────────────────────────────────
 

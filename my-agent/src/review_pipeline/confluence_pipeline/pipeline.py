@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Optional
@@ -42,7 +43,15 @@ class PipelineConfig(BaseModel):
     # wrong-row landings (response-time on the P4 row). Lowering this hurt precision
     # without fixing recall, so it stays at 0.70.
     relevance_threshold: float = 0.70
-    retrieval_top_k: int = 20
+    # Two-stage eval (cost lever). Eval is the OpenAI-cost driver, so we split it:
+    #  Stage 1 — cheap gpt-4o-mini scores a WIDE pool (retrieval_top_k) for recall.
+    #  Stage 2 — the strong gpt-5.4-mini RE-scores only the top `eval_stage2_top_k`
+    #            survivors (+ any deterministic field-label match) for precision.
+    # So the expensive model runs ~5x/intent instead of 12-20x, while the wide cheap
+    # pool keeps recall (ambiguous-term intents like "training" don't get crowded out
+    # of a tiny pool). Models via LDOC_EVAL_STAGE1_MODEL / LDOC_EVAL_MODEL.
+    retrieval_top_k: int = 12
+    eval_stage2_top_k: int = 5
     # One target per intent. Allowing 2 was tested and reverted: every intent sprayed
     # a second card onto a plausible-but-wrong chunk (response-times on the wrong SLA
     # row, +5ms on unrelated API endpoints), and the verifier can't catch a locally-
@@ -203,22 +212,36 @@ async def propose(
 
     intent_candidates = await asyncio.gather(*[_retrieve(i) for i in edit_intents])
 
-    # ── Stage 5: evaluation (LLM score + deterministic recall floors) ────────
+    # ── Stage 5: two-stage evaluation (cheap wide filter → strong precise gate) ─
     await _emit("evaluation")
-    eval_agent = EvaluationAgent()
+    eval_cheap = EvaluationAgent(model=os.getenv("LDOC_EVAL_STAGE1_MODEL", "gpt-4o-mini"))
+    eval_fine = EvaluationAgent()  # LDOC_EVAL_MODEL, default gpt-5.4-mini
 
     async def _score_pool(intent: ConfluenceIntent, chunks: list[ChunkRecord], max_targets: int):
         if not chunks:
             return []
-        raw = await asyncio.gather(*[eval_agent.score(intent, c) for c in chunks])
+        # Stage 1: cheap model scores the WHOLE pool, only to rank/shortlist.
+        cheap = await asyncio.gather(*[eval_cheap.score(intent, c) for c in chunks])
+        order = sorted(range(len(chunks)), key=lambda i: cheap[i], reverse=True)
+        # Hand the strong model the top survivors (>= max_targets so cross-cutting
+        # intents aren't starved), plus any deterministic field-label match the cheap
+        # model must not be allowed to drop.
+        n_survivors = max(cfg.eval_stage2_top_k, max_targets)
+        survivors_idx = set(order[:n_survivors])
+        for i, c in enumerate(chunks):
+            if _field_label_match(intent, c):
+                survivors_idx.add(i)
+        survivors = [chunks[i] for i in sorted(survivors_idx)]
+        # Stage 2: the strong model re-scores only the shortlist (the precision gate).
+        fine = await asyncio.gather(*[eval_fine.score(intent, c) for c in survivors])
         scores: list[float] = []
-        for c, s in zip(chunks, raw):
+        for c, s in zip(survivors, fine):
             if _field_label_match(intent, c):
                 s = max(s, _LABEL_FLOOR)
             elif s >= _PHRASE_LLM_GATE and _phrase_overlap_match(intent, c):
                 s = max(s, _PHRASE_FLOOR)
             scores.append(s)
-        ranked = sorted(zip(chunks, scores), key=lambda cs: cs[1], reverse=True)
+        ranked = sorted(zip(survivors, scores), key=lambda cs: cs[1], reverse=True)
         kept: list[tuple[ConfluenceIntent, ChunkRecord]] = []
         seen: set[tuple[str, str]] = set()
         for chunk, score in ranked:
