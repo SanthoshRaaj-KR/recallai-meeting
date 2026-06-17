@@ -60,6 +60,12 @@ class PipelineConfig(BaseModel):
     max_targets_per_intent: int = 1
     cross_cutting_top_k: int = 40
     cross_cutting_max_targets: int = 30
+    # A deterministic match (exact field-label / verbatim phrase) only CONFIRMS a
+    # near-miss: if the strong model scored a section within this margin BELOW the
+    # threshold, the match tips it over the line. It does NOT rescue a score the model
+    # rated clearly-wrong (below threshold - margin) — there the lexical match is
+    # almost always coincidental (e.g. "training" appearing in an unrelated section).
+    floor_rescue_margin: float = 0.10
     # Precision-first: drop drafts the verifier isn't confident actually applied
     # the change. Correct edits score ~0.85-1.0; 0.6 cuts the weak/uncertain ones
     # (the user prefers a missed change over a wrong card).
@@ -80,10 +86,6 @@ _PLACEHOLDER_VALUES = {
     "", "tbd", "tba", "unknown", "n/a", "na", "to be determined",
     "to be decided", "?", "none", "null",
 }
-
-_LABEL_FLOOR = 0.85
-_PHRASE_FLOOR = 0.80
-_PHRASE_LLM_GATE = 0.40
 
 
 def _sig_tokens(text: str) -> list[str]:
@@ -235,11 +237,16 @@ async def propose(
         # Stage 2: the strong model re-scores only the shortlist (the precision gate).
         fine = await asyncio.gather(*[eval_fine.score(intent, c) for c in survivors])
         scores: list[float] = []
+        rescue_floor = cfg.relevance_threshold - cfg.floor_rescue_margin
         for c, s in zip(survivors, fine):
-            if _field_label_match(intent, c):
-                s = max(s, _LABEL_FLOOR)
-            elif s >= _PHRASE_LLM_GATE and _phrase_overlap_match(intent, c):
-                s = max(s, _PHRASE_FLOOR)
+            # Confirm a NEAR-MISS only: the model scored it just under the gate AND a
+            # deterministic match backs it up → tip it over. A clearly-low score
+            # (< rescue_floor) is a confident rejection and is left to fail, even with
+            # a lexical match (almost always coincidental there).
+            if rescue_floor <= s < cfg.relevance_threshold and (
+                _field_label_match(intent, c) or _phrase_overlap_match(intent, c)
+            ):
+                s = cfg.relevance_threshold
             scores.append(s)
         ranked = sorted(zip(survivors, scores), key=lambda cs: cs[1], reverse=True)
         kept: list[tuple[ConfluenceIntent, ChunkRecord]] = []
