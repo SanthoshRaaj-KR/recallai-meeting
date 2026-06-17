@@ -3,13 +3,11 @@ import collections
 import json
 import logging
 import os
-import random
 import re
 import requests
 import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -101,6 +99,14 @@ _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 _GITHUB_DEFAULT_REPO = os.getenv("GITHUB_DEFAULT_REPO", "")
 _BRIDGE_INTERNAL_URL = os.getenv("BRIDGE_INTERNAL_URL", "http://127.0.0.1:8000").rstrip("/")
 _OPENING_GREETING_DELAY_S = float(os.getenv("JARVIS_OPENING_GREETING_DELAY_SECONDS", "0.5"))
+
+# Silent backend prompt sent to the LLM pipeline after Jarvis joins and tools are
+# ready.  Meeting participants never hear this text — only Jarvis's generated reply
+# plays in the meeting.  Keep in sync with src/warmup_prompt.wav.
+_WARMUP_PROMPT_TEXT = os.getenv(
+    "JARVIS_WARMUP_PROMPT",
+    "Hello Jarvis, please introduce yourself to the meeting.",
+)
 
 
 def _trim_text_to_char_budget(text: str, max_chars: int) -> str:
@@ -276,70 +282,40 @@ class Assistant(Agent):
         self._transcript_msg_id: str | None = None
         self._opening_greeting_task: asyncio.Task | None = None
 
-    def _build_greeting(self) -> str:
-        """Return a time-aware, one-of-a-kind opening greeting for the meeting."""
-        hour = datetime.now().hour
-        if hour < 12:
-            time_phrase = "Good morning"
-        elif hour < 17:
-            time_phrase = "Good afternoon"
-        else:
-            time_phrase = "Good evening"
-
-        options = [
-            f"{time_phrase}, everyone! Jarvis here. Just say Hey Jarvis whenever you need me.",
-            f"{time_phrase}, team! I am Jarvis, your meeting assistant. Say Hey Jarvis to call on me.",
-            f"{time_phrase}! Jarvis has joined. Ask me anything — just say Hey Jarvis!",
-            f"{time_phrase}, folks! Jarvis is ready. Give me a shout anytime — Hey Jarvis.",
-            f"{time_phrase}! I am Jarvis, standing by. Just say Hey Jarvis and I am on it.",
-        ]
-        return random.choice(options)
-
     async def on_enter(self) -> None:
-        # Do NOT call session.generate_reply() here.
+        # Do NOT call session.generate_reply() here directly.
         # The default Agent.on_enter() calls generate_reply(), which bypasses
         # on_user_turn_completed and goes straight to the LLM. After an interruption
         # LiveKit re-enters the agent, triggering on_enter() again — causing the agent
         # to answer without a wake word. Overriding with a no-op disables this.
 
-        # One-time opening greeting. Run it in parallel with GitHub MCP setup so
-        # both finish before the user can speak — preventing the first LLM call
-        # from blocking on an unready toolset.
+        # One-time warmup + intro sequence:
+        # 1. Warm up GitHub MCP and Confluence RAG in parallel.
+        # 2. Once tools are ready, send the pre-determined silent prompt
+        #    ("Hello Jarvis, please introduce yourself") through the LLM pipeline
+        #    so Jarvis's opening words are LLM-generated, not pre-canned.
         if not self._greeted:
             self._greeted = True
-            greeting = self._build_greeting()
             self._opening_greeting_task = asyncio.create_task(
-                self._play_opening_greeting_and_warmup(greeting),
+                self._warmup_and_intro(),
                 name="opening_greeting",
             )
 
-    async def _play_opening_greeting_and_warmup(self, greeting: str) -> None:
-        """Play the opening greeting and warm up the GitHub MCP subprocess in parallel.
+    async def _warmup_and_intro(self) -> None:
+        """Warm up tools then send the silent intro prompt through the LLM pipeline.
 
-        Both tasks run concurrently so the npx cold-start happens during the
-        greeting audio — by the time the user can speak, the toolset is ready
-        and the first LLM call doesn't block waiting for it.
+        Tools (GitHub MCP, Confluence RAG) warm up in parallel first so they are
+        available by the time the LLM generates the intro.  The warmup prompt text
+        mirrors the pre-determined WAV file at src/warmup_prompt.wav but is sent
+        directly to the LLM — meeting participants hear only Jarvis's reply.
         """
-        async def _greet() -> None:
-            if _OPENING_GREETING_DELAY_S > 0:
-                await asyncio.sleep(_OPENING_GREETING_DELAY_S)
-            try:
-                handle = self.session.say(
-                    greeting,
-                    add_to_chat_ctx=False,
-                    allow_interruptions=False,
-                )
-                await handle.wait_for_playout()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Opening greeting failed: %s", exc)
-
         async def _warmup_mcp() -> None:
             if not self._github_toolset:
                 return
             try:
                 await self._github_toolset.setup()
                 logger.info("GitHub MCP toolset ready")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("GitHub MCP prewarm failed: %s", exc)
 
         async def _warmup_rag() -> None:
@@ -347,10 +323,36 @@ class Assistant(Agent):
                 return
             try:
                 await asyncio.to_thread(self._confluence_rag.warmup)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("Confluence RAG prewarm failed: %s", exc)
 
-        await asyncio.gather(_greet(), _warmup_mcp(), _warmup_rag())
+        # Step 1: warm up all tools in parallel.
+        await asyncio.gather(_warmup_mcp(), _warmup_rag())
+
+        # Step 2: send the silent backend prompt to the LLM pipeline.
+        # generate_reply(user_input=...) bypasses the wake-word gate and goes
+        # straight to the LLM, warming up the model so the first real query
+        # from a meeting participant is served without cold-start latency.
+        if _OPENING_GREETING_DELAY_S > 0:
+            await asyncio.sleep(_OPENING_GREETING_DELAY_S)
+        try:
+            logger.info("Sending warmup intro prompt to LLM pipeline")
+            handle = self.session.generate_reply(
+                user_input=_WARMUP_PROMPT_TEXT,
+                allow_interruptions=False,
+            )
+            await handle.wait_for_playout()
+        except Exception as exc:
+            logger.warning("LLM intro warmup failed: %s — falling back to canned greeting", exc)
+            try:
+                handle = self.session.say(
+                    "Hello everyone, Jarvis here. Just say Hey Jarvis whenever you need me.",
+                    add_to_chat_ctx=False,
+                    allow_interruptions=False,
+                )
+                await handle.wait_for_playout()
+            except Exception as exc2:
+                logger.warning("Fallback greeting also failed: %s", exc2)
 
     async def stt_node(
         self,

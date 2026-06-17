@@ -1679,7 +1679,7 @@ class ProposalPipeline:
             },
             {"role": "user", "content": transcript_text},
         ]
-        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _SUMMARY_SCHEMA, 800, "Summary")
+        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _SUMMARY_SCHEMA, 2000, "Summary")
         try:
             return _SummaryResponse.model_validate(json.loads(raw)).model_dump()
         except (json.JSONDecodeError, ValidationError) as exc:
@@ -1701,7 +1701,7 @@ class ProposalPipeline:
             },
             {"role": "user", "content": transcript_text},
         ]
-        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _DECISIONS_SCHEMA, 400, "Decisions")
+        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _DECISIONS_SCHEMA, 2000, "Decisions")
         try:
             return [str(d) for d in _DecisionsResponse.model_validate(json.loads(raw)).decisions if d]
         except (json.JSONDecodeError, ValidationError) as exc:
@@ -1724,7 +1724,7 @@ class ProposalPipeline:
             },
             {"role": "user", "content": transcript_text},
         ]
-        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _ACTION_ITEMS_SCHEMA, 500, "Action items")
+        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _ACTION_ITEMS_SCHEMA, 2000, "Action items")
         try:
             parsed = _ActionItemsResponse.model_validate(json.loads(raw))
             return [
@@ -1754,7 +1754,7 @@ class ProposalPipeline:
             },
             {"role": "user", "content": transcript_text},
         ]
-        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _MOM_SCHEMA, 700, "MOM")
+        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _MOM_SCHEMA, 2000, "MOM")
         try:
             parsed = _MOMResponse.model_validate(json.loads(raw))
             return [

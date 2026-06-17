@@ -28,6 +28,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
+    "edge-tts",  # used by src/generate_warmup_prompt.py
 ]
 
 [tool.uv]
