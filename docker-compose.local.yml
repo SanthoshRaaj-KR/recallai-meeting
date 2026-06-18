@@ -43,7 +43,9 @@ services:
     image: jarvis-org:latest
     build:
       context: ./user_service
-    env_file: [.env]
+    # user_service/.env adds org-specific config (JWT_SECRET, CORS_ORIGINS, TTLs)
+    # on top of the shared .env; later file wins for duplicate keys.
+    env_file: [.env, user_service/.env]
     ports:
       - "8003:8003"
     restart: unless-stopped
