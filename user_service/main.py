@@ -44,6 +44,11 @@ API surface:
     POST   /teams/{id}/bot                 assign bot (CEO)
     GET    /teams/{id}/meetings            team-scoped meetings
 
+    GET    /admin/meetings/live           live meetings org-wide (ADMIN/CEO)
+    GET    /admin/meetings                meeting history org-wide (ADMIN/CEO)
+    GET    /admin/meetings/{id}           meeting detail + summary/MOM (ADMIN/CEO)
+    POST   /admin/meetings/{id}/kick      remove bot from a meeting (ADMIN/CEO)
+
     GET    /health
 """
 
@@ -64,6 +69,7 @@ from .routes.hierarchy import router as hierarchy_router
 from .routes.bots import router as bots_router
 from .routes.invites import router as invites_router
 from .routes.analytics import router as analytics_router
+from .routes.admin_meetings import router as admin_meetings_router
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 _ALLOW_DB_RESET = os.getenv("ALLOW_DB_RESET", "false").lower() == "true"
@@ -101,6 +107,7 @@ app.include_router(hierarchy_router)
 app.include_router(bots_router)
 app.include_router(invites_router)
 app.include_router(analytics_router)
+app.include_router(admin_meetings_router)
 
 
 @app.get("/health")
