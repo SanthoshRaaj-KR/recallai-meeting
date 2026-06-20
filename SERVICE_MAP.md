@@ -129,6 +129,7 @@ Do **not** collapse these to a single host-based path router unless you also spe
 | `/org` | GET `/hierarchy` | Full org tree (CEO) |
 | `/invites` | GET `/{code}`; POST `/{code}/accept` | Team invitations |
 | `/analytics` | GET `/usage/me`, `/usage/teams/{id}`, `/usage/org` | Meeting usage stats |
+| `/admin/meetings` | GET `/live`, `` (history), `/{id}`; POST `/{id}/kick` | Org-wide meeting oversight (ADMIN/CEO); kick proxies to bot-service. Needs `BOT_SERVICE_URL`. |
 | (no prefix) | GET `/teams/{id}/bot`, `/teams/{id}/meetings`; POST `/teams/{id}/bot` | Bot assignment + team meetings |
 | (root) | GET `/health`; POST `/admin/reset` (dev only) | Health / dev reset |
 
