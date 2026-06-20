@@ -347,6 +347,7 @@ async def session_bot_status(session_id: str) -> dict:
         "meeting_url": s.get("meeting_url"),
         "change_count": len(s.get("changes") or []),
         "error": s.get("error"),
+        "started_at": s.get("started_at"),
         "ended_at": s.get("ended_at"),
         "end_reason": None,
         "recall_status_code": None,
@@ -358,7 +359,7 @@ async def bot_status_no_session() -> dict:
     return {
         "status": "idle", "session_id": None, "bot_id": None,
         "meeting_url": None, "change_count": 0, "error": None,
-        "ended_at": None, "end_reason": None, "recall_status_code": None,
+        "started_at": None, "ended_at": None, "end_reason": None, "recall_status_code": None,
     }
 
 
@@ -388,7 +389,7 @@ async def stop_bot(session_id: str) -> dict:
     return {
         "status": "ended", "session_id": session_id, "bot_id": s.get("bot_id"),
         "meeting_url": s.get("meeting_url"), "change_count": len(s.get("changes") or []),
-        "error": s.get("error"), "ended_at": s.get("ended_at"),
+        "error": s.get("error"), "started_at": s.get("started_at"), "ended_at": s.get("ended_at"),
         "end_reason": None, "recall_status_code": None,
     }
 
