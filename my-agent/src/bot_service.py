@@ -42,14 +42,24 @@ try:
     from .memory_compaction import TranscriptCompactor
     from . import session_store
     from . import org_activity
+    from . import action_items_extractor
     from .review_pipeline.rag import ConfluenceVectorIndex
     from .review_pipeline.confluence import RestConfluenceClient
 except ImportError:
     from memory_compaction import TranscriptCompactor
     import session_store
     import org_activity
+    import action_items_extractor
     from review_pipeline.rag import ConfluenceVectorIndex
     from review_pipeline.confluence import RestConfluenceClient
+
+
+def _bg_extract_action_items(s: dict) -> None:
+    """Run action-item extraction off the request path (LLM call is slow)."""
+    import threading
+    threading.Thread(
+        target=action_items_extractor.extract_and_assign, args=(s,), daemon=True
+    ).start()
 
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
@@ -337,6 +347,7 @@ async def session_bot_status(session_id: str) -> dict:
                     s = {**s, **updates}
                     if new_status == "ended":
                         org_activity.record_meeting_activity(s)
+                        _bg_extract_action_items(s)
         except Exception as exc:
             logger.debug("Recall status poll error: %s", exc)
 
@@ -386,12 +397,28 @@ async def stop_bot(session_id: str) -> dict:
     session_store.patch(session_id, {"status": "ended", "ended_at": _utcnow()})
     s = session_store.get(session_id) or s
     org_activity.record_meeting_activity(s)
+    _bg_extract_action_items(s)
     return {
         "status": "ended", "session_id": session_id, "bot_id": s.get("bot_id"),
         "meeting_url": s.get("meeting_url"), "change_count": len(s.get("changes") or []),
         "error": s.get("error"), "started_at": s.get("started_at"), "ended_at": s.get("ended_at"),
         "end_reason": None, "recall_status_code": None,
     }
+
+
+@app.post("/sessions/{session_id}/action-items/extract")
+async def extract_action_items(session_id: str) -> dict:
+    """Re-run transcript → action-item extraction + auto-assignment for a session.
+
+    Runs synchronously (off the event loop) so the caller can refetch the items
+    right after. Idempotent: existing items are preserved (insert-ignore-duplicates).
+    """
+    try:
+        s = session_store.require(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+    await asyncio.to_thread(action_items_extractor.extract_and_assign, s)
+    return {"ok": True, "session_id": session_id}
 
 
 # ── Endpoints: Jarvis direct call ─────────────────────────────────────────────
@@ -502,6 +529,7 @@ async def recall_webhook(request: Request) -> dict:
                     logger.info("Webhook %s → session %s status=%s", event, s["session_id"], new_status)
                     if new_status == "ended":
                         org_activity.record_meeting_activity({**s, **updates})
+                        _bg_extract_action_items({**s, **updates})
 
     return {"ok": True}
 

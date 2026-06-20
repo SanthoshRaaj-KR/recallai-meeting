@@ -224,3 +224,75 @@ def send_mom_email(to_email: str, summary: dict) -> None:
 </html>"""
 
     _send(to_email, f"Minutes of Meeting — {title}", plain, html)
+
+
+def send_recap_email(to_email: str, summary: dict) -> None:
+    """Send a concise post-meeting recap (summary + decisions + action items)."""
+    title = summary.get("title") or "Meeting Recap"
+    overview = summary.get("summary") or ""
+    decisions = [d for d in (summary.get("decisions") or []) if isinstance(d, str)]
+    action_items = summary.get("action_items") or []
+
+    lines = [f"Recap — {title}", ""]
+    if overview:
+        lines += [overview, ""]
+    if decisions:
+        lines += ["DECISIONS"] + [f"- {d}" for d in decisions] + [""]
+    if action_items:
+        lines.append("ACTION ITEMS")
+        for a in action_items:
+            desc = a.get("description", "") if isinstance(a, dict) else str(a)
+            owner = a.get("owner") if isinstance(a, dict) else None
+            lines.append(f"- {desc}" + (f" ({owner})" if owner else ""))
+    plain = "\n".join(lines + ["", "— Jarvis"])
+
+    def _ul(items: list[str]) -> str:
+        return "<ul style='margin:0 0 16px;padding-left:20px;color:#374151'>" + "".join(
+            f"<li style='margin:4px 0'>{i}</li>" for i in items
+        ) + "</ul>"
+
+    body = ""
+    if overview:
+        body += f"<p style='color:#374151;margin:0 0 16px'>{overview}</p>"
+    if decisions:
+        body += "<h3 style='font-size:15px;margin:20px 0 6px'>Decisions</h3>" + _ul(decisions)
+    if action_items:
+        ai = []
+        for a in action_items:
+            if isinstance(a, dict):
+                ai.append(a.get("description", "") + (f" <em style='color:#6b7280'>— {a.get('owner')}</em>" if a.get("owner") else ""))
+        body += "<h3 style='font-size:15px;margin:20px 0 6px'>Action Items</h3>" + _ul(ai)
+
+    html = f"""<!doctype html>
+<html lang="en"><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:40px auto;padding:0 16px;color:#111">
+  <div style="text-align:center;margin-bottom:20px"><span style="font-weight:600;font-size:18px">Jarvis</span></div>
+  <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:28px">
+    <h2 style="font-size:20px;margin:0 0 12px">Recap — {title}</h2>
+    {body or "<p style='color:#6b7280'>No recap content available.</p>"}
+  </div>
+</body></html>"""
+    _send(to_email, f"Meeting recap — {title}", plain, html)
+
+
+def send_action_items_email(to_email: str, name: str, items: list[dict], meeting_title: str | None = None) -> None:
+    """Send a person their assigned action items for a meeting."""
+    where = f" from {meeting_title}" if meeting_title else ""
+    rows = [f"- {i.get('description','')}" + (f" (due {i['due']})" if i.get("due") else "") for i in items]
+    plain = f"Hi {name},\n\nYour action items{where}:\n\n" + "\n".join(rows) + "\n\n— Jarvis"
+
+    li = "".join(
+        f"<li style='margin:6px 0'>{i.get('description','')}"
+        + (f" <span style='color:#6b7280'>(due {i['due']})</span>" if i.get("due") else "")
+        + "</li>"
+        for i in items
+    )
+    html = f"""<!doctype html>
+<html lang="en"><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:560px;margin:40px auto;padding:0 16px;color:#111">
+  <div style="text-align:center;margin-bottom:20px"><span style="font-weight:600;font-size:18px">Jarvis</span></div>
+  <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:28px">
+    <h2 style="font-size:18px;margin:0 0 8px">Your action items{(' from ' + meeting_title) if meeting_title else ''}</h2>
+    <p style="color:#6b7280;margin:0 0 14px">Hi {name}, please complete and mark these done in Jarvis.</p>
+    <ul style="margin:0;padding-left:20px;color:#374151">{li}</ul>
+  </div>
+</body></html>"""
+    _send(to_email, f"Your action items{(' — ' + meeting_title) if meeting_title else ''}", plain, html)

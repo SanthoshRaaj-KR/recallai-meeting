@@ -8,8 +8,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import get_current_user
-from ..database import select_one
-from ..email import send_mom_email
+from ..database import select, select_one
+from ..email import send_mom_email, send_recap_email
 
 logger = logging.getLogger(__name__)
 
@@ -45,3 +45,43 @@ def email_mom(session_id: str, claims: dict = Depends(get_current_user)):
         raise HTTPException(502, f"Could not send the email: {exc}")
 
     return {"ok": True, "sent_to": user["email"]}
+
+
+@router.post("/{session_id}/recap-email")
+def recap_email(session_id: str, claims: dict = Depends(get_current_user)):
+    """Email a meeting recap to the session team's roster.
+
+    Participants in the summary are display names without emails, so the recap is
+    sent to the team-roster emails (the people who'd act on it)."""
+    s = select_one("jarvis_sessions", {"session_id": f"eq.{session_id}"})
+    if not s:
+        raise HTTPException(404, "Meeting not found")
+    team_id = s.get("team_id")
+    if team_id:
+        team = select_one("org_teams", {"id": f"eq.{team_id}"})
+        if not team or team.get("org_id") != claims.get("org_id"):
+            raise HTTPException(403, "This meeting is not in your organisation")
+    summary = s.get("summary") or {}
+    if not summary:
+        raise HTTPException(409, "This meeting has no summary yet")
+
+    emails: list[str] = []
+    if team_id:
+        mids = [m["user_id"] for m in select("org_team_members", {"team_id": f"eq.{team_id}", "select": "user_id"})]
+        if mids:
+            for u in select("org_users", {"id": f"in.({','.join(mids)})", "select": "email"}):
+                if u.get("email"):
+                    emails.append(u["email"])
+    if not emails:  # fall back to the caller
+        me = select_one("org_users", {"id": f"eq.{claims['sub']}"})
+        if me and me.get("email"):
+            emails.append(me["email"])
+
+    sent = 0
+    for addr in emails:
+        try:
+            send_recap_email(addr, summary)
+            sent += 1
+        except Exception as exc:
+            logger.warning("recap-email failed for %s: %s", addr, exc)
+    return {"ok": True, "emailed": sent}
