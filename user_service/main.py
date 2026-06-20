@@ -70,6 +70,7 @@ from .routes.bots import router as bots_router
 from .routes.invites import router as invites_router
 from .routes.analytics import router as analytics_router
 from .routes.admin_meetings import router as admin_meetings_router
+from .routes.meetings import router as meetings_router
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 _ALLOW_DB_RESET = os.getenv("ALLOW_DB_RESET", "false").lower() == "true"
@@ -108,6 +109,7 @@ app.include_router(bots_router)
 app.include_router(invites_router)
 app.include_router(analytics_router)
 app.include_router(admin_meetings_router)
+app.include_router(meetings_router)
 
 
 @app.get("/health")

@@ -6,7 +6,7 @@ import datetime as dt
 from fastapi import APIRouter, HTTPException
 
 from ..auth import create_access_token, hash_password
-from ..database import DBError, insert, select_one, update
+from ..database import DBError, delete, insert, select_one, update
 from ..models import AcceptInviteRequest, OrgRole, TeamInviteOut
 
 router = APIRouter(prefix="/invites", tags=["invites"])
@@ -18,8 +18,9 @@ def _load_and_validate(code: str) -> dict:
         raise HTTPException(404, "Invite not found or already used")
     expires = dt.datetime.fromisoformat(invite["expires_at"].replace("Z", "+00:00"))
     if dt.datetime.now(dt.timezone.utc) > expires:
+        # Hard-delete expired invites (codes must not linger in the DB).
         try:
-            update("org_team_invitations", {"code": f"eq.{code}"}, {"status": "expired"})
+            delete("org_team_invitations", {"code": f"eq.{code}"})
         except Exception:
             pass
         raise HTTPException(410, "This invite has expired")

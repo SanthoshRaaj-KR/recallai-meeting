@@ -194,9 +194,16 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     if body.role not in (TeamRole.MANAGER, TeamRole.MEMBER, TeamRole.ASSOCIATE):
         raise HTTPException(400, f"Invalid team role: {body.role}")
 
+    # Lazy GC (no scheduler in this stack): drop expired pending invites first.
+    try:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        delete("org_team_invitations", {"expires_at": f"lt.{now_iso}", "status": "eq.pending"})
+    except Exception:
+        pass
+
     code = secrets.token_hex(3).upper()  # 6-char hex e.g. "A3F0C2"
     expires_at = (
-        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=48)
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     ).isoformat()
 
     inviter = select_one("org_users", {"id": f"eq.{claims['sub']}"})
