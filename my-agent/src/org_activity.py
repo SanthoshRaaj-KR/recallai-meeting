@@ -133,6 +133,12 @@ def record_meeting_activity(session: dict) -> None:
                 "org_activity: recorded %d attendees for session %s (team %s, %.1f min)",
                 len(rows), session_id, team_id, duration,
             )
+            # Bust the analytics cache so the next request sees fresh stats.
+            try:
+                from user_service.routes.analytics import invalidate_team  # type: ignore[import]
+                invalidate_team(team_id)
+            except Exception:
+                pass  # cache invalidation is best-effort
         else:
             logger.warning("org_activity: insert failed (%s): %s", resp.status_code, resp.text[:120])
     except Exception as exc:  # analytics must never break meeting teardown

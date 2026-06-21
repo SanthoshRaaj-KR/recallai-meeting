@@ -126,18 +126,20 @@ def get_my_stats(claims: dict = Depends(get_current_user)):
     if not team_ids:
         return MeetingStats(total_meetings=0, total_minutes=0)
 
-    all_sessions: list[dict] = []
-    for tid in team_ids:
-        sessions = select("jarvis_sessions", {"team_id": f"eq.{tid}", "status": "eq.ended"})
-        all_sessions.extend(sessions)
-
     now = datetime.now(timezone.utc)
-    week_ago = now - timedelta(days=7)
     month_ago = now - timedelta(days=30)
+    week_ago = now - timedelta(days=7)
+    month_ago_iso = month_ago.replace(microsecond=0).isoformat()
+
+    all_sessions: list[dict] = []
+    recent_sessions: list[dict] = []
+    for tid in team_ids:
+        all_sessions.extend(select("jarvis_sessions", {"team_id": f"eq.{tid}", "status": "eq.ended"}))
+        recent_sessions.extend(select("jarvis_sessions", {
+            "team_id": f"eq.{tid}", "status": "eq.ended", "started_at": f"gte.{month_ago_iso}",
+        }))
 
     total_minutes = 0.0
-    meetings_this_week = 0
-    meetings_this_month = 0
     durations: list[float] = []
     last_meeting_at: str | None = None
 
@@ -151,14 +153,22 @@ def get_my_stats(claims: dict = Depends(get_current_user)):
                 dur = (end - start).total_seconds() / 60
                 total_minutes += dur
                 durations.append(dur)
-                if start >= week_ago:
-                    meetings_this_week += 1
-                if start >= month_ago:
-                    meetings_this_month += 1
             except Exception:
                 pass
         if ended_raw and (last_meeting_at is None or ended_raw > last_meeting_at):
             last_meeting_at = ended_raw
+
+    meetings_this_week = 0
+    meetings_this_month = 0
+    for s in recent_sessions:
+        try:
+            start = datetime.fromisoformat((s.get("started_at") or "").replace("Z", "+00:00"))
+            if start >= week_ago:
+                meetings_this_week += 1
+            if start >= month_ago:
+                meetings_this_month += 1
+        except Exception:
+            pass
 
     avg_mins = round(sum(durations) / len(durations), 1) if durations else 0.0
 

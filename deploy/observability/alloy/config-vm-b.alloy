@@ -75,5 +75,40 @@ otelcol.exporter.otlphttp "grafanacloud" {
 
 otelcol.auth.basic "grafanacloud" {
   username = sys.env("GC_OTLP_USER")
-  password = sys.env("GC_OTLP_PASS")
+  password = sys.env("GC_API_KEY")
+}
+
+// ---- Logs (Docker container logs → Grafana Cloud Loki) ----------------------
+discovery.docker "all" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "docker_logs" {
+  targets = discovery.docker.all.targets
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.docker_logs.output
+  forward_to = [loki.write.grafanacloud.receiver]
+  labels     = { vm = "vm-b" }
+}
+
+loki.write "grafanacloud" {
+  endpoint {
+    url = sys.env("GC_LOKI_URL")
+    basic_auth {
+      username = sys.env("GC_LOKI_USER")
+      password = sys.env("GC_API_KEY")
+    }
+  }
 }
