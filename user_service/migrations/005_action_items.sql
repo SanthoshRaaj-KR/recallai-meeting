@@ -12,7 +12,7 @@ create table if not exists meeting_action_items (
   owner_user_id uuid references org_users(id) on delete set null,
   owner_name    text,                       -- raw LLM name when no roster match
   due           text,
-  status        text not null default 'open' check (status in ('open','submitted','closed')),
+  status        text not null default 'open' check (status in ('open','submitted','closed','cancelled')),
   member_note   text,                       -- member's completion note
   reviewed_by   uuid references org_users(id) on delete set null,
   reviewed_at   timestamptz,
@@ -25,6 +25,12 @@ create table if not exists meeting_action_items (
 create index if not exists idx_action_items_owner   on meeting_action_items(owner_user_id);
 create index if not exists idx_action_items_session  on meeting_action_items(session_id);
 create index if not exists idx_action_items_status   on meeting_action_items(status);
+
+-- Idempotent: widen the status check to include 'cancelled' even if the table
+-- was created by an earlier version of this migration.
+alter table meeting_action_items drop constraint if exists meeting_action_items_status_check;
+alter table meeting_action_items add constraint meeting_action_items_status_check
+  check (status in ('open','submitted','closed','cancelled'));
 
 -- Disable RLS so the services can read/write with the service-role key
 alter table meeting_action_items disable row level security;

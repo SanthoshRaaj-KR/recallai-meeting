@@ -197,6 +197,18 @@ def close_item(item_id: str, claims: dict = Depends(get_current_user)):
     return _enrich([rows[0]])[0]
 
 
+@router.patch("/action-items/{item_id}/cancel")
+def cancel_item(item_id: str, claims: dict = Depends(get_current_user)):
+    """Manager/ADMIN/CEO cancels an action no longer needed (-> cancelled)."""
+    item = _load_item(item_id)
+    if not _can_manage_item(item, claims):
+        raise HTTPException(403, "Only a team manager, ADMIN or CEO can cancel items")
+    rows = update("meeting_action_items", {"id": f"eq.{item_id}"}, {
+        "status": "cancelled", "reviewed_by": claims["sub"], "reviewed_at": _now(), "updated_at": _now(),
+    })
+    return _enrich([rows[0]])[0]
+
+
 @router.patch("/action-items/{item_id}/reopen")
 def reopen_item(item_id: str, claims: dict = Depends(get_current_user)):
     """Manager/ADMIN/CEO reopens an item (-> open)."""

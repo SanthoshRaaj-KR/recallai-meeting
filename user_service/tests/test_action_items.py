@@ -141,6 +141,13 @@ def test_manager_can_close_but_member_cannot():
     assert _as("u-mem", "MEMBER").patch("/action-items/ai1/close").status_code == 403
 
 
+def test_manager_can_cancel_member_cannot():
+    assert _as("u-mgr", "MANAGER").patch("/action-items/ai1/cancel").status_code == 200
+    assert ITEMS[0]["status"] == "cancelled" and ITEMS[0]["reviewed_by"] == "u-mgr"
+    ITEMS[0]["status"] = "open"
+    assert _as("u-mem", "MEMBER").patch("/action-items/ai1/cancel").status_code == 403
+
+
 def test_meeting_items_members_only():
     client = _as("u-mem", "MEMBER")
     r = client.get("/meetings/s1/action-items")
