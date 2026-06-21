@@ -100,17 +100,19 @@ class ConfluenceLiveRAG:
                 return cached_hits
         try:
             index = self._get_index()
+            # Pinecone 8.x integrated-inference search nests top_k/inputs under a
+            # ``query`` dict; top-level top_k= raises TypeError on this SDK.
             result = index.search(
                 namespace=self.namespace,
-                top_k=max(1, top_k),
-                inputs={"text": query.strip()},
+                query={"top_k": max(1, top_k), "inputs": {"text": query.strip()}},
                 fields=["page_id", "title", "space_key", "heading", "section_order", "text"],
             )
             raw_hits = result.result.hits if hasattr(result, "result") else []
             hits: list[dict[str, Any]] = []
             for hit in raw_hits:
                 fields = hit.fields if hasattr(hit, "fields") else {}
-                score = float(hit.score if hasattr(hit, "score") else 0.0)
+                # Pinecone 8.x Hit exposes the score as ``_score`` (``score`` is None).
+                score = float(getattr(hit, "_score", None) or getattr(hit, "score", 0.0) or 0.0)
                 if score < _SCORE_THRESHOLD:
                     continue
                 hits.append(
@@ -256,7 +258,7 @@ class ConfluenceLiveRAG:
             return
         try:
             index = self._get_index()
-            index.search(namespace=self.namespace, top_k=1, inputs={"text": "warmup"})
+            index.search(namespace=self.namespace, query={"top_k": 1, "inputs": {"text": "warmup"}})
             logger.info("ConfluenceLiveRAG: connection pre-warmed")
         except Exception as exc:  # noqa: BLE001
             logger.warning("ConfluenceLiveRAG warmup failed: %s", exc)

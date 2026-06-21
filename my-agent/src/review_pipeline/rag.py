@@ -201,8 +201,7 @@ class ConfluenceVectorIndex:
             return []
         result = self._index().search(
             namespace=self.namespace,
-            top_k=max(1, top_k),
-            inputs={"text": clean_query},
+            query={"top_k": max(1, top_k), "inputs": {"text": clean_query}},
             fields=["page_id", "title", "space_key", "heading", "text", "version"],
         )
         hits: list[VectorSearchHit] = []
@@ -217,7 +216,7 @@ class ConfluenceVectorIndex:
                     title=str(fields.get("title") or page_id),
                     space_key=str(fields.get("space_key") or ""),
                     heading=str(fields.get("heading") or ""),
-                    score=float(getattr(match, "score", 0.0)),
+                    score=float(getattr(match, "_score", None) or getattr(match, "score", 0.0) or 0.0),
                     text=str(fields.get("text") or ""),
                     version=int(fields.get("version") or 0) or None,
                 )
@@ -253,8 +252,7 @@ class ConfluenceVectorIndex:
                 logger.info("Querying index with top_k=%d", top_k_per_query)
                 result = index.search(
                     namespace=self.namespace,
-                    top_k=max(1, top_k_per_query),
-                    inputs={"text": clean},
+                    query={"top_k": max(1, top_k_per_query), "inputs": {"text": clean}},
                     fields=["page_id", "title", "space_key", "heading", "text", "version"],
                 )
                 ranked: list[tuple[int, VectorSearchHit]] = []
@@ -271,7 +269,7 @@ class ConfluenceVectorIndex:
                             title=str(fields.get("title") or page_id),
                             space_key=str(fields.get("space_key") or ""),
                             heading=str(fields.get("heading") or ""),
-                            score=float(getattr(match, "score", 0.0)),
+                            score=float(getattr(match, "_score", None) or getattr(match, "score", 0.0) or 0.0),
                             text=str(fields.get("text") or ""),
                             version=int(fields.get("version") or 0) or None,
                         ),
