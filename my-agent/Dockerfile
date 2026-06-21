@@ -33,6 +33,8 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     python3-dev \
+    nodejs \
+    npm \
   && rm -rf /var/lib/apt/lists/*
 
 # Create a new directory for our application code
@@ -67,6 +69,9 @@ RUN uv run "src/agent.py" download-files
 # --- Production stage ---
 # Build tools (gcc, g++, python3-dev) are not included in the final image
 FROM base
+
+# Install Node.js/npm so `npx` is available for the GitHub MCP server subprocess.
+RUN apt-get update && apt-get install -y nodejs npm && rm -rf /var/lib/apt/lists/*
 
 # Create a non-privileged user that the app will run under.
 # See https://docs.docker.com/build/building/best-practices/#user
