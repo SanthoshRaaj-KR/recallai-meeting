@@ -280,10 +280,11 @@ class PineconeHybridIndex:
         if which == "dense" and _DENSE_BACKEND == "openai":
             return self._search_openai_dense(index, query, top_k)
         try:
+            # Pinecone 8.x integrated-inference search nests top_k/inputs under a
+            # ``query`` dict (top-level top_k= raises TypeError on this SDK).
             result = index.search(
                 namespace=self.namespace,
-                top_k=max(1, top_k),
-                inputs={"text": query},
+                query={"top_k": max(1, top_k), "inputs": {"text": query}},
                 fields=_FIELDS,
             )
         except Exception as exc:
@@ -293,10 +294,11 @@ class PineconeHybridIndex:
         hits = getattr(getattr(result, "result", result), "hits", [])
         for rank, match in enumerate(hits):
             raw_fields = getattr(match, "fields", None) or {}
-            cid = str(getattr(match, "id", "") or "")
+            # Pinecone 8.x Hit exposes id/score as ``_id`` / ``_score``.
+            cid = str(getattr(match, "_id", None) or getattr(match, "id", "") or "")
             if not cid:
                 continue
-            score = float(getattr(match, "score", 0.0) or 0.0)
+            score = float(getattr(match, "_score", None) or getattr(match, "score", 0.0) or 0.0)
             fields = dict(raw_fields)
             fields["_id"] = cid
             out.append((rank, fields, score))
