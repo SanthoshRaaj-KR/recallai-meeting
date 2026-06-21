@@ -47,6 +47,33 @@ def email_mom(session_id: str, claims: dict = Depends(get_current_user)):
     return {"ok": True, "sent_to": user["email"]}
 
 
+@router.post("/{session_id}/share")
+def share_meeting(session_id: str, body: dict, claims: dict = Depends(get_current_user)):
+    """ADMIN/MANAGER: share the MOM/summary with a specific email address."""
+    if claims.get("role") not in ("CEO", "ADMIN", "MANAGER"):
+        raise HTTPException(403, "Only a manager, ADMIN or CEO can share")
+    to_email = (body.get("email") or "").strip()
+    if not to_email:
+        raise HTTPException(400, "email is required")
+    s = select_one("jarvis_sessions", {"session_id": f"eq.{session_id}"})
+    if not s:
+        raise HTTPException(404, "Meeting not found")
+    team_id = s.get("team_id")
+    if team_id:
+        team = select_one("org_teams", {"id": f"eq.{team_id}"})
+        if not team or team.get("org_id") != claims.get("org_id"):
+            raise HTTPException(403, "This meeting is not in your organisation")
+    summary = s.get("summary") or {}
+    if not summary:
+        raise HTTPException(409, "This meeting has no summary yet")
+    try:
+        send_recap_email(to_email, summary)
+    except Exception as exc:
+        logger.warning("share failed for %s: %s", to_email, exc)
+        raise HTTPException(502, f"Could not send the email: {exc}")
+    return {"ok": True, "sent_to": to_email}
+
+
 @router.post("/{session_id}/recap-email")
 def recap_email(session_id: str, claims: dict = Depends(get_current_user)):
     """Email a meeting recap to the session team's roster.
