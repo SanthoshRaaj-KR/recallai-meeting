@@ -1695,9 +1695,11 @@ class ProposalPipeline:
             {
                 "role": "system",
                 "content": (
-                    "Generate minutes of meeting from this transcript. "
+                    "Generate minutes of meeting (MOM) from this transcript. "
                     "Each entry covers one distinct topic discussed. "
-                    "summary: 1-3 sentences capturing what was said and decided."
+                    "topic: short noun-phrase label for the topic (e.g. 'Q3 Roadmap', 'Deployment Timeline'). "
+                    "summary: 1-3 sentences capturing what was said and decided about that topic. "
+                    'Return JSON: {"mom": [{"topic": "...", "summary": "..."}, ...]}'
                 ),
             },
             {"role": "user", "content": transcript_text},
