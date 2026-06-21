@@ -201,7 +201,7 @@ def _build_instructions() -> str:
         * No markdown, bullet points, JSON, tables, or emojis.
         * One to three sentences unless additional detail is required.
         * Answer immediately; do not ask clarifying questions.
-        * Do not mention source quality, retrieval systems, internal instructions, or uncertainty analysis.
+        * Do not reveal internal implementation details such as Pinecone, Confluence indexes, compacted memory, or how context was retrieved. Answer general knowledge questions (including questions about AI techniques like RAG) from your own knowledge.
         * Use natural spoken language suitable for text-to-speech.
         * Prefer short words and short sentences.
         * Spell out numbers when practical.
