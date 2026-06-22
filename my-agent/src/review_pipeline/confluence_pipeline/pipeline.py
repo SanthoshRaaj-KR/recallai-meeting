@@ -216,7 +216,7 @@ async def propose(
 
     # ── Stage 5: two-stage evaluation (cheap wide filter → strong precise gate) ─
     await _emit("evaluation")
-    eval_cheap = EvaluationAgent(model=os.getenv("LDOC_EVAL_STAGE1_MODEL", "gpt-4o-mini"))
+    eval_cheap = EvaluationAgent(model=os.getenv("LDOC_EVAL_STAGE1_MODEL", "gpt-4o-mini"), temperature=0.0)
     eval_fine = EvaluationAgent()  # LDOC_EVAL_MODEL, default gpt-5.4-mini
 
     async def _score_pool(intent: ConfluenceIntent, chunks: list[ChunkRecord], max_targets: int):

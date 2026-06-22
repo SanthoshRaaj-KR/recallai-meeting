@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import html
 import json
@@ -76,6 +77,35 @@ class _MOMEntry(BaseModel):
 
 class _MOMResponse(BaseModel):
     mom: list[_MOMEntry] = []
+
+
+def _fuzzy_anchor_match(before: str, section_text: str, *, threshold: float = 0.85) -> str | None:
+    """Return the line in section_text most similar to before (Jaccard ≥ threshold).
+
+    Used when a before_content anchor is not found verbatim — Confluence may have
+    auto-reformatted the section since it was indexed. Returns None if no line
+    reaches the threshold so the proposal is still dropped if match is too weak.
+    """
+    before_tokens = set(normalize_for_match(before).split())
+    if not before_tokens:
+        return None
+    best_score = 0.0
+    best_line: str | None = None
+    for line in section_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        line_tokens = set(normalize_for_match(line).split())
+        if not line_tokens:
+            continue
+        union = len(before_tokens | line_tokens)
+        if union == 0:
+            continue
+        score = len(before_tokens & line_tokens) / union
+        if score > best_score:
+            best_score = score
+            best_line = line
+    return best_line if best_score >= threshold else None
 
 
 def _human_only(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -264,11 +294,23 @@ class ProposalPipeline:
             return meeting, []
 
         # Stage 1: Extract meeting topics and loose intents (no forced old_value).
-        await _emit({"type": "stage_start", "stage": "fact_extraction"})
-        meeting = await self._extract_meeting(transcript, transcript_text, query=query)
+        # Resume from checkpoint if this session already completed Stage 1.
+        _cached = self._load_pipeline_checkpoint(session_id, "meeting")
+        if _cached:
+            try:
+                intents = [ChangeIntent(**i) for i in _cached.get("change_intents") or []]
+                meeting = ExtractedMeeting(**{**_cached, "change_intents": intents})
+                logger.info("Resumed pipeline from Stage 1 checkpoint for session %s", session_id)
+            except Exception:
+                _cached = None
+        if not _cached:
+            await _emit({"type": "stage_start", "stage": "fact_extraction"})
+            meeting = await self._extract_meeting(transcript, transcript_text, query=query)
         fallback = self._intents_from_action_items(meeting)
         if fallback:
             meeting.change_intents = self._merge_intents(meeting.change_intents, fallback)[:30]
+        if not _cached:
+            self._save_pipeline_checkpoint(session_id, "meeting", dataclasses.asdict(meeting))
 
         if not meeting.change_intents:
             return meeting, []
@@ -574,7 +616,10 @@ class ProposalPipeline:
         query: str | None = None,
     ) -> ExtractedMeeting:
         try:
-            data = await asyncio.to_thread(self._extract_meeting_sync, transcript_text, query or "")
+            # Strip Jarvis's own spoken replies before intent extraction. Jarvis answers
+            # embed RAG-retrieved Confluence content which can be misread as meeting evidence.
+            human_text = format_transcript(_human_only(transcript))
+            data = await asyncio.to_thread(self._extract_meeting_sync, human_text, query or "")
             return self._meeting_from_json(data, transcript)
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM meeting extraction failed; using heuristic fallback: %s", exc)
@@ -1104,11 +1149,17 @@ class ProposalPipeline:
         if not after or self._looks_like_instruction_text(after):
             return None
 
-        # Verify the replace anchor actually exists in the section.
-        # Silently downgrading to append risks adding duplicate content to an unrelated section.
+        # Verify the replace anchor exists in the section. If not found verbatim,
+        # try a fuzzy line match (Jaccard ≥ 0.85) before dropping — Confluence may
+        # have auto-reformatted the section since indexing.
+        _fuzzy_anchor_used = False
         if edit_mode == "replace" and before:
             if normalize_for_match(before) not in normalize_for_match(section_text):
-                return None
+                fuzzy = _fuzzy_anchor_match(before, section_text)
+                if fuzzy is None:
+                    return None
+                before = fuzzy
+                _fuzzy_anchor_used = True
 
         section_heading = normalize_ws(str(data.get("section_heading") or hit.heading)) or hit.heading
         rationale = normalize_ws(str(data.get("rationale") or intent.rationale or intent.instruction))
@@ -1124,7 +1175,14 @@ class ProposalPipeline:
             else "low"
         )
         risk: Literal["safe", "review", "risky"] = "safe" if confidence == "high" else "review"
+        if _fuzzy_anchor_used:
+            risk = "risky"
+            confidence = "low" if confidence == "high" else confidence
         conf_score = {"high": 0.9, "medium": 0.72, "low": 0.45}[confidence]
+
+        verifier_note = self._verifier_note_grounded(edit_mode, before, hit.score)
+        if _fuzzy_anchor_used:
+            verifier_note = "[FUZZY ANCHOR] before_content matched approximately — confirm exact text before accepting. " + verifier_note
 
         edit_mode_typed: EditMode = "task_status" if action in {"complete_task", "reopen_task"} else edit_mode  # type: ignore[assignment]
 
@@ -1145,7 +1203,7 @@ class ProposalPipeline:
             transcript_evidence=intent.evidence[:3],
             confidence=confidence,
             risk=risk,
-            verifier_note=self._verifier_note_grounded(edit_mode, before, hit.score),
+            verifier_note=verifier_note,
             edit_mode=edit_mode_typed,
             change_summary=self._change_summary(intent, hit.title, "edit", before, after),
             page_url=page_url,
@@ -1866,6 +1924,30 @@ class ProposalPipeline:
                 "action_item_count": len(meeting.action_items),
             },
         }
+
+    def _save_pipeline_checkpoint(self, session_id: str, stage: str, data: Any) -> None:
+        """Persist a pipeline stage result to the session store (best-effort, silent on error)."""
+        try:
+            import session_store
+            existing = session_store.get(session_id) or {}
+            cache = existing.get("pipeline_cache") or {}
+            cache[stage] = json.dumps(data, default=lambda o: dataclasses.asdict(o) if dataclasses.is_dataclass(o) else str(o))
+            session_store.patch(session_id, {"pipeline_cache": cache})
+        except Exception as exc:
+            logger.debug("Pipeline checkpoint save failed (stage=%s): %s", stage, exc)
+
+    def _load_pipeline_checkpoint(self, session_id: str, stage: str) -> Any | None:
+        """Load a pipeline stage result from the session store (best-effort, returns None on miss)."""
+        try:
+            import session_store
+            existing = session_store.get(session_id)
+            if not existing:
+                return None
+            raw = (existing.get("pipeline_cache") or {}).get(stage)
+            return json.loads(raw) if raw else None
+        except Exception as exc:
+            logger.debug("Pipeline checkpoint load failed (stage=%s): %s", stage, exc)
+            return None
 
     def _get_openai(self) -> OpenAI:
         if self._openai is None:

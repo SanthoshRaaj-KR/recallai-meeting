@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html as _html_module
 import logging
 import math
 import os
@@ -10,6 +11,13 @@ from typing import Any
 
 from .models import PageCandidate
 from .text_utils import extract_sections, html_to_text, normalize_ws
+
+# Contextual chunk enrichment: when enabled, a short LLM-generated context
+# summary is prepended to each chunk's embedding text at upsert time.
+# Re-index the corpus after enabling. Uses gpt-4o-mini (one call per chunk).
+_CONTEXTUAL_ENRICHMENT = os.getenv("MY_AGENT_RAG_CONTEXTUAL_ENRICHMENT", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
 logger = logging.getLogger(__name__)
 
@@ -140,12 +148,26 @@ class ConfluenceVectorIndex:
         if not chunks:
             return
         index = self._index()
+        # Contextual enrichment (MY_AGENT_RAG_CONTEXTUAL_ENRICHMENT=1): prepend an
+        # LLM-generated context summary to chunk_text before embedding. Reduces
+        # retrieval failure by 35-67% for generic-heading sections (Anthropic, 2024).
+        if _CONTEXTUAL_ENRICHMENT:
+            embed_texts: list[str] = []
+            for chunk in chunks:
+                try:
+                    ctx = self._generate_chunk_context(chunk)
+                    embed_texts.append((ctx + "\n" + self._embedding_text(chunk))[: self.max_metadata_chars])
+                except Exception as exc:
+                    logger.warning("Context generation failed for chunk %s: %s", chunk.id, exc)
+                    embed_texts.append(self._embedding_text(chunk)[: self.max_metadata_chars])
+        else:
+            embed_texts = [self._embedding_text(chunk)[: self.max_metadata_chars] for chunk in chunks]
         # Integrated index: Pinecone embeds `chunk_text` server-side (llama-text-embed-v2).
         # `text` is stored as display metadata; `chunk_text` is what gets embedded.
         records = [
             {
                 "_id": chunk.id,
-                "chunk_text": self._embedding_text(chunk)[: self.max_metadata_chars],
+                "chunk_text": embed_text,
                 "text": chunk.text[: self.max_metadata_chars],
                 "page_id": chunk.page_id,
                 "title": chunk.title,
@@ -157,7 +179,7 @@ class ConfluenceVectorIndex:
                 "content_hash": content_hash,
                 "chunk_count": len(chunks),
             }
-            for chunk in chunks
+            for chunk, embed_text in zip(chunks, embed_texts)
         ]
         for start in range(0, len(records), 96):
             index.upsert_records(namespace=self.namespace, records=records[start : start + 96])
@@ -422,6 +444,37 @@ class ConfluenceVectorIndex:
             )
         )
 
+    def _oai(self) -> Any:
+        if getattr(self, "_oai_client", None) is None:
+            import openai
+            self._oai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", "").strip())
+        return self._oai_client
+
+    def _generate_chunk_context(self, chunk: PageChunk) -> str:
+        """Generate a 1–2 sentence context summary for embedding (Anthropic contextual retrieval).
+
+        Prepending this to chunk_text at upsert time reduces retrieval failure by
+        35–67% for chunks with generic headings (e.g. 'Overview', 'Performance').
+        Gated by MY_AGENT_RAG_CONTEXTUAL_ENRICHMENT=1; only called at upsert time.
+        """
+        client = self._oai()
+        prompt = (
+            f"Document title: {chunk.title}\n"
+            f"Space: {chunk.space_key}\n"
+            f"Section heading: {chunk.heading}\n\n"
+            f"Section text (excerpt):\n{chunk.text[:800]}\n\n"
+            "In 1-2 sentences, explain what this section covers in the context of the "
+            "document. Be specific about the topics, entities, and values it contains. "
+            "Do not repeat the heading verbatim."
+        )
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=120,
+            temperature=0.0,
+        )
+        return (resp.choices[0].message.content or "").strip()
+
     def _delete_stale_chunks(self, page_id: str, live_count: int) -> None:
         stale_ids = [f"{page_id}:{idx}" for idx in range(live_count, live_count + 64)]
         try:
@@ -591,6 +644,41 @@ class ConfluenceVectorIndex:
         }
 
 
+def _strip_cell(cell_html: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", cell_html or "")
+    return normalize_ws(_html_module.unescape(text))
+
+
+def _extract_table_rows(section_html: str) -> list[str]:
+    """Parse <table> elements and return one string per data row.
+
+    Format: "Header1: value1 | Header2: value2". Column headers come from <th>
+    cells; data rows come from <td> cells. This preserves the column-header →
+    cell relationship that plain text extraction loses, which is critical for
+    numeric-value lookups (SLA response times, sprint capacities, versions).
+    """
+    rows: list[str] = []
+    for table_match in re.finditer(r"(?is)<table\b[^>]*>(.*?)</table>", section_html or ""):
+        table_inner = table_match.group(1)
+        headers: list[str] = []
+        for tr_match in re.finditer(r"(?is)<tr\b[^>]*>(.*?)</tr>", table_inner):
+            row_html = tr_match.group(1)
+            th_cells = [_strip_cell(m.group(1)) for m in re.finditer(r"(?is)<th\b[^>]*>(.*?)</th>", row_html)]
+            td_cells = [_strip_cell(m.group(1)) for m in re.finditer(r"(?is)<td\b[^>]*>(.*?)</td>", row_html)]
+            if th_cells:
+                headers = [c for c in th_cells if c]
+                continue
+            if not td_cells:
+                continue
+            if headers and len(td_cells) == len(headers):
+                row_str = " | ".join(f"{h}: {v}" for h, v in zip(headers, td_cells) if v)
+            else:
+                row_str = " | ".join(c for c in td_cells if c)
+            if row_str:
+                rows.append(row_str)
+    return rows
+
+
 def chunk_page(page: PageCandidate, *, max_words: int = 350) -> list[PageChunk]:
     """Split one Confluence page into page-owned chunks.
 
@@ -607,7 +695,8 @@ def chunk_page(page: PageCandidate, *, max_words: int = 350) -> list[PageChunk]:
     chunks: list[PageChunk] = []
     for section_order, section in enumerate(sections):
         heading = normalize_ws(str(section.get("heading") or "Page intro"))
-        text = normalize_ws(str(section.get("text") or html_to_text(str(section.get("html") or ""))))
+        section_html = str(section.get("html") or "")
+        text = normalize_ws(str(section.get("text") or html_to_text(section_html)))
         if not text:
             continue
         for part in _split_text(text, max_words=max_words):
@@ -624,6 +713,23 @@ def chunk_page(page: PageCandidate, *, max_words: int = 350) -> list[PageChunk]:
                     text=part,
                 )
             )
+        # Table-aware chunks: emit one additional chunk per data row so column-header
+        # associations are preserved for numeric-value retrieval (SLAs, metrics, versions).
+        if "<table" in section_html.lower():
+            for row_text in _extract_table_rows(section_html):
+                chunks.append(
+                    PageChunk(
+                        id=f"{page.page_id}:{len(chunks)}",
+                        page_id=page.page_id,
+                        title=page.title,
+                        space_key=page.space_key,
+                        heading=heading,
+                        section_order=section_order,
+                        chunk_order=len(chunks),
+                        version=page.version,
+                        text=row_text,
+                    )
+                )
     return chunks
 
 

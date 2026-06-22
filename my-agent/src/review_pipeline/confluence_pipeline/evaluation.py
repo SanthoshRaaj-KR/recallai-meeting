@@ -11,7 +11,7 @@ import asyncio
 import logging
 import os
 
-from agents import Agent, Runner
+from agents import Agent, ModelSettings, Runner
 from pydantic import BaseModel, Field
 
 from .llm_runtime import guarded_run
@@ -63,13 +63,14 @@ class _EvalResult(BaseModel):
 class EvaluationAgent:
     """Scores how relevant a document section is for a given change intent."""
 
-    def __init__(self, model: str = None):
+    def __init__(self, model: str = None, *, temperature: float | None = None):
         self.model = model or os.getenv("LDOC_EVAL_MODEL", "gpt-5.4-mini")
         self._agent = Agent(
             name="ConfluenceEvaluator",
             model=self.model,
             instructions=EVAL_INSTRUCTIONS,
             output_type=_EvalResult,
+            model_settings=ModelSettings(temperature=temperature),
         )
 
     async def score(self, intent: ConfluenceIntent, chunk: ChunkRecord) -> float:
