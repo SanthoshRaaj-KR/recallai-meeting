@@ -650,8 +650,25 @@ async def _run_rag_sync(job_id: str) -> None:
         # ── Check index existence — if any index is missing force a full reindex ──
         force_full = not await asyncio.to_thread(_all_indexes_exist, rag, hybrid)
         if force_full:
-            logger.info("RAG sync %s: one or more indexes missing — forcing full reindex", job_id)
+            logger.info("RAG sync %s: one or more indexes missing — creating indexes upfront", job_id)
             job["current_page"] = "Creating missing indexes…"
+            # Eagerly create all 3 indexes before the upsert loop so failures are
+            # surfaced now rather than silently accumulating per-page failures.
+            try:
+                await asyncio.to_thread(rag._index)
+                logger.info("RAG sync %s: live RAG index ready (%s)", job_id, rag.index_name)
+            except Exception as exc:
+                logger.error("RAG sync %s: could not create live RAG index %r: %s", job_id, rag.index_name, exc)
+            try:
+                await asyncio.to_thread(lambda: hybrid._index("dense"))
+                logger.info("RAG sync %s: dense index ready (%s)", job_id, hybrid.dense_index)
+            except Exception as exc:
+                logger.error("RAG sync %s: could not create dense index %r: %s", job_id, hybrid.dense_index, exc)
+            try:
+                await asyncio.to_thread(lambda: hybrid._index("sparse"))
+                logger.info("RAG sync %s: sparse index ready (%s)", job_id, hybrid.sparse_index)
+            except Exception as exc:
+                logger.warning("RAG sync %s: sparse index unavailable (%s) — dense-only mode", job_id, exc)
 
         # ── List all pages (lightweight — version numbers only) ───────────────────
         listings = await asyncio.to_thread(confluence.list_pages, 500)

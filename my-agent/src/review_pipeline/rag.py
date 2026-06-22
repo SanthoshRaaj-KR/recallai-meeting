@@ -105,7 +105,7 @@ class ConfluenceVectorIndex:
         self.index_name = (
             os.getenv("MY_AGENT_RAG_INDEX")
             or os.getenv("PINECONE_INDEX_NAME")
-            or "confluence-review-rag"
+            or "confluence-review-rag-v2"
         ).strip()
         self.namespace = (
             os.getenv("MY_AGENT_RAG_NAMESPACE")
@@ -114,7 +114,7 @@ class ConfluenceVectorIndex:
         ).strip()
         self.max_chunk_words = int(os.getenv("MY_AGENT_RAG_CHUNK_WORDS", "350"))
         self.max_metadata_chars = int(os.getenv("MY_AGENT_RAG_METADATA_CHARS", "5000"))
-        self.create_index = os.getenv("MY_AGENT_RAG_CREATE_INDEX", "0").strip().lower() in {
+        self.create_index = os.getenv("MY_AGENT_RAG_CREATE_INDEX", "1").strip().lower() in {
             "1",
             "true",
             "yes",
