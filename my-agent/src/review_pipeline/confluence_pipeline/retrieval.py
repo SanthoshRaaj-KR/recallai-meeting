@@ -69,7 +69,10 @@ _CONTENT_CHARS = int(os.getenv("MY_AGENT_LDOC_CONTENT_CHARS", "12000"))
 # embedding tokens-per-minute ceiling; the heading + section head carries the
 # topic signal needed for retrieval, while the full content is still stored for
 # the editor to make a surgical edit).
-_EMBED_CHARS = int(os.getenv("MY_AGENT_LDOC_EMBED_CHARS", "4000"))
+_EMBED_CHARS = int(os.getenv("MY_AGENT_LDOC_EMBED_CHARS", "8000"))
+_CONTEXTUAL_ENRICHMENT_LDOC = os.getenv("MY_AGENT_LDOC_CONTEXTUAL_ENRICHMENT", "1").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 _RRF_K = 60
 
 # Upsert pacing — Pinecone integrated embedding has a tokens-per-minute ceiling
@@ -81,13 +84,15 @@ _UPSERT_MAX_RETRIES = int(os.getenv("MY_AGENT_LDOC_UPSERT_RETRIES", "8"))
 
 _FIELDS = [
     "content", "source_path", "source_format", "section_heading",
-    "section_index", "doc_title", "page_id",
+    "section_index", "doc_title", "page_id", "space_key",
 ]
 
 
 def _embedding_text(chunk: ChunkRecord) -> str:
     head = f"{chunk.doc_title} — {chunk.section_heading}".strip(" —")
-    return (head + "\n" + chunk.content).strip()
+    space = f" [{chunk.space_key}]" if chunk.space_key else ""
+    prefix = chunk.context_prefix.strip() + "\n" if chunk.context_prefix else ""
+    return (prefix + head + space + "\n" + chunk.content).strip()
 
 
 class PineconeHybridIndex:
@@ -240,6 +245,7 @@ class PineconeHybridIndex:
                 "section_index": c.section_index,
                 "doc_title": c.doc_title,
                 "page_id": c.source_path,
+                "space_key": c.space_key or "",
                 "version": c.version or 0,
                 "content_hash": c.content_hash or "",
             })
@@ -351,6 +357,25 @@ class PineconeHybridIndex:
             out.append((rank, fields, score))
         return out
 
+    def _generate_context_prefix(self, chunk: ChunkRecord) -> str:
+        """Generate a 1–2 sentence context summary to prepend to the embedding text."""
+        client = self._oai()
+        prompt = (
+            f"Document title: {chunk.doc_title}\n"
+            f"Section heading: {chunk.section_heading}\n\n"
+            f"Section text (excerpt):\n{chunk.content[:800]}\n\n"
+            "In 1-2 sentences, explain what this section covers in the context of the "
+            "document. Be specific about topics, entities, and values. "
+            "Do not repeat the heading verbatim."
+        )
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=120,
+            temperature=0.0,
+        )
+        return (resp.choices[0].message.content or "").strip()
+
     def sync_index(
         self,
         page_listings: list[dict[str, Any]],
@@ -445,9 +470,16 @@ class PineconeHybridIndex:
                 )
                 from .chunker import chunk_markdown_text
                 chunks = chunk_markdown_text(markdown, source_path=pid, source_format="confluence")
+                space_key = getattr(page, "space_key", "") or ""
                 for chunk in chunks:
                     chunk.version = getattr(page, "version", None)
                     chunk.content_hash = content_hash
+                    chunk.space_key = space_key
+                    if _CONTEXTUAL_ENRICHMENT_LDOC and not chunk.context_prefix:
+                        try:
+                            chunk.context_prefix = self._generate_context_prefix(chunk)
+                        except Exception as _ctx_exc:  # noqa: BLE001
+                            logger.warning("Context prefix failed for %s/%s: %s", pid, chunk.section_heading, _ctx_exc)
                 self.upsert_chunks(chunks)
                 changed += 1
                 logger.debug("sync_index (hybrid): re-indexed %r (page_id=%s)", title, pid)

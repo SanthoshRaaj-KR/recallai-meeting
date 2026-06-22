@@ -15,7 +15,7 @@ from .text_utils import extract_sections, html_to_text, normalize_ws
 # Contextual chunk enrichment: when enabled, a short LLM-generated context
 # summary is prepended to each chunk's embedding text at upsert time.
 # Re-index the corpus after enabling. Uses gpt-4o-mini (one call per chunk).
-_CONTEXTUAL_ENRICHMENT = os.getenv("MY_AGENT_RAG_CONTEXTUAL_ENRICHMENT", "0").strip().lower() in {
+_CONTEXTUAL_ENRICHMENT = os.getenv("MY_AGENT_RAG_CONTEXTUAL_ENRICHMENT", "1").strip().lower() in {
     "1", "true", "yes", "on"
 }
 

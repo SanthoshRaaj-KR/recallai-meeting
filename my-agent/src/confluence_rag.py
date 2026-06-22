@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _TOP_K_DEFAULT = int(os.getenv("JARVIS_CONFLUENCE_RAG_TOP_K", "10"))
 _SCORE_THRESHOLD = float(os.getenv("JARVIS_CONFLUENCE_RAG_SCORE_THRESHOLD", "0.1"))
 # Characters kept from each chunk in the LLM context — keeps tokens tight.
-_MAX_CHUNK_CHARS = int(os.getenv("JARVIS_CONFLUENCE_RAG_MAX_CHUNK_CHARS", "800"))
+_MAX_CHUNK_CHARS = int(os.getenv("JARVIS_CONFLUENCE_RAG_MAX_CHUNK_CHARS", "1500"))
 
 # How many recent transcript lines to harvest for query enrichment.
 _TRANSCRIPT_CONTEXT_LINES = int(os.getenv("JARVIS_CONFLUENCE_RAG_CONTEXT_LINES", "12"))
