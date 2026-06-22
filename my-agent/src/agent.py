@@ -27,7 +27,7 @@ from livekit.agents import (
     stt as lk_stt,
 )
 from livekit import rtc
-from livekit.plugins import ai_coustics, assemblyai, cerebras, silero
+from livekit.plugins import ai_coustics, cartesia, cerebras, deepgram, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from typing import AsyncIterable
 
@@ -758,12 +758,12 @@ async def my_agent(ctx: JobContext):
         meeting_context = _load_meeting_context(session_id) if session_id else ""
 
         session = AgentSession(
-            stt=assemblyai.STT(
-                model="u3-rt-pro",
-                language_detection=False,
+            stt=deepgram.STT(
+                model="nova-3",
+                language="en",
             ),
-            tts=inference.TTS(
-                model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+            tts=cartesia.TTS(
+                model="sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
             ),
             turn_detection=turn_detector,
             vad=ctx.proc.userdata["vad"],
@@ -794,16 +794,15 @@ async def my_agent(ctx: JobContext):
         logger.info("Standard mode — STT linked to all participants (room: %s)", ctx.room.name)
 
     session = AgentSession(
-        # AssemblyAI Universal-3 Pro: keyterms_prompt locks "Jarvis"/"Hey Jarvis"
-        # recognition in noisy meeting audio, reducing mis-transcriptions.
-        # language_detection=False removes 30–80ms multilingual overhead.
-        stt=assemblyai.STT(
-            model="u3-rt-pro",
-            keyterms_prompt=["Jarvis", "Hey Jarvis"],
-            language_detection=False,
+        # Deepgram Nova-3: keyterm boosts "Jarvis"/"Hey Jarvis" recognition
+        # in noisy meeting audio. language="en" removes multilingual overhead.
+        stt=deepgram.STT(
+            model="nova-3",
+            language="en",
+            keyterm=["Jarvis", "Hey Jarvis"],
         ),
-        tts=inference.TTS(
-            model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+        tts=cartesia.TTS(
+            model="sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
         ),
         turn_detection=turn_detector,
         vad=ctx.proc.userdata["vad"],

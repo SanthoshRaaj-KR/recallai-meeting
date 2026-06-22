@@ -1,9 +1,8 @@
 """Markdown section chunker for the vendored Confluence pipeline.
 
 The Confluence pipeline operates on documents split into *sections* (one
-ChunkRecord per heading-delimited section). The confluence-branch chunker uses
-docling for office formats; here the inputs are Confluence pages materialized as
-markdown (and the combined corpus's .md/.txt files), so a lightweight,
+ChunkRecord per heading-delimited section). Inputs are Confluence pages
+materialized as markdown by ``reindex_live``, so a lightweight,
 dependency-free markdown splitter is enough — and it keeps each whole section
 (including tables) intact so the editor can make surgical, per-row edits.
 """
@@ -13,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from pathlib import Path
+from pathlib import Path  # used for _slug stem extraction
 
 from .models import ChunkRecord
 
@@ -112,26 +111,3 @@ def chunk_markdown_text(text: str, source_path: str, source_format: str = "md") 
     return chunks
 
 
-_SUPPORTED = {".md": "md", ".txt": "txt", ".markdown": "md"}
-
-
-def chunk_file(path: str) -> list[ChunkRecord]:
-    """Chunk a single markdown/text file into ChunkRecords."""
-    ext = Path(path).suffix.lower()
-    fmt = _SUPPORTED.get(ext)
-    if fmt is None:
-        return []
-    try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return []
-    return chunk_markdown_text(text, source_path=path, source_format=fmt)
-
-
-def chunk_folder(folder: str) -> list[ChunkRecord]:
-    """Chunk all supported (markdown/text) files in a folder."""
-    chunks: list[ChunkRecord] = []
-    for p in sorted(Path(folder).rglob("*")):
-        if p.is_file() and p.suffix.lower() in _SUPPORTED:
-            chunks.extend(chunk_file(str(p)))
-    return chunks

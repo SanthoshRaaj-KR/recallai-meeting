@@ -1,13 +1,12 @@
-"""Vendored Confluence proposal pipeline for Confluence (Pinecone-hybrid retrieval).
+"""Vendored Confluence proposal pipeline (Pinecone-hybrid retrieval).
 
 The proposal agents (intent extraction, evaluation, editing, verification,
-structural classification) are copied byte-for-byte from the confluence branch's
-``local_doc_change`` — the proven 6/1 logic. Only the retrieval layer is swapped
-to Pinecone-native hybrid (dense + sparse integrated inference + rerank), so
-nothing runs on a local vector store and the embeddings are Pinecone's own.
+structural classification) run against live Confluence pages indexed by
+``reindex_live``. Only the retrieval layer is Pinecone-native hybrid
+(dense + sparse integrated inference + rerank).
 """
 
-from .chunker import chunk_file, chunk_folder, chunk_markdown_text
+from .chunker import chunk_markdown_text
 from .models import ChunkRecord, ConfluenceIntent, ConfluenceProposal
 from .pipeline import PipelineConfig, propose
 from .retrieval import PineconeHybridIndex
@@ -19,7 +18,5 @@ __all__ = [
     "PipelineConfig",
     "PineconeHybridIndex",
     "propose",
-    "chunk_file",
-    "chunk_folder",
     "chunk_markdown_text",
 ]
