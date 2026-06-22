@@ -502,6 +502,8 @@ class ConfluenceVectorIndex:
         page_listings: list[dict[str, Any]],
         fetch_page_fn: Any,
         progress_cb: Any | None = None,
+        *,
+        force: bool = False,
     ) -> dict[str, Any]:
         """Incrementally re-index only Confluence pages that changed.
 
@@ -534,6 +536,9 @@ class ConfluenceVectorIndex:
 
         checked = changed = skipped = failed = 0
         total = len(page_listings)
+
+        if force:
+            logger.info("sync_index: force=True — treating all %d pages as stale", total)
 
         # ── Step 1: batch-fetch stored versions from Pinecone ──────────────
         # We only fetch chunk :0 per page — it carries content_hash and version
@@ -571,6 +576,9 @@ class ConfluenceVectorIndex:
         for listing in page_listings:
             pid = listing.get("page_id")
             if not pid:
+                continue
+            if force:
+                stale.append(listing)
                 continue
             live_version: int | None = listing.get("version")
             pinecone_version = stored_versions.get(pid)

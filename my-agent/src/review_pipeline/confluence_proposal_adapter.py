@@ -8,27 +8,23 @@ editing → verification) are unchanged; only retrieval is Pinecone-backed.
 
 Flow:
   transcript → confluence_pipeline.propose(retriever=PineconeHybridIndex)
-            → ConfluenceProposal[]  (source_chunk.source_path = corpus filename)
-            → map filename → Confluence page_id via corpus_page_map.json
-            → my-agent Proposal[]  (only pages with a real page_id survive)
+            → ConfluenceProposal[]  (source_chunk.source_path = Confluence page_id)
+            → my-agent Proposal[]  (only chunks with a non-empty page_id survive)
 
-Enabled via ``MY_AGENT_USE_LOCAL_DOC_PIPELINE`` (default on).
+Proposals always go through PineconeHybridIndex — no fallback path.
 """
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
 import os
 import uuid
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any
 
 from .confluence_pipeline import PineconeHybridIndex, PipelineConfig, propose
 from .confluence_pipeline.models import ConfluenceProposal
 from .models import ExtractedMeeting, Proposal
-from .pipeline import ProposalPipeline
 from .text_utils import format_transcript, normalize_ws
 
 logger = logging.getLogger(__name__)
@@ -36,34 +32,16 @@ logger = logging.getLogger(__name__)
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
 
 
-def enabled() -> bool:
-    return os.getenv("MY_AGENT_USE_LOCAL_DOC_PIPELINE", "1").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
-
-
 def _utcnow() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _default_page_map() -> str:
-    # repo_root/local_doc_change/corpus_page_map.json  (my-agent/src/review_pipeline/..)
-    return str(Path(__file__).resolve().parents[3] / "local_doc_change" / "corpus_page_map.json")
-
-
-_page_map_cache: dict[str, dict] | None = None
-
-
-def _page_map() -> dict[str, dict]:
-    global _page_map_cache
-    if _page_map_cache is None:
-        path = os.getenv("MY_AGENT_LDOC_PAGE_MAP") or _default_page_map()
-        try:
-            _page_map_cache = json.loads(Path(path).read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("could not load page map %s: %s", path, exc)
-            _page_map_cache = {}
-    return _page_map_cache
+def _confluence_page_url(page_id: str) -> str | None:
+    """Construct a Confluence page URL from env when available."""
+    domain = os.getenv("ATLASSIAN_DOMAIN", "").strip()
+    if domain and page_id:
+        return f"https://{domain}/wiki/spaces/~/pages/{page_id}"
+    return None
 
 
 def _confidence_bin(score: float) -> str:
@@ -76,20 +54,14 @@ def _confidence_bin(score: float) -> str:
 
 def _proposal_from_native(
     p: ConfluenceProposal,
-    page_map: dict[str, dict],
     session_id: str,
 ) -> dict[str, Any] | None:
     """Map a vendored ConfluenceProposal to a my-agent Proposal dict.
 
-    Returns None when the source document does not map to a Confluence page —
-    those are dropped so only real Confluence pages become review cards (this
-    also filters cross-company noise from the combined test corpus).
+    source_chunk.source_path is the Confluence page_id (set by reindex_live).
+    Returns None when the chunk has no page_id — those are dropped.
     """
-    base = os.path.basename(str(p.source_chunk.source_path))
-    meta = page_map.get(base)
-    if not meta:
-        return None
-    page_id = str(meta.get("page_id") or "")
+    page_id = str(p.source_chunk.source_path or "").strip()
     if not page_id:
         return None
 
@@ -109,7 +81,7 @@ def _proposal_from_native(
         f"{topic}: {intent.new_value}".strip(": ") or "Change proposed from the meeting transcript."
     )
     heading = normalize_ws(p.source_chunk.section_heading or "") or None
-    page_title = str(meta.get("title") or p.source_chunk.doc_title or "Confluence Page")
+    page_title = str(p.source_chunk.doc_title or topic or "Confluence Page")
 
     proposal = Proposal(
         id=str(uuid.uuid4()),
@@ -128,7 +100,7 @@ def _proposal_from_native(
         verifier_note=normalize_ws(p.verifier_note or "") or None,
         edit_mode=edit_mode,  # type: ignore[arg-type]
         change_summary=(f"Update '{heading}' on {page_title}" if heading else f"Update {topic}".strip()) or None,
-        page_url=str(meta.get("url") or "") or None,
+        page_url=_confluence_page_url(page_id),
         source="confluence-pipeline",
         confidence_score=quality,
         confidence_bin=bin_,  # type: ignore[arg-type]
@@ -142,9 +114,8 @@ async def run_confluence_pipeline(
     transcript: list[dict[str, Any]],
     memory_context: str | None = None,
     emit: EmitFn | None = None,
-    pipeline: ProposalPipeline | None = None,  # accepted for signature compat; unused
 ) -> tuple[ExtractedMeeting, list[dict[str, Any]]]:
-    """Drop-in replacement for ProposalPipeline.run that proposes via Confluence logic."""
+    """Propose Confluence changes via PineconeHybridIndex pipeline."""
     from memory_compaction import add_memory_context
 
     async def _emit(event: dict[str, Any]) -> None:
@@ -165,11 +136,10 @@ async def run_confluence_pipeline(
         transcript_text, retriever=retriever, config=cfg, emit=_stage,
     )
 
-    page_map = _page_map()
     proposals: list[dict[str, Any]] = []
     dropped = 0
     for p in ld_proposals:
-        mapped = _proposal_from_native(p, page_map, session_id)
+        mapped = _proposal_from_native(p, session_id)
         if mapped:
             proposals.append(mapped)
             await _emit({"type": "proposal_ready", **mapped})

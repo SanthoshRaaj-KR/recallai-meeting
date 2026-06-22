@@ -35,37 +35,25 @@ from pydantic import BaseModel
 
 try:
     from . import session_store
-    from .review_pipeline import ProposalPipeline, confluence_proposal_adapter
+    from .review_pipeline import ProposalPipeline
+    from .review_pipeline import confluence_proposal_adapter
 except ImportError:
     import session_store
-    from review_pipeline import ProposalPipeline, confluence_proposal_adapter
+    from review_pipeline import ProposalPipeline
+    from review_pipeline import confluence_proposal_adapter
 
 
 async def _propose(
-    pipeline: "ProposalPipeline",
     *,
     session_id: str,
     transcript: list,
     memory_context: str,
-    query: str | None = None,
     emit=None,
 ):
-    """Generate proposals via the Confluence pipeline (default) or the built-in one.
-
-    Toggle with MY_AGENT_USE_LOCAL_DOC_PIPELINE=0 to fall back to ProposalPipeline.run.
-    """
-    if confluence_proposal_adapter.enabled():
-        return await confluence_proposal_adapter.run_confluence_pipeline(
-            session_id=session_id,
-            transcript=transcript,
-            memory_context=memory_context,
-            emit=emit,
-            pipeline=pipeline,
-        )
-    return await pipeline.run(
+    """Generate Confluence change proposals via PineconeHybridIndex pipeline."""
+    return await confluence_proposal_adapter.run_confluence_pipeline(
         session_id=session_id,
         transcript=transcript,
-        query=query,
         memory_context=memory_context,
         emit=emit,
     )
@@ -248,10 +236,8 @@ async def propose_changes(session_id: str, body: ProposeBody) -> dict:
         )
     else:
         meeting, proposals = await _propose(
-            pipeline,
             session_id=session_id,
             transcript=transcript,
-            query=body.query,
             memory_context=memory_context,
         )
 
@@ -277,17 +263,14 @@ class TestTranscriptBody(BaseModel):
 async def test_propose_from_transcript(body: TestTranscriptBody) -> dict:
     """Paste a transcript → get Confluence proposal cards back directly.
 
-    Convenience test endpoint that mirrors the local_doc_change test flow: it runs
-    the Confluence proposal adapter on the given transcript (no bot/meeting/session
-    required) and returns the cards synchronously. Proposals target real Confluence
-    pages via the v2 RAG. Toggle the engine with MY_AGENT_USE_LOCAL_DOC_PIPELINE.
+    Convenience test endpoint: runs the Confluence proposal adapter on the given
+    transcript (no bot/meeting/session required) and returns the cards synchronously.
+    Proposals are always generated via PineconeHybridIndex (confluence_proposal_adapter).
     """
     text = (body.transcript or "").strip()
     if not text:
         return {"proposal_count": 0, "intents_extracted": 0, "proposals": []}
-    pipeline = _pipeline()
     meeting, proposals = await _propose(
-        pipeline,
         session_id=f"test-{uuid.uuid4().hex[:8]}",
         transcript=[{"participant": "Meeting", "text": text}],
         memory_context="",
@@ -484,7 +467,6 @@ async def _run_pipeline_job(job_id: str) -> None:
 
     try:
         meeting, proposals = await _propose(
-            pipeline,
             session_id=session_id,
             transcript=s.get("transcript") or [],
             memory_context=s.get("transcript_memory_text") or "",

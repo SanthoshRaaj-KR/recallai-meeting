@@ -1,10 +1,4 @@
-"""Data models for the vendored Confluence proposal pipeline.
-
-These are copied verbatim (semantics-preserving) from the confluence-branch
-``local_doc_change/models/`` so the proposal logic is byte-for-byte the same.
-They are consolidated into one module here so the vendored package is
-self-contained inside my-agent (no dependency on the local_doc_change tree).
-"""
+"""Data models for the Confluence proposal pipeline."""
 
 from __future__ import annotations
 
@@ -63,6 +57,8 @@ class ChunkRecord(BaseModel):
     doc_title: str = ""  # the document/page title (first heading); used to route
     context_prefix: str = ""  # contextual description prepended at embed time
     token_count: int = 0
+    version: int | None = None  # Confluence page version at index time
+    content_hash: str = ""     # SHA-256 of page content for freshness checks
 
 
 class RetrievalResult(BaseModel):

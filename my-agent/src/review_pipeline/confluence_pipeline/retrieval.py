@@ -18,16 +18,37 @@ the complete section body to make a surgical edit).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import time
 from typing import Any
 
 from .models import ChunkRecord
 
 logger = logging.getLogger(__name__)
 
-# Dense backend: "openai" embeds with OpenAI text-embedding-3-small (large quota,
-# what the original local_doc_change / local-doc-rag index use) and stores plain
+
+def _page_to_markdown(html: str, title: str) -> str:
+    """Convert Confluence storage XHTML to markdown with a guaranteed level-1 title."""
+    try:
+        from markdownify import markdownify as _md
+        markdown = _md(
+            html or "",
+            heading_style="ATX",
+            strip=["span"],
+            escape_asterisks=False,
+            escape_underscores=False,
+            escape_misc=False,
+        ).strip()
+    except ImportError:
+        markdown = html or ""
+    if not markdown.lstrip().startswith("# "):
+        markdown = f"# {title}\n\n{markdown}"
+    return markdown
+
+
+# Dense backend: "openai" embeds with OpenAI text-embedding-3-small and stores plain
 # vectors in a standard Pinecone index; "pinecone" uses integrated inference
 # (llama-text-embed-v2) which has a 5M-tokens/month free-tier cap.
 _DENSE_BACKEND = os.getenv("MY_AGENT_LDOC_DENSE_BACKEND", "openai").strip().lower()
@@ -202,16 +223,13 @@ class PineconeHybridIndex:
     def upsert_chunks(
         self,
         chunks: list[ChunkRecord],
-        page_map: dict[str, dict] | None = None,
         indexes: tuple[str, ...] = ("dense", "sparse"),
     ) -> int:
         """Upsert chunks into the named indexes (default both). Returns count."""
         if not chunks:
             return 0
-        page_map = page_map or {}
         records = []
         for c in chunks:
-            meta = page_map.get(os.path.basename(c.source_path), {})
             records.append({
                 "_id": c.chunk_id,
                 "chunk_text": _embedding_text(c)[:_EMBED_CHARS],
@@ -221,7 +239,9 @@ class PineconeHybridIndex:
                 "section_heading": c.section_heading,
                 "section_index": c.section_index,
                 "doc_title": c.doc_title,
-                "page_id": str(meta.get("page_id") or ""),
+                "page_id": c.source_path,
+                "version": c.version or 0,
+                "content_hash": c.content_hash or "",
             })
         for which in indexes:
             index = self._index(which)
@@ -330,6 +350,118 @@ class PineconeHybridIndex:
             fields["_id"] = cid
             out.append((rank, fields, score))
         return out
+
+    def sync_index(
+        self,
+        page_listings: list[dict[str, Any]],
+        fetch_page_fn: Any,
+        *,
+        force: bool = False,
+        progress_cb: Any | None = None,
+    ) -> dict[str, Any]:
+        """Incrementally sync Confluence pages into the dense + sparse indexes.
+
+        When force=True every page is treated as stale (used when an index was
+        just created or found to be missing).  Otherwise only pages whose
+        Confluence version.number has increased since the last upsert are
+        re-embedded; fresh pages are skipped entirely.
+
+        Args:
+            page_listings:  Lightweight dicts — at minimum {page_id, version}.
+            fetch_page_fn:  Callable(page_id: str) -> PageCandidate.
+            force:          Re-embed every page regardless of stored version.
+            progress_cb:    Optional callable(done, total, title) for progress.
+
+        Returns:
+            {checked, changed, skipped, failed}
+        """
+        checked = changed = skipped = failed = 0
+
+        stored_versions: dict[str, int | None] = {}
+        stored_hashes: dict[str, str] = {}
+
+        if not force:
+            # Batch-fetch stored version from chunk :0 of the dense index.
+            chunk_ids = [f"{p['page_id']}:0" for p in page_listings if p.get("page_id")]
+            dense = self._index("dense")
+            for batch_start in range(0, len(chunk_ids), 100):
+                batch = chunk_ids[batch_start: batch_start + 100]
+                try:
+                    result = dense.fetch(ids=batch, namespace=self.namespace)
+                    if isinstance(result, dict):
+                        records = result.get("vectors") or result.get("records") or {}
+                    else:
+                        records = getattr(result, "vectors", None) or getattr(result, "records", None) or {}
+                    for rec_id, rec in (records or {}).items():
+                        page_id = rec_id.rsplit(":", 1)[0]
+                        if isinstance(rec, dict):
+                            fields = rec.get("metadata") or rec.get("fields") or {}
+                        else:
+                            fields = getattr(rec, "metadata", None) or getattr(rec, "fields", None) or {}
+                        stored_versions[page_id] = int(fields.get("version") or 0) or None
+                        stored_hashes[page_id] = str(fields.get("content_hash") or "")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("sync_index: dense fetch failed for batch: %s", exc)
+                    for cid in batch:
+                        stored_versions.setdefault(cid.rsplit(":", 1)[0], None)
+
+        stale: list[dict[str, Any]] = []
+        for listing in page_listings:
+            pid = listing.get("page_id")
+            if not pid:
+                continue
+            if force:
+                stale.append(listing)
+            else:
+                live_version: int | None = listing.get("version")
+                pinecone_version = stored_versions.get(pid)
+                is_new = pid not in stored_versions
+                is_changed = (
+                    live_version is not None
+                    and pinecone_version is not None
+                    and live_version > pinecone_version
+                )
+                if is_new or is_changed:
+                    stale.append(listing)
+                else:
+                    skipped += 1
+
+        logger.info(
+            "sync_index (hybrid): %d pages total — %d stale / %d fresh",
+            len(page_listings), len(stale), skipped,
+        )
+
+        for listing in stale:
+            pid = listing["page_id"]
+            title = listing.get("title", pid)
+            try:
+                page = fetch_page_fn(pid)
+                content_hash = hashlib.sha256(
+                    f"{pid}\n{getattr(page, 'title', '')}\n{getattr(page, 'html', '')}".encode()
+                ).hexdigest()
+                markdown = _page_to_markdown(
+                    getattr(page, "html", "") or "",
+                    getattr(page, "title", "") or str(pid),
+                )
+                from .chunker import chunk_markdown_text
+                chunks = chunk_markdown_text(markdown, source_path=pid, source_format="confluence")
+                for chunk in chunks:
+                    chunk.version = getattr(page, "version", None)
+                    chunk.content_hash = content_hash
+                self.upsert_chunks(chunks)
+                changed += 1
+                logger.debug("sync_index (hybrid): re-indexed %r (page_id=%s)", title, pid)
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                logger.warning("sync_index (hybrid): failed to re-index %r: %s", title, exc)
+            checked += 1
+            if progress_cb:
+                try:
+                    progress_cb(checked, len(stale), title)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        return {"checked": checked, "changed": changed, "skipped": skipped, "failed": failed}
 
     def _to_chunk(self, fields: dict) -> ChunkRecord | None:
         cid = str(fields.get("_id") or "")
