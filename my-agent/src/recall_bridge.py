@@ -296,9 +296,13 @@ async def test_propose_from_transcript(body: TestTranscriptBody) -> dict:
 @app.get("/sessions/{session_id}/review/summary")
 async def get_summary(session_id: str) -> dict:
     s = _require_session(session_id)
-    if s.get("summary"):
-        return s["summary"]
     transcript = s.get("transcript") or []
+    cached = s.get("summary")
+    # Don't serve a cached summary that has empty decisions when there is transcript
+    # content — it means a prior LLM call failed silently; retry so the UI doesn't
+    # stay stuck on "Extracting decisions…" forever.
+    if cached and (cached.get("decisions") or not transcript):
+        return cached
     if transcript:
         try:
             summary = await _pipeline().generate_meeting_summary(session_id, transcript)
