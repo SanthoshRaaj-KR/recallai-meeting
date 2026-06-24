@@ -45,6 +45,8 @@ try:
     from . import action_items_extractor
     from .review_pipeline.rag import ConfluenceVectorIndex
     from .review_pipeline.confluence import RestConfluenceClient
+    from .review_pipeline.confluence_pipeline.retrieval import PineconeHybridIndex
+    from .review_pipeline.confluence_pipeline.chunker import chunk_markdown_text
 except ImportError:
     from memory_compaction import TranscriptCompactor
     import session_store
@@ -52,6 +54,29 @@ except ImportError:
     import action_items_extractor
     from review_pipeline.rag import ConfluenceVectorIndex
     from review_pipeline.confluence import RestConfluenceClient
+    from review_pipeline.confluence_pipeline.retrieval import PineconeHybridIndex
+    from review_pipeline.confluence_pipeline.chunker import chunk_markdown_text
+
+try:
+    from markdownify import markdownify as _md
+
+    def _storage_to_markdown(html: str, title: str) -> str:
+        """Convert Confluence storage XHTML to plain markdown with a level-1 title."""
+        md = _md(
+            html or "",
+            heading_style="ATX",
+            strip=["span"],
+            escape_asterisks=False,
+            escape_underscores=False,
+            escape_misc=False,
+        ).strip()
+        if not md.lstrip().startswith("# "):
+            md = f"# {title}\n\n{md}"
+        return md
+
+except ImportError:
+    def _storage_to_markdown(html: str, title: str) -> str:  # type: ignore[misc]
+        return f"# {title}\n\n{html}"
 
 
 def _bg_extract_action_items(s: dict) -> None:
@@ -125,6 +150,7 @@ _sync_jobs: dict[str, dict] = {}
 
 # Singleton RAG index — lazy init on first sync call.
 _rag_index: ConfluenceVectorIndex | None = None
+_hybrid_index: PineconeHybridIndex | None = None
 _confluence_client: RestConfluenceClient | None = None
 
 
@@ -133,6 +159,13 @@ def _get_rag_index() -> ConfluenceVectorIndex:
     if _rag_index is None:
         _rag_index = ConfluenceVectorIndex()
     return _rag_index
+
+
+def _get_hybrid_index() -> PineconeHybridIndex:
+    global _hybrid_index
+    if _hybrid_index is None:
+        _hybrid_index = PineconeHybridIndex()
+    return _hybrid_index
 
 
 def _get_confluence_client() -> RestConfluenceClient:
@@ -620,29 +653,109 @@ async def list_history() -> list:
 
 # ── Endpoints: RAG incremental sync ────────────────────────────────────────────
 
+def _all_indexes_exist(rag: ConfluenceVectorIndex, hybrid: PineconeHybridIndex) -> bool:
+    """Return True only when all three Pinecone indexes are present."""
+    try:
+        from pinecone import Pinecone
+        pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY", "").strip())
+        existing = {it["name"] if isinstance(it, dict) else it.name for it in pc.list_indexes()}
+        return (
+            rag.index_name in existing
+            and hybrid.dense_index in existing
+            and hybrid.sparse_index in existing
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Index existence check failed — assuming all exist: %s", exc)
+        return True  # avoid accidental full reindex on transient errors
+
+
 async def _run_rag_sync(job_id: str) -> None:
-    """Background task: list Confluence pages, diff vs Pinecone, re-embed stale ones."""
+    """Sync all three Pinecone indexes from live Confluence pages.
+
+    Indexes synced:
+      1. ConfluenceVectorIndex  (confluence-review-rag-v2)  — in-meeting live RAG
+      2. PineconeHybridIndex dense  (confluence-corpus-dense)  — proposal pipeline
+      3. PineconeHybridIndex sparse (confluence-corpus-sparse) — proposal pipeline
+
+    Version tracking is applied independently to each group. Pages are fetched
+    from Confluence at most once per run — a cache dict is shared between both
+    sync passes so the hybrid index reuses pages already pulled for the live-RAG
+    sync rather than making a second round of Confluence API calls.
+
+    If any of the three indexes is missing it is created automatically and every
+    page is force-reindexed into all indexes so they stay in sync.
+    """
     job = _sync_jobs[job_id]
     try:
         confluence = _get_confluence_client()
         rag = _get_rag_index()
+        hybrid = _get_hybrid_index()
 
-        # Step 1: list all pages (version numbers only, no body fetch).
+        # ── Check index existence — if any index is missing force a full reindex ──
+        force_full = not await asyncio.to_thread(_all_indexes_exist, rag, hybrid)
+        if force_full:
+            logger.info("RAG sync %s: one or more indexes missing — creating indexes upfront", job_id)
+            job["current_page"] = "Creating missing indexes…"
+            # Eagerly create all 3 indexes before the upsert loop so failures are
+            # surfaced now rather than silently accumulating per-page failures.
+            try:
+                await asyncio.to_thread(rag._index)
+                logger.info("RAG sync %s: live RAG index ready (%s)", job_id, rag.index_name)
+            except Exception as exc:
+                logger.error("RAG sync %s: could not create live RAG index %r: %s", job_id, rag.index_name, exc)
+            try:
+                await asyncio.to_thread(lambda: hybrid._index("dense"))
+                logger.info("RAG sync %s: dense index ready (%s)", job_id, hybrid.dense_index)
+            except Exception as exc:
+                logger.error("RAG sync %s: could not create dense index %r: %s", job_id, hybrid.dense_index, exc)
+            try:
+                await asyncio.to_thread(lambda: hybrid._index("sparse"))
+                logger.info("RAG sync %s: sparse index ready (%s)", job_id, hybrid.sparse_index)
+            except Exception as exc:
+                logger.warning("RAG sync %s: sparse index unavailable (%s) — dense-only mode", job_id, exc)
+
+        # ── List all pages (lightweight — version numbers only) ───────────────────
         listings = await asyncio.to_thread(confluence.list_pages, 500)
         job["total"] = len(listings)
-        job["current_page"] = "Checking index…"
+        job["current_page"] = "Checking indexes…"
 
-        def progress_cb(done: int, total: int, title: str) -> None:
+        # Shared page cache so both passes never double-fetch the same page.
+        _fetched_pages: dict[str, object] = {}
+
+        def _capturing_fetch(page_id: str):
+            page = confluence.fetch_page(page_id)
+            _fetched_pages[page_id] = page
+            return page
+
+        def _cached_fetch(page_id: str):
+            if page_id in _fetched_pages:
+                return _fetched_pages[page_id]
+            return _capturing_fetch(page_id)
+
+        def _rag_progress(done: int, total: int, title: str) -> None:
             job["checked"] = done
             job["total_stale"] = total
             job["current_page"] = title
 
-        # Step 2+3: batch version check + selective re-embed (blocking, run in thread).
+        # ── Pass 1: sync ConfluenceVectorIndex (in-meeting RAG) ───────────────────
         result = await asyncio.to_thread(
             rag.sync_index,
             listings,
-            confluence.fetch_page,
-            progress_cb,
+            _capturing_fetch,
+            _rag_progress,
+            force=force_full,
+        )
+
+        # ── Pass 2: sync PineconeHybridIndex (proposal pipeline) ─────────────────
+        # hybrid.sync_index does its own version check and re-embeds only stale
+        # pages. It reuses _cached_fetch so pages already pulled above aren't
+        # re-requested from Confluence.
+        job["current_page"] = "Syncing proposal indexes…"
+        hybrid_result = await asyncio.to_thread(
+            hybrid.sync_index,
+            listings,
+            _cached_fetch,
+            force=force_full,
         )
 
         job.update({
@@ -652,12 +765,14 @@ async def _run_rag_sync(job_id: str) -> None:
             "skipped": result["skipped"],
             "failed": result["failed"],
             "deleted": result.get("deleted", 0),
+            "hybrid_changed": hybrid_result["changed"],
+            "hybrid_failed": hybrid_result["failed"],
             "current_page": "",
             "finished_at": _utcnow(),
         })
         logger.info(
-            "RAG sync %s complete: changed=%d skipped=%d failed=%d",
-            job_id, result["changed"], result["skipped"], result["failed"],
+            "RAG sync %s complete: rag_changed=%d hybrid_changed=%d skipped=%d failed=%d",
+            job_id, result["changed"], hybrid_result["changed"], result["skipped"], result["failed"],
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("RAG sync %s failed: %s", job_id, exc)

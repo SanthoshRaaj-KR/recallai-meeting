@@ -34,11 +34,29 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 try:
-    from .review_pipeline import ProposalPipeline
     from . import session_store
+    from .review_pipeline import ProposalPipeline
+    from .review_pipeline import confluence_proposal_adapter
 except ImportError:
-    from review_pipeline import ProposalPipeline
     import session_store
+    from review_pipeline import ProposalPipeline
+    from review_pipeline import confluence_proposal_adapter
+
+
+async def _propose(
+    *,
+    session_id: str,
+    transcript: list,
+    memory_context: str,
+    emit=None,
+):
+    """Generate Confluence change proposals via PineconeHybridIndex pipeline."""
+    return await confluence_proposal_adapter.run_confluence_pipeline(
+        session_id=session_id,
+        transcript=transcript,
+        memory_context=memory_context,
+        emit=emit,
+    )
 
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
@@ -225,10 +243,9 @@ async def propose_changes(session_id: str, body: ProposeBody) -> dict:
             memory_context=memory_context,
         )
     else:
-        meeting, proposals = await pipeline.run(
+        meeting, proposals = await _propose(
             session_id=session_id,
             transcript=transcript,
-            query=body.query,
             memory_context=memory_context,
         )
 
@@ -244,14 +261,48 @@ async def propose_changes(session_id: str, body: ProposeBody) -> dict:
     return {"changes": changes, "generated_count": len(new_proposals)}
 
 
+# ── Endpoint: paste-a-transcript test (no meeting/session needed) ──────────────
+
+class TestTranscriptBody(BaseModel):
+    transcript: str
+
+
+@app.post("/review/test/propose")
+async def test_propose_from_transcript(body: TestTranscriptBody) -> dict:
+    """Paste a transcript → get Confluence proposal cards back directly.
+
+    Convenience test endpoint: runs the Confluence proposal adapter on the given
+    transcript (no bot/meeting/session required) and returns the cards synchronously.
+    Proposals are always generated via PineconeHybridIndex (confluence_proposal_adapter).
+    """
+    text = (body.transcript or "").strip()
+    if not text:
+        return {"proposal_count": 0, "intents_extracted": 0, "proposals": []}
+    meeting, proposals = await _propose(
+        session_id=f"test-{uuid.uuid4().hex[:8]}",
+        transcript=[{"participant": "Meeting", "text": text}],
+        memory_context="",
+    )
+    return {
+        "meeting_title": meeting.title,
+        "intents_extracted": len(meeting.change_intents),
+        "proposal_count": len(proposals),
+        "proposals": proposals,
+    }
+
+
 # ── Endpoints: review — summary ────────────────────────────────────────────────
 
 @app.get("/sessions/{session_id}/review/summary")
 async def get_summary(session_id: str) -> dict:
     s = _require_session(session_id)
-    if s.get("summary"):
-        return s["summary"]
     transcript = s.get("transcript") or []
+    cached = s.get("summary")
+    # Don't serve a cached summary that has empty decisions when there is transcript
+    # content — it means a prior LLM call failed silently; retry so the UI doesn't
+    # stay stuck on "Extracting decisions…" forever.
+    if cached and (cached.get("decisions") or not transcript):
+        return cached
     if transcript:
         try:
             summary = await _pipeline().generate_meeting_summary(session_id, transcript)
@@ -427,7 +478,7 @@ async def _run_pipeline_job(job_id: str) -> None:
         _record_pipeline_event(job_id, event)
 
     try:
-        meeting, proposals = await pipeline.run(
+        meeting, proposals = await _propose(
             session_id=session_id,
             transcript=s.get("transcript") or [],
             memory_context=s.get("transcript_memory_text") or "",

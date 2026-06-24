@@ -1,0 +1,132 @@
+{
+  "smarthub_ai_company_overview.md": {
+    "page_id": "48660482",
+    "title": "SmartHub.ai — Company Overview",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48660482"
+  },
+  "smarthub_infer_platform_product_overview.md": {
+    "page_id": "48988161",
+    "title": "INFER™ Platform — Product Overview",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48988161"
+  },
+  "smarthub_sd_edge_software_defined_edge.md": {
+    "page_id": "49020929",
+    "title": "SD-EDGE — Software Defined Edge Solution",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49020929"
+  },
+  "smarthub_customer_success_stories.md": {
+    "page_id": "49020945",
+    "title": "Customer Success Stories",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49020945"
+  },
+  "smarthub_security_compliance_framework.md": {
+    "page_id": "49053697",
+    "title": "Security & Compliance Framework",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49053697"
+  },
+  "smarthub_devops_cicd_pipeline.md": {
+    "page_id": "49053713",
+    "title": "DevOps & CI/CD Pipeline",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49053713"
+  },
+  "smarthub_engineering_system_architecture.md": {
+    "page_id": "49086465",
+    "title": "Engineering — System Architecture",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49086465"
+  },
+  "smarthub_api_reference_guide_infer_v2.md": {
+    "page_id": "49119233",
+    "title": "API Reference Guide — INFER REST API v2",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49119233"
+  },
+  "smarthub_device_onboarding_guide.md": {
+    "page_id": "49152001",
+    "title": "Device Onboarding Guide",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49152001"
+  },
+  "smarthub_release_notes_infer_v2_5.md": {
+    "page_id": "49184769",
+    "title": "Release Notes — INFER™ v2.5",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49184769"
+  },
+  "smarthub_troubleshooting_guide.md": {
+    "page_id": "49184785",
+    "title": "Troubleshooting Guide — Common Issues",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49184785"
+  },
+  "smarthub_pricing_and_plans.md": {
+    "page_id": "49217537",
+    "title": "Pricing & Plans",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49217537"
+  },
+  "smarthub_sla_support_policy.md": {
+    "page_id": "49250305",
+    "title": "SLA & Support Policy",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49250305"
+  },
+  "smarthub_telemetry_schema_event_catalog.md": {
+    "page_id": "49250326",
+    "title": "Telemetry Schema & Event Catalog",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49250326"
+  },
+  "smarthub_ota_firmware_update_pipeline.md": {
+    "page_id": "49283073",
+    "title": "OTA Firmware Update Pipeline — Technical Spec",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49283073"
+  },
+  "smarthub_postgresql_database_schema.md": {
+    "page_id": "49315841",
+    "title": "PostgreSQL Database Schema — Core Tables",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49315841"
+  },
+  "smarthub_siem_integration_architecture.md": {
+    "page_id": "49348609",
+    "title": "SIEM Integration Architecture",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49348609"
+  },
+  "smarthub_gen_ai_natural_language_query.md": {
+    "page_id": "49381377",
+    "title": "Gen-AI Natural Language Query — Technical Design",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/49381377"
+  },
+  "smarthub_engineering_runbooks_production.md": {
+    "page_id": "48463881",
+    "title": "Engineering Runbooks — Production Operations",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48463881"
+  },
+  "smarthub_encryption_key_management.md": {
+    "page_id": "48594947",
+    "title": "Encryption & Key Management",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48594947"
+  },
+  "smarthub_deployment_installation_guide_sd_edge.md": {
+    "page_id": "48758786",
+    "title": "Deployment & Installation Guide — SD-EDGE Gateway",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48758786"
+  },
+  "smarthub_authentication_authorization_deep_dive.md": {
+    "page_id": "48758803",
+    "title": "Authentication & Authorization — Technical Deep Dive",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48758803"
+  },
+  "smarthub_ml_anomaly_detection_model_architecture.md": {
+    "page_id": "48824323",
+    "title": "ML Anomaly Detection — Model Architecture",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48824323"
+  },
+  "smarthub_performance_benchmarks_scalability.md": {
+    "page_id": "48824340",
+    "title": "Performance Benchmarks & Scalability",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48824340"
+  },
+  "smarthub_graph_database_schema_neo4j.md": {
+    "page_id": "48889858",
+    "title": "Graph Database Schema — Neo4j Device Graph",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48889858"
+  },
+  "smarthub_kafka_stream_processing_architecture.md": {
+    "page_id": "48332810",
+    "title": "Kafka & Stream Processing Architecture",
+    "url": "https://akshathr333.atlassian.net/wiki/spaces/~/pages/48332810"
+  }
+}

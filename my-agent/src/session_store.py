@@ -77,16 +77,21 @@ def _db_conn() -> sqlite3.Connection:
 
 
 def _ensure_table() -> None:
-    with _db_lock:
-        with _db_conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id TEXT PRIMARY KEY,
-                    data       TEXT NOT NULL,
-                    updated_at TEXT
-                )
-            """)
-            conn.commit()
+    if _use_supabase():
+        return  # Supabase is the store; no local SQLite needed
+    try:
+        with _db_lock:
+            with _db_conn() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        session_id TEXT PRIMARY KEY,
+                        data       TEXT NOT NULL,
+                        updated_at TEXT
+                    )
+                """)
+                conn.commit()
+    except Exception as exc:
+        logger.warning("SQLite setup failed (will rely on Supabase): %s", exc)
 
 
 _ensure_table()

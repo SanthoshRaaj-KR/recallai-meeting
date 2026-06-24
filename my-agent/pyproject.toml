@@ -9,7 +9,7 @@ description = "Simple voice AI assistant built with LiveKit Agents for Python"
 requires-python = ">=3.10, <3.15"
 
 dependencies = [
-    "livekit-agents[assemblyai,cerebras,silero,turn-detector,mcp]~=1.5",
+    "livekit-agents[assemblyai,cerebras,deepgram,mcp,silero,turn-detector]~=1.5",
     "python-dotenv",
     # Recall.ai bridge dependencies
     "fastapi>=0.111",
@@ -17,6 +17,7 @@ dependencies = [
     "requests>=2.31",
     "livekit-api>=0.7",
     "openai>=1.0",
+    "openai-agents>=0.1",  # vendored local-doc proposal agents (intent/eval/editor/verifier)
     "mcp>=1.0",
     "pinecone>=5.0",
     "edge-tts>=7.2.8",

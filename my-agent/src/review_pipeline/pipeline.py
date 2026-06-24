@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import html
 import json
@@ -35,6 +36,15 @@ from .text_utils import (
 
 logger = logging.getLogger(__name__)
 
+# Action items that imply documentation updates (used to filter noise in _intents_from_action_items).
+_DOC_ACTION_RE = re.compile(
+    r"\b(update|edit|revise|add to|document[s]?|confluence|wiki|"
+    r"page[s]?|doc[s]?|documentation|section[s]?|notes?|memo[s]?|report[s]?|"
+    r"capture|reflect|log|track in|write up|jot down|publish|"
+    r"create a page|new page|new section|release notes?|readme)\b",
+    re.IGNORECASE,
+)
+
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
 
 
@@ -67,6 +77,35 @@ class _MOMEntry(BaseModel):
 
 class _MOMResponse(BaseModel):
     mom: list[_MOMEntry] = []
+
+
+def _fuzzy_anchor_match(before: str, section_text: str, *, threshold: float = 0.85) -> str | None:
+    """Return the line in section_text most similar to before (Jaccard ≥ threshold).
+
+    Used when a before_content anchor is not found verbatim — Confluence may have
+    auto-reformatted the section since it was indexed. Returns None if no line
+    reaches the threshold so the proposal is still dropped if match is too weak.
+    """
+    before_tokens = set(normalize_for_match(before).split())
+    if not before_tokens:
+        return None
+    best_score = 0.0
+    best_line: str | None = None
+    for line in section_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        line_tokens = set(normalize_for_match(line).split())
+        if not line_tokens:
+            continue
+        union = len(before_tokens | line_tokens)
+        if union == 0:
+            continue
+        score = len(before_tokens & line_tokens) / union
+        if score > best_score:
+            best_score = score
+            best_line = line
+    return best_line if best_score >= threshold else None
 
 
 def _human_only(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -220,7 +259,7 @@ class ProposalPipeline:
     _CEREBRAS_MODEL = "gpt-oss-120b"
 
     def __init__(self) -> None:
-        self.model = os.getenv("MY_AGENT_REVIEW_MODEL", os.getenv("JARVIS_REVIEW_MODEL", "gpt-4o-mini")).strip()
+        self.model = os.getenv("MY_AGENT_REVIEW_MODEL", os.getenv("JARVIS_REVIEW_MODEL", "gpt-5-mini")).strip()
         self.max_candidate_pages = int(os.getenv("MY_AGENT_PIPELINE_MAX_PAGES", "16"))
         self.max_search_terms = int(os.getenv("MY_AGENT_PIPELINE_MAX_SEARCH_TERMS", "24"))
         self.rag_top_k = int(os.getenv("MY_AGENT_PIPELINE_RAG_TOP_K", "8"))
@@ -255,11 +294,23 @@ class ProposalPipeline:
             return meeting, []
 
         # Stage 1: Extract meeting topics and loose intents (no forced old_value).
-        await _emit({"type": "stage_start", "stage": "fact_extraction"})
-        meeting = await self._extract_meeting(transcript, transcript_text, query=query)
+        # Resume from checkpoint if this session already completed Stage 1.
+        _cached = self._load_pipeline_checkpoint(session_id, "meeting")
+        if _cached:
+            try:
+                intents = [ChangeIntent(**i) for i in _cached.get("change_intents") or []]
+                meeting = ExtractedMeeting(**{**_cached, "change_intents": intents})
+                logger.info("Resumed pipeline from Stage 1 checkpoint for session %s", session_id)
+            except Exception:
+                _cached = None
+        if not _cached:
+            await _emit({"type": "stage_start", "stage": "fact_extraction"})
+            meeting = await self._extract_meeting(transcript, transcript_text, query=query)
         fallback = self._intents_from_action_items(meeting)
         if fallback:
             meeting.change_intents = self._merge_intents(meeting.change_intents, fallback)[:30]
+        if not _cached:
+            self._save_pipeline_checkpoint(session_id, "meeting", dataclasses.asdict(meeting))
 
         if not meeting.change_intents:
             return meeting, []
@@ -565,7 +616,10 @@ class ProposalPipeline:
         query: str | None = None,
     ) -> ExtractedMeeting:
         try:
-            data = await asyncio.to_thread(self._extract_meeting_sync, transcript_text, query or "")
+            # Strip Jarvis's own spoken replies before intent extraction. Jarvis answers
+            # embed RAG-retrieved Confluence content which can be misread as meeting evidence.
+            human_text = format_transcript(_human_only(transcript))
+            data = await asyncio.to_thread(self._extract_meeting_sync, human_text, query or "")
             return self._meeting_from_json(data, transcript)
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM meeting extraction failed; using heuristic fallback: %s", exc)
@@ -602,6 +656,10 @@ class ProposalPipeline:
             )
             if already_covered:
                 continue
+            # Only escalate action items that explicitly reference documentation or a named page.
+            # Generic tasks (schedule, send, review PR, etc.) have no Confluence target.
+            if not _DOC_ACTION_RE.search(desc):
+                continue
             rationale = f"Action item from meeting: {desc}"
             if owner:
                 rationale += f" (owner: {owner})"
@@ -623,21 +681,33 @@ class ProposalPipeline:
     def _extract_meeting_sync(self, transcript_text: str, query: str) -> dict[str, Any]:
         client = self._get_openai()
         prompt = (
-            "You extract structured facts from meeting transcripts that need to be reflected in "
-            "Confluence documentation. Identify every concrete fact, decision, metric, status update, "
-            "ownership change, date change, completed/reopened task, or agreed action that could be "
-            "documented somewhere in Confluence.\n\n"
+            "You identify Confluence documentation changes that are DIRECTLY REQUIRED by this meeting. "
+            "Only emit a change_intent when the transcript contains EXPLICIT evidence that a specific "
+            "piece of Confluence content is now stale, wrong, or newly required.\n\n"
+            "INCLUDE only when:\n"
+            "- A concrete value changed (metric, date, status, owner, version number) and the old "
+            "value is clearly different from the new value discussed.\n"
+            "- A decision was made that contradicts or supersedes existing documented content.\n"
+            "- A task/action item was completed or reopened where a Confluence task checkbox tracks it.\n"
+            "- A speaker explicitly says a page, section, or doc needs updating.\n\n"
+            "EXCLUDE — do NOT emit intents for:\n"
+            "- General discussion, opinions, or exploratory ideas not yet decided.\n"
+            "- Action items with no direct Confluence page (e.g. 'schedule a meeting', 'send an email', "
+            "'review a PR') unless a specific Confluence page was explicitly named.\n"
+            "- Facts already known to be correct in Confluence.\n"
+            "- Social niceties, recaps, or process meta-comments.\n\n"
             "Return JSON only. Rules:\n"
-            "- Capture the FINAL agreed state of each fact, not intermediate suggestions.\n"
+            "- Capture the FINAL agreed state, not intermediate suggestions.\n"
             "- One change_intent per distinct fact or update.\n"
             "- subject: the specific thing being changed (metric name, project, task, date, person).\n"
-            "- target_hint: the most likely Confluence page or section name where this lives.\n"
-            "- new_value: the new fact/value if clearly stated in the meeting — leave empty if not explicit.\n"
-            "- action: replace (updating existing content), add (new content to record), "
+            "- target_hint: the EXACT Confluence page or section name mentioned in the transcript; "
+            "if none mentioned, your most specific guess — NEVER use the action item description as the target.\n"
+            "- new_value: the new fact/value clearly stated — leave empty if not explicit.\n"
+            "- action: replace (updating existing content), add (new content with no existing counterpart), "
             "complete_task (task was finished), reopen_task (task was re-opened).\n"
             "- evidence: exact transcript lines that support this fact (up to 3).\n"
             "- Leave old_value empty — the pipeline finds the current value from the live page.\n"
-            "- Do NOT invent facts. Skip social niceties, vague filler, and process meta-comments.\n\n"
+            "- Be conservative — fewer, higher-confidence intents are better than many weak ones.\n\n"
             "JSON shape:\n"
             "{"
             '"title": string, "summary": string, "key_topics": string[], "decisions": string[], '
@@ -866,7 +936,11 @@ class ProposalPipeline:
         )
 
     def _queries_for_intent_v2(self, intent: ChangeIntent) -> list[str]:
-        """Up to 4 diverse query variants for multi-query retrieval."""
+        """Up to 5 diverse query variants for multi-query retrieval.
+
+        Priority order: explicit page title > target hint > subject+context > instruction > new value.
+        The explicit page title and target hint carry the strongest signal for finding the right page.
+        """
         queries: list[str] = []
         seen: set[str] = set()
 
@@ -876,11 +950,18 @@ class ProposalPipeline:
                 seen.add(q.lower())
                 queries.append(q)
 
-        _add(" ".join(p for p in [intent.subject, intent.target_hint] if normalize_ws(p)))
-        _add(intent.instruction)
-        _add(" ".join(p for p in [intent.new_value, intent.subject] if normalize_ws(p)))
+        # Strongest signal: explicit page title or target hint (often the actual page name)
+        if intent.page_title:
+            _add(intent.page_title)
         _add(intent.target_hint)
-        return queries[:4]
+        # Subject in the context of its target — helps section-level matching
+        _add(" ".join(p for p in [intent.subject, intent.target_hint] if normalize_ws(p)))
+        # Full instruction for semantic coverage
+        _add(intent.instruction)
+        # New value + subject: ensures exact-term BM25 hits for numbers, names, dates
+        if intent.new_value:
+            _add(" ".join(p for p in [intent.new_value, intent.subject] if normalize_ws(p)))
+        return queries[:5]
 
     # ── Section fetch ─────────────────────────────────────────────────────────
 
@@ -947,10 +1028,17 @@ class ProposalPipeline:
         import concurrent.futures
 
         now = _utcnow()
+        _MIN_RERANK_SCORE = 0.55
         work_items: list[tuple[ChangeIntent, VectorSearchHit, str]] = []
         for intent, hits in intent_sections:
             for hit in hits:
                 if not hit.page_id:
+                    continue
+                if hit.score < _MIN_RERANK_SCORE:
+                    logger.debug(
+                        "Skipping hit %r / %r — rerank score %.3f below threshold %.1f",
+                        hit.title, hit.heading, hit.score, _MIN_RERANK_SCORE,
+                    )
                     continue
                 section_text = section_cache.get((hit.page_id, hit.heading)) or hit.text or ""
                 if section_text:
@@ -1001,16 +1089,18 @@ class ProposalPipeline:
             )
 
         prompt = (
-            "You are a precise Confluence section editor. Given meeting evidence and a live page "
-            "section, produce the smallest correct inline edit.\n\n"
+            "You are a surgical Confluence editor. Produce the smallest possible text replacement.\n\n"
             "Rules:\n"
-            "- before_content: the EXACT text substring to replace, copied verbatim from the section. "
-            "Null if appending new information.\n"
-            "- after_content: replacement text (replace) or new content to add (append). "
-            "Use only facts from the evidence. Do not invent.\n"
-            "- edit_mode: 'replace' when replacing specific existing text, 'append' when adding new info.\n"
-            "- Return edit_mode 'null' if the evidence does not clearly warrant a change here.\n"
-            "- Never rewrite the entire section — only touch the affected fragment."
+            "- before_content: the SHORTEST verbatim substring from the section that contains the "
+            "outdated value. If only a single token changed (a number, a name, a date), "
+            "before_content is just that token — never the whole sentence.\n"
+            "- after_content: the same substring with ONLY the changed value swapped in. "
+            "Do NOT copy transcript phrasing into after_content. Do NOT rewrite the sentence. "
+            "Only replace what actually changed.\n"
+            "- edit_mode: 'replace' when substituting existing text, 'append' only when adding "
+            "genuinely new information that has no existing counterpart in the section.\n"
+            "- Return edit_mode 'null' if the evidence does not clearly justify a change here.\n"
+            "- NEVER rewrite a full sentence when only a single token (number, name, date) changed."
             + task_extra
             + "\n\nReturn JSON only: "
             "{\"edit_mode\": \"replace|append|null\", "
@@ -1036,9 +1126,9 @@ class ProposalPipeline:
         }
         opts: dict[str, Any] = {"model": self.model, "response_format": {"type": "json_object"}}
         if self.model.startswith(("gpt-5", "o1", "o3", "o4")):
-            opts["max_completion_tokens"] = 900
+            opts["max_completion_tokens"] = 3000
         else:
-            opts["max_tokens"] = 900
+            opts["max_tokens"] = 3000
             opts["temperature"] = 0.1
         response = client.chat.completions.create(
             **opts,
@@ -1059,11 +1149,17 @@ class ProposalPipeline:
         if not after or self._looks_like_instruction_text(after):
             return None
 
-        # Verify the replace anchor actually exists in the section.
+        # Verify the replace anchor exists in the section. If not found verbatim,
+        # try a fuzzy line match (Jaccard ≥ 0.85) before dropping — Confluence may
+        # have auto-reformatted the section since indexing.
+        _fuzzy_anchor_used = False
         if edit_mode == "replace" and before:
             if normalize_for_match(before) not in normalize_for_match(section_text):
-                edit_mode = "append"
-                before = None
+                fuzzy = _fuzzy_anchor_match(before, section_text)
+                if fuzzy is None:
+                    return None
+                before = fuzzy
+                _fuzzy_anchor_used = True
 
         section_heading = normalize_ws(str(data.get("section_heading") or hit.heading)) or hit.heading
         rationale = normalize_ws(str(data.get("rationale") or intent.rationale or intent.instruction))
@@ -1079,7 +1175,14 @@ class ProposalPipeline:
             else "low"
         )
         risk: Literal["safe", "review", "risky"] = "safe" if confidence == "high" else "review"
+        if _fuzzy_anchor_used:
+            risk = "risky"
+            confidence = "low" if confidence == "high" else confidence
         conf_score = {"high": 0.9, "medium": 0.72, "low": 0.45}[confidence]
+
+        verifier_note = self._verifier_note_grounded(edit_mode, before, hit.score)
+        if _fuzzy_anchor_used:
+            verifier_note = "[FUZZY ANCHOR] before_content matched approximately — confirm exact text before accepting. " + verifier_note
 
         edit_mode_typed: EditMode = "task_status" if action in {"complete_task", "reopen_task"} else edit_mode  # type: ignore[assignment]
 
@@ -1100,7 +1203,7 @@ class ProposalPipeline:
             transcript_evidence=intent.evidence[:3],
             confidence=confidence,
             risk=risk,
-            verifier_note=self._verifier_note_grounded(edit_mode, before, hit.score),
+            verifier_note=verifier_note,
             edit_mode=edit_mode_typed,
             change_summary=self._change_summary(intent, hit.title, "edit", before, after),
             page_url=page_url,
@@ -1160,7 +1263,7 @@ class ProposalPipeline:
                         str(proposal.get("section_heading") or ""),
                     ]))
                 )
-                if _jaccard(intent_tokens, proposal_tokens) >= 0.15:
+                if _jaccard(intent_tokens, proposal_tokens) >= 0.35:
                     covered.add(idx)
                     break
 
@@ -1351,9 +1454,9 @@ class ProposalPipeline:
         }
         opts: dict[str, Any] = {"model": self.model, "response_format": {"type": "json_object"}}
         if self.model.startswith(("gpt-5", "o1", "o3", "o4")):
-            opts["max_completion_tokens"] = 1800
+            opts["max_completion_tokens"] = 6000
         else:
-            opts["max_tokens"] = 1800
+            opts["max_tokens"] = 6000
             opts["temperature"] = 0.0
         response = client.chat.completions.create(
             **opts,
@@ -1417,17 +1520,24 @@ class ProposalPipeline:
                 existing = proposal.get("verifier_note") or ""
                 proposal["verifier_note"] = " ".join([existing, *warnings]).strip()
 
-            if not supported or page_fit == "wrong":
+            confidence_after = str(proposal.get("confidence") or "medium").lower()
+            should_reject = (
+                not supported
+                or page_fit == "wrong"
+                or (page_fit == "uncertain" and confidence_after == "low")
+            )
+            if should_reject:
                 rejected_ids.add(str(proposal.get("id")))
+                if not supported:
+                    reject_reason = "Verifier rejected proposal as unsupported."
+                elif page_fit == "wrong":
+                    reject_reason = "Verifier rejected proposal because it targets the wrong page."
+                else:
+                    reject_reason = "Verifier rejected uncertain proposal with low confidence."
                 self._add_diagnostic(
                     None,
                     "verifier_rejected_proposal",
-                    note
-                    or (
-                        "Verifier rejected proposal as unsupported."
-                        if not supported
-                        else "Verifier rejected proposal because it targets the wrong page."
-                    ),
+                    note or reject_reason,
                     severity="risky",
                     page_title=str(proposal.get("page_title") or "") or None,
                 )
@@ -1627,7 +1737,7 @@ class ProposalPipeline:
             },
             {"role": "user", "content": transcript_text},
         ]
-        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _SUMMARY_SCHEMA, 800, "Summary")
+        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _SUMMARY_SCHEMA, 2000, "Summary")
         try:
             return _SummaryResponse.model_validate(json.loads(raw)).model_dump()
         except (json.JSONDecodeError, ValidationError) as exc:
@@ -1649,7 +1759,7 @@ class ProposalPipeline:
             },
             {"role": "user", "content": transcript_text},
         ]
-        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _DECISIONS_SCHEMA, 400, "Decisions")
+        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _DECISIONS_SCHEMA, 2000, "Decisions")
         try:
             return [str(d) for d in _DecisionsResponse.model_validate(json.loads(raw)).decisions if d]
         except (json.JSONDecodeError, ValidationError) as exc:
@@ -1672,7 +1782,7 @@ class ProposalPipeline:
             },
             {"role": "user", "content": transcript_text},
         ]
-        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _ACTION_ITEMS_SCHEMA, 500, "Action items")
+        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _ACTION_ITEMS_SCHEMA, 2000, "Action items")
         try:
             parsed = _ActionItemsResponse.model_validate(json.loads(raw))
             return [
@@ -1704,7 +1814,7 @@ class ProposalPipeline:
             },
             {"role": "user", "content": transcript_text},
         ]
-        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _MOM_SCHEMA, 700, "MOM")
+        raw = await self._cerebras_with_fallback(cerebras, fallback, messages, _MOM_SCHEMA, 2000, "MOM")
         try:
             parsed = _MOMResponse.model_validate(json.loads(raw))
             return [
@@ -1816,6 +1926,30 @@ class ProposalPipeline:
                 "action_item_count": len(meeting.action_items),
             },
         }
+
+    def _save_pipeline_checkpoint(self, session_id: str, stage: str, data: Any) -> None:
+        """Persist a pipeline stage result to the session store (best-effort, silent on error)."""
+        try:
+            import session_store
+            existing = session_store.get(session_id) or {}
+            cache = existing.get("pipeline_cache") or {}
+            cache[stage] = json.dumps(data, default=lambda o: dataclasses.asdict(o) if dataclasses.is_dataclass(o) else str(o))
+            session_store.patch(session_id, {"pipeline_cache": cache})
+        except Exception as exc:
+            logger.debug("Pipeline checkpoint save failed (stage=%s): %s", stage, exc)
+
+    def _load_pipeline_checkpoint(self, session_id: str, stage: str) -> Any | None:
+        """Load a pipeline stage result from the session store (best-effort, returns None on miss)."""
+        try:
+            import session_store
+            existing = session_store.get(session_id)
+            if not existing:
+                return None
+            raw = (existing.get("pipeline_cache") or {}).get(stage)
+            return json.loads(raw) if raw else None
+        except Exception as exc:
+            logger.debug("Pipeline checkpoint load failed (stage=%s): %s", stage, exc)
+            return None
 
     def _get_openai(self) -> OpenAI:
         if self._openai is None:
