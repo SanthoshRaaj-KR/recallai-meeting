@@ -51,7 +51,7 @@ services:
     volumes:
       - ../observability/alloy/config-vm-b.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /:/host/root:ro,rslave
+      - /:/host/root:ro
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
     env_file:
