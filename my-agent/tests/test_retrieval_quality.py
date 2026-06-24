@@ -34,6 +34,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+# Whole module needs a live, seeded Pinecone index — skipped unless RUN_LIVE_TESTS=1.
+pytestmark = pytest.mark.live
+
 from agent import _extract_query, _extract_topic_hint  # noqa: E402
 from confluence_rag import ConfluenceLiveRAG, _SCORE_THRESHOLD  # noqa: E402
 

@@ -127,6 +127,19 @@ class ConfluenceLiveRAG:
                     }
                 )
 
+            # Per-page diversity: keep only the highest-scoring chunk per page_id so
+            # the LLM context spans multiple sources instead of many chunks from one page.
+            hits.sort(key=lambda h: h["score"], reverse=True)
+            _deduped: list[dict[str, Any]] = []
+            _seen_pages: set[str] = set()
+            for h in hits:
+                pid = h["page_id"]
+                if pid and pid in _seen_pages:
+                    continue
+                _seen_pages.add(pid)
+                _deduped.append(h)
+            hits = _deduped
+
             if hits:
                 titles = ", ".join(
                     f"{h['title']} › {h['heading']}" if h.get("heading") and h["heading"] != "Page intro"

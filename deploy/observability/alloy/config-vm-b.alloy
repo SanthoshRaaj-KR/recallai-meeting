@@ -1,0 +1,114 @@
+// =============================================================================
+// Grafana Alloy — VM-B (low-compute box: confluence-service :8001 + org :8003)
+//
+// Same shape as config-vm-a.alloy, different scrape targets and vm label.
+// Credentials are read from the environment (see ../alloy.env).
+// Run via deploy/vm-b/docker-compose.yml (alloy service).
+// =============================================================================
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// ---- Grafana Cloud: metrics (Prometheus remote_write / Mimir) ---------------
+prometheus.remote_write "grafanacloud" {
+  endpoint {
+    url = sys.env("GC_PROM_URL")
+    basic_auth {
+      username = sys.env("GC_PROM_USER")
+      password = sys.env("GC_API_KEY")
+    }
+  }
+  external_labels = {
+    vm = "vm-b",
+  }
+}
+
+// ---- Host metrics (node / unix exporter) ------------------------------------
+prometheus.exporter.unix "host" {
+  rootfs_path = "/host/root"
+  procfs_path = "/host/proc"
+  sysfs_path  = "/host/sys"
+}
+
+prometheus.scrape "host" {
+  targets         = prometheus.exporter.unix.host.targets
+  forward_to      = [prometheus.remote_write.grafanacloud.receiver]
+  job_name        = "node"
+  scrape_interval = "30s"
+}
+
+// ---- App metrics ------------------------------------------------------------
+prometheus.scrape "apps" {
+  targets = [
+    { "__address__" = "confluence-service:8001", "service" = "confluence-service" },
+    { "__address__" = "org-service:8003",        "service" = "org-service" },
+  ]
+  metrics_path    = "/metrics"
+  forward_to      = [prometheus.remote_write.grafanacloud.receiver]
+  job_name        = "jarvis-apps"
+  scrape_interval = "15s"
+}
+
+// ---- Traces (OTLP in from apps → Grafana Cloud Tempo out) -------------------
+otelcol.receiver.otlp "in" {
+  grpc { endpoint = "0.0.0.0:4317" }
+  http { endpoint = "0.0.0.0:4318" }
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  output {
+    traces = [otelcol.exporter.otlphttp.grafanacloud.input]
+  }
+}
+
+otelcol.exporter.otlphttp "grafanacloud" {
+  client {
+    endpoint = sys.env("GC_OTLP_URL")
+    auth     = otelcol.auth.basic.grafanacloud.handler
+  }
+}
+
+otelcol.auth.basic "grafanacloud" {
+  username = sys.env("GC_OTLP_USER")
+  password = sys.env("GC_API_KEY")
+}
+
+// ---- Logs (Docker container logs → Grafana Cloud Loki) ----------------------
+discovery.docker "all" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "docker_logs" {
+  targets = discovery.docker.all.targets
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.docker_logs.output
+  forward_to = [loki.write.grafanacloud.receiver]
+  labels     = { vm = "vm-b" }
+}
+
+loki.write "grafanacloud" {
+  endpoint {
+    url = sys.env("GC_LOKI_URL")
+    basic_auth {
+      username = sys.env("GC_LOKI_USER")
+      password = sys.env("GC_API_KEY")
+    }
+  }
+}

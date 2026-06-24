@@ -6,8 +6,9 @@ import datetime as dt
 from fastapi import APIRouter, HTTPException
 
 from ..auth import create_access_token, hash_password
-from ..database import DBError, insert, select_one, update
+from ..database import DBError, delete, insert, select_one, update
 from ..models import AcceptInviteRequest, OrgRole, TeamInviteOut
+from .teams import _wire_hierarchy
 
 router = APIRouter(prefix="/invites", tags=["invites"])
 
@@ -18,8 +19,9 @@ def _load_and_validate(code: str) -> dict:
         raise HTTPException(404, "Invite not found or already used")
     expires = dt.datetime.fromisoformat(invite["expires_at"].replace("Z", "+00:00"))
     if dt.datetime.now(dt.timezone.utc) > expires:
+        # Hard-delete expired invites (codes must not linger in the DB).
         try:
-            update("org_team_invitations", {"code": f"eq.{code}"}, {"status": "expired"})
+            delete("org_team_invitations", {"code": f"eq.{code}"})
         except Exception:
             pass
         raise HTTPException(410, "This invite has expired")
@@ -58,6 +60,13 @@ def accept_invite(code: str, body: AcceptInviteRequest):
 
     if existing_user:
         user_id = existing_user["id"]
+        # Attach an org-less account to the inviting team's org so org-scoped
+        # views (and the user's JWT) reflect membership immediately on accept.
+        if not existing_user.get("org_id"):
+            try:
+                update("org_users", {"id": f"eq.{user_id}"}, {"org_id": team["org_id"]})
+            except DBError:
+                pass
     else:
         if not body.name:
             raise HTTPException(400, "name is required to create a new account")
@@ -95,6 +104,10 @@ def accept_invite(code: str, body: AcceptInviteRequest):
             })
         except DBError as e:
             raise HTTPException(500, str(e))
+        # Wire into the reporting hierarchy (under the team manager, or under the
+        # CEO if joining as MANAGER) — mirrors a direct add_member so invited
+        # members show up correctly in the org chart.
+        _wire_hierarchy(invite["team_id"], user_id, invite["role"])
 
     try:
         update("org_team_invitations", {"code": f"eq.{code}"}, {"status": "accepted"})

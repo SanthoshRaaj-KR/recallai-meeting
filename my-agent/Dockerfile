@@ -15,6 +15,11 @@ ENV PYTHONUNBUFFERED=1
 # expense of a slightly longer build.
 ENV UV_COMPILE_BYTECODE=1
 
+# Cache HuggingFace models (Silero VAD + turn-detector) under /app so the files
+# downloaded by `download-files` in the build stage are included when /app is
+# copied into the final image (otherwise they land in /root/.cache and are lost).
+ENV HF_HOME=/app/.cache/huggingface
+
 # --- Build stage ---
 # Install dependencies, build native extensions, and prepare the application
 FROM base AS build
@@ -28,6 +33,8 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     python3-dev \
+    nodejs \
+    npm \
   && rm -rf /var/lib/apt/lists/*
 
 # Create a new directory for our application code
@@ -44,6 +51,11 @@ RUN mkdir -p src
 # Ensure your uv.lock file is checked in for consistency across environments
 RUN uv sync --locked
 
+# Observability deps in an ISOLATED layer so uv.lock stays pristine and
+# `uv sync --locked` above keeps working. See deploy/observability/README.md.
+COPY requirements-otel.txt ./
+RUN uv pip install --python /app/.venv/bin/python -r requirements-otel.txt
+
 # Copy all remaining application files into the container
 # This includes source code, configuration files, and dependency specifications
 # (Excludes files specified in .dockerignore)
@@ -57,6 +69,9 @@ RUN uv run "src/agent.py" download-files
 # --- Production stage ---
 # Build tools (gcc, g++, python3-dev) are not included in the final image
 FROM base
+
+# Install Node.js/npm so `npx` is available for the GitHub MCP server subprocess.
+RUN apt-get update && apt-get install -y nodejs npm && rm -rf /var/lib/apt/lists/*
 
 # Create a non-privileged user that the app will run under.
 # See https://docs.docker.com/build/building/best-practices/#user

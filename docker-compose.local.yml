@@ -1,0 +1,51 @@
+# All-in-one LOCAL run of the whole backend on one machine + one network.
+# Each service reads its OWN folder env (gitignored): the my-agent services use
+# my-agent/.env.local, org-service uses user_service/.env. For real deployment
+# use deploy/vm-a + deploy/vm-b instead (this file is for local dev/testing only).
+#
+#   docker compose -f docker-compose.local.yml up -d --build
+#   curl http://localhost:8000/health   # bot-service
+#   curl http://localhost:8001/health   # confluence-service
+#   curl http://localhost:8003/health   # org-service
+#   docker compose -f docker-compose.local.yml logs -f agent
+#   docker compose -f docker-compose.local.yml down
+
+services:
+  bot-service:
+    image: my-agent:latest
+    build:
+      context: ./my-agent
+    command: ["uv", "run", "--no-sync", "uvicorn", "src.bot_service:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: [my-agent/.env.local]
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  agent:
+    image: my-agent:latest
+    command: ["uv", "run", "--no-sync", "src/agent.py", "start"]
+    env_file: [my-agent/.env.local]
+    environment:
+      # Reach bot-service over the compose network (transcript POST target).
+      BRIDGE_INTERNAL_URL: "http://bot-service:8000"
+    depends_on:
+      - bot-service
+    restart: unless-stopped
+
+  confluence-service:
+    image: my-agent:latest
+    command: ["uv", "run", "--no-sync", "uvicorn", "src.recall_bridge:app", "--host", "0.0.0.0", "--port", "8001"]
+    env_file: [my-agent/.env.local]
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+  org-service:
+    image: jarvis-org:latest
+    build:
+      context: ./user_service
+    # org-service uses its own folder env (Supabase, JWT, CORS, SMTP, BOT_SERVICE_URL).
+    env_file: [user_service/.env]
+    ports:
+      - "8003:8003"
+    restart: unless-stopped

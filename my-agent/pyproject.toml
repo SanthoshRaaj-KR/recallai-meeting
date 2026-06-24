@@ -10,7 +10,6 @@ requires-python = ">=3.10, <3.15"
 
 dependencies = [
     "livekit-agents[assemblyai,cerebras,deepgram,mcp,silero,turn-detector]~=1.5",
-    "livekit-plugins-ai-coustics~=0.2",
     "python-dotenv",
     # Recall.ai bridge dependencies
     "fastapi>=0.111",
@@ -21,7 +20,7 @@ dependencies = [
     "openai-agents>=0.1",  # vendored local-doc proposal agents (intent/eval/editor/verifier)
     "mcp>=1.0",
     "pinecone>=5.0",
-    "livekit-plugins-cartesia>=1.5.12",
+    "edge-tts>=7.2.8",
 ]
 
 [dependency-groups]
@@ -29,7 +28,6 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
-    "edge-tts",  # used by src/generate_warmup_prompt.py
 ]
 
 [tool.uv]

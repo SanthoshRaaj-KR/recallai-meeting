@@ -17,8 +17,13 @@ import pprint
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+
+# Whole module drives the ProposalPipeline against live LLMs — skipped unless RUN_LIVE_TESTS=1.
+pytestmark = pytest.mark.live
 
 from review_pipeline.models import ChangeIntent, ExtractedMeeting, PageCandidate
 from review_pipeline.pipeline import ProposalPipeline

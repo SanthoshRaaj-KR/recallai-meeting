@@ -139,11 +139,6 @@ class TeamUpdate(BaseModel):
 class AddMemberRequest(BaseModel):
     user_id: str
     role: str = TeamRole.MEMBER
-    admin_secret: str
-
-
-class RemoveMemberRequest(BaseModel):
-    admin_secret: str
 
 
 class MemberOut(BaseModel):

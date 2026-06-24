@@ -1,0 +1,25 @@
+# Secrets — inject at runtime, never bake in
+.env
+.env.*
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# VCS / editor / OS
+.git
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+
+# Docs
+*.md
+
+# The Dockerfile itself doesn't need to be in the image
+Dockerfile
+.dockerignore

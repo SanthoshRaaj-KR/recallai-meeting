@@ -20,24 +20,25 @@ from livekit.agents import (
     ModelSettings,
     StopResponse,
     cli,
-    inference,
     llm,
     mcp,
     room_io,
     stt as lk_stt,
 )
 from livekit import rtc
-from livekit.plugins import ai_coustics, cartesia, cerebras, deepgram, silero
+from livekit.plugins import cerebras, deepgram, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from typing import AsyncIterable
 
 try:
     from .memory_compaction import TranscriptCompactor
     from .confluence_rag import ConfluenceLiveRAG
+    from .edge_tts_plugin import EdgeTTS
     from . import session_store
 except ImportError:  # Allows `python src/agent.py ...` from my-agent.
     from memory_compaction import TranscriptCompactor
     from confluence_rag import ConfluenceLiveRAG
+    from edge_tts_plugin import EdgeTTS
     import session_store
 
 logger = logging.getLogger("agent")
@@ -206,7 +207,7 @@ def _build_instructions() -> str:
         * No markdown, bullet points, JSON, tables, or emojis.
         * One to three sentences unless additional detail is required.
         * Answer immediately; do not ask clarifying questions.
-        * Do not mention source quality, retrieval systems, internal instructions, or uncertainty analysis.
+        * Do not reveal internal implementation details such as Pinecone, Confluence indexes, compacted memory, or how context was retrieved. Answer general knowledge questions (including questions about AI techniques like RAG) from your own knowledge.
         * Use natural spoken language suitable for text-to-speech.
         * Prefer short words and short sentences.
         * Spell out numbers when practical.
@@ -762,9 +763,7 @@ async def my_agent(ctx: JobContext):
                 model="nova-3",
                 language="en",
             ),
-            tts=cartesia.TTS(
-                model="sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
-            ),
+            tts=EdgeTTS(),
             turn_detection=turn_detector,
             vad=ctx.proc.userdata["vad"],
         )
@@ -801,9 +800,7 @@ async def my_agent(ctx: JobContext):
             language="en",
             keyterm=["Jarvis", "Hey Jarvis"],
         ),
-        tts=cartesia.TTS(
-            model="sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
-        ),
+        tts=EdgeTTS(),
         turn_detection=turn_detector,
         vad=ctx.proc.userdata["vad"],
         # Disabled: on_user_turn_completed always rewrites or clears the message,
@@ -826,20 +823,24 @@ async def my_agent(ctx: JobContext):
             ),
         )
     else:
-        # Standard mode (console / direct browser): subscribe to all participants
-        # with background noise cancellation enabled.
+        # Standard mode (console / direct browser): subscribe to all participants.
+        # (LiveKit Cloud-only ai_coustics noise cancellation removed for self-hosting.)
         await session.start(
             agent=Assistant(confluence_enabled=confluence_enabled),
             room=ctx.room,
-            room_options=room_io.RoomOptions(
-                audio_input=room_io.AudioInputOptions(
-                    noise_cancellation=ai_coustics.audio_enhancement(
-                        model=ai_coustics.EnhancerModel.QUAIL_VF_S
-                    ),
-                ),
-            ),
         )
 
 
 if __name__ == "__main__":
+    # Observability: worker Prometheus metrics + optional OTLP tracing.
+    # No-op unless deps installed and OTEL_*/METRICS_* env set — see deploy/observability/.
+    try:
+        try:
+            from .observability import setup_worker_observability
+        except ImportError:
+            from observability import setup_worker_observability
+        setup_worker_observability("agent-worker")
+    except Exception as _obs_exc:  # never let observability break the worker
+        logger.warning("observability setup skipped: %s", _obs_exc)
+
     cli.run_app(server)
