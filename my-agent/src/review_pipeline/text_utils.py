@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import html
 import re
 from typing import Any
@@ -277,6 +278,126 @@ def replace_text_in_storage(storage_html: str, before: str, after: str) -> tuple
             replacement = f"<{tag}{attrs}>{escaped_after}</{tag}>"
             return f"{value[:match.start()]}{replacement}{value[match.end():]}", True
     return value, False
+
+
+# ── Section-scoped phrase-diff apply ──────────────────────────────────────────
+# replace_text_in_storage matches a single <p>/<td>/<li>/<h*> block, so it can't
+# apply a whole-section before/after (what the confluence_pipeline editor emits)
+# when the section spans several blocks (e.g. a table). apply_section_edit derives
+# the minimal changed phrases from before→after (word-level diff, with surrounding
+# context words as a disambiguating anchor) and replaces just those phrases inside
+# the located section's storage XHTML — so the wrapping tags are preserved and only
+# the changed values move. It only ever applies a replacement whose old text is
+# found verbatim, so a miss is a no-op (never corruption).
+
+_WORD_RE = re.compile(r"\S+")
+_MD_EDGE_TOKENS = {"#", "##", "###", "####", "#####", "######", "|", "-", "*", "**", "`", "```", ">", "+", "—", "–"}
+
+
+def _trim_md_edges(tokens: list[str]) -> list[str]:
+    lo, hi = 0, len(tokens)
+    while lo < hi and tokens[lo] in _MD_EDGE_TOKENS:
+        lo += 1
+    while hi > lo and tokens[hi - 1] in _MD_EDGE_TOKENS:
+        hi -= 1
+    return tokens[lo:hi]
+
+
+def _is_structural(token: str) -> bool:
+    """A markdown structural token (table pipe, heading/list marker) that has no
+    counterpart in storage text — context must not cross it."""
+    return "|" in token or token in _MD_EDGE_TOKENS
+
+
+def _expand_within_cell(tokens: list[str], lo: int, hi: int, ctx: int) -> list[str]:
+    """Pad [lo:hi] with up to `ctx` neighbouring *word* tokens, stopping at any
+    structural token so the anchor stays inside one table cell / line segment."""
+    left = lo
+    taken = 0
+    while left > 0 and taken < ctx and not _is_structural(tokens[left - 1]):
+        left -= 1
+        taken += 1
+    right = hi
+    taken = 0
+    while right < len(tokens) and taken < ctx and not _is_structural(tokens[right]):
+        right += 1
+        taken += 1
+    return tokens[left:right]
+
+
+def _contextual_replacements(before: str, after: str, ctx: int = 2) -> list[tuple[str, str]]:
+    """Minimal (old_phrase -> new_phrase) edits, each padded with `ctx` unchanged
+    words on either side (without crossing a table cell / markdown boundary) so the
+    anchor is specific enough to replace safely against storage text."""
+    b = _WORD_RE.findall(before or "")
+    a = _WORD_RE.findall(after or "")
+    sm = difflib.SequenceMatcher(a=b, b=a, autojunk=False)
+    pairs: list[tuple[str, str]] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        old = " ".join(_trim_md_edges(_expand_within_cell(b, i1, i2, ctx))).strip()
+        new = " ".join(_trim_md_edges(_expand_within_cell(a, j1, j2, ctx))).strip()
+        if old and old != new:
+            pairs.append((old, new))
+    return pairs
+
+
+def _locate_section_span(storage_html: str, section_heading: str) -> tuple[int, int] | None:
+    """Return (start, end) of the section under `section_heading` in storage HTML."""
+    target = normalize_for_match(section_heading)
+    if not target:
+        return None
+    matches = list(_HEADING_RE.finditer(storage_html))
+    for idx, match in enumerate(matches):
+        if normalize_for_match(html_to_text(match.group(2))) != target:
+            continue
+        level = int(match.group(1))
+        end = len(storage_html)
+        for nxt in matches[idx + 1:]:
+            if int(nxt.group(1)) <= level:
+                end = nxt.start()
+                break
+        return (match.start(), end)
+    return None
+
+
+def apply_section_edit(
+    storage_html: str,
+    before: str,
+    after: str,
+    section_heading: str | None = None,
+) -> tuple[str, bool]:
+    """Apply a whole-section before→after edit to storage XHTML, preserving tags.
+
+    Scopes to the named section when it can be found (so an ambiguous value isn't
+    changed elsewhere on the page), then replaces the minimal changed phrases —
+    each anchored with neighbouring unchanged words — wherever they appear verbatim
+    in that section. Returns (new_html, replaced). A miss leaves the HTML untouched.
+    """
+    value = storage_html or ""
+    if not before or before == after:
+        return value, False
+
+    start, end = 0, len(value)
+    if section_heading:
+        span = _locate_section_span(value, section_heading)
+        if span:
+            start, end = span
+    region = value[start:end]
+
+    applied = False
+    for old, new in _contextual_replacements(before, after):
+        new_text = html.escape(new, quote=False)  # the inserted value is page text
+        # Storage may hold the old text raw or entity-escaped (&amp;/&lt;); try both.
+        for candidate in (old, html.escape(old, quote=False)):
+            if candidate and candidate != new_text and candidate in region:
+                region = region.replace(candidate, new_text, 1)
+                applied = True
+                break
+    if not applied:
+        return value, False
+    return f"{value[:start]}{region}{value[end:]}", True
 
 
 # ── Confluence storage XHTML → clean markdown ─────────────────────────────────

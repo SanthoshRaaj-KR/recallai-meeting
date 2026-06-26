@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from review_pipeline.text_utils import (  # noqa: E402
+    apply_section_edit,
     looks_like_storage_html,
     storage_to_markdown,
 )
@@ -92,3 +93,58 @@ def test_looks_like_storage_html():
     assert looks_like_storage_html('<ac:task-body>do it</ac:task-body>')
     assert not looks_like_storage_html("clean **markdown** with | a | b | values")
     assert not looks_like_storage_html("just prose, 6 dollars per device")
+
+
+# ── apply_section_edit: whole-section edits onto multi-block storage XHTML ──────
+
+MULTI_BLOCK = (
+    "<h2>Support Tiers</h2>"
+    "<table><tbody>"
+    "<tr><th>Tier</th><th>Standard response</th></tr>"
+    "<tr><td>P1</td><td>within 2 hours</td></tr>"
+    "<tr><td>P2</td><td>within 8 hours</td></tr>"
+    "</tbody></table>"
+    "<h2>Other</h2>"
+    "<p>We had 2 incidents last quarter.</p>"
+)
+
+
+def test_apply_section_edit_changes_one_table_cell_keeps_tags():
+    before = "| Tier | Standard response |\n| P1 | within 2 hours |\n| P2 | within 8 hours |"
+    after = "| Tier | Standard response |\n| P1 | within 1 hour |\n| P2 | within 8 hours |"
+    new_html, ok = apply_section_edit(MULTI_BLOCK, before, after, "Support Tiers")
+    assert ok
+    assert "<td>within 1 hour</td>" in new_html  # changed cell, tags intact
+    assert "<td>within 8 hours</td>" in new_html  # sibling row untouched
+    assert "<p>We had 2 incidents last quarter.</p>" in new_html  # other section + bare "2" safe
+    assert "&lt;" not in new_html
+
+
+def test_apply_section_edit_scopes_to_named_section():
+    # The bare value "2" exists in another section; context anchor + scoping protect it.
+    before = "| P1 | within 2 hours |"
+    after = "| P1 | within 3 hours |"
+    new_html, ok = apply_section_edit(MULTI_BLOCK, before, after, "Support Tiers")
+    assert ok
+    assert "within 3 hours" in new_html
+    assert "We had 2 incidents" in new_html  # untouched
+
+
+def test_apply_section_edit_phrase_across_blocks():
+    html_doc = (
+        "<h1>Graph &mdash; Neo4j Device Graph</h1>"
+        "<p>INFER uses Neo4j AuraDB as a store.</p>"
+        "<p>Neo4j is fast.</p>"
+    )
+    before = "INFER uses Neo4j AuraDB as a store.\nNeo4j is fast."
+    after = "INFER uses Kuzu DB as a store.\nNeo4j is fast."
+    new_html, ok = apply_section_edit(html_doc, before, after)
+    assert ok
+    assert "<p>INFER uses Kuzu DB as a store.</p>" in new_html
+    assert "<p>Neo4j is fast.</p>" in new_html  # unrelated mention untouched
+
+
+def test_apply_section_edit_miss_is_noop():
+    new_html, ok = apply_section_edit(MULTI_BLOCK, "value not present here", "something else", "Support Tiers")
+    assert not ok
+    assert new_html == MULTI_BLOCK
