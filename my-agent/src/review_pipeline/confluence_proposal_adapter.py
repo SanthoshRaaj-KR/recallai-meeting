@@ -25,7 +25,7 @@ from typing import Any
 from .confluence_pipeline import PineconeHybridIndex, PipelineConfig, propose
 from .confluence_pipeline.models import ConfluenceProposal
 from .models import ExtractedMeeting, Proposal
-from .text_utils import format_transcript, normalize_ws
+from .text_utils import format_transcript, html_to_text, looks_like_storage_html, normalize_ws
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,16 @@ def _proposal_from_native(
         edit_mode = "append" if edit_type == "append" else "replace"
         after = p.after_content
 
+    # Defensive: the editor operates on clean markdown, but if any residual
+    # Confluence XHTML slipped through it must not reach the write-back path —
+    # replace_text_in_storage html.escape()s `after`, which would surface literal
+    # &lt;ac:…&gt; on the page. Strip tags so the anchor/replacement stay clean.
+    before = p.before_content or ""
+    if looks_like_storage_html(before):
+        before = html_to_text(before)
+    if after and looks_like_storage_html(after):
+        after = html_to_text(after)
+
     quality = float(p.quality_score or p.confidence or 0.0)
     bin_ = _confidence_bin(quality)
     intent = p.intent
@@ -89,7 +99,7 @@ def _proposal_from_native(
         page_id=page_id,
         page_title=page_title,
         section_heading=heading,
-        before_content=p.before_content,
+        before_content=before,
         after_content=after,
         timestamp=_utcnow(),
         session_id=session_id,

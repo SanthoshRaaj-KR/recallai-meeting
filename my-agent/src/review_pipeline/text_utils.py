@@ -277,3 +277,152 @@ def replace_text_in_storage(storage_html: str, before: str, after: str) -> tuple
             replacement = f"<{tag}{attrs}>{escaped_after}</{tag}>"
             return f"{value[:match.start()]}{replacement}{value[match.end():]}", True
     return value, False
+
+
+# ── Confluence storage XHTML → clean markdown ─────────────────────────────────
+# The RAG/content layer must hold clean text/markdown only — no XHTML tags and no
+# Confluence macro chrome (``ac:`` / ``ri:`` / CDATA). Real storage tags are
+# reintroduced only at write-back time (see replace_text_in_storage /
+# insert_html_in_section / append_new_section / pipeline._storage_html), so the
+# original Confluence document still renders correctly after an accepted edit.
+
+_COMMENT_RE = re.compile(r"(?is)<!--.*?-->")
+_CDATA_RE = re.compile(r"(?is)<!\[CDATA\[(.*?)\]\]>")
+# Whole macros that carry no readable prose — drop the element and its body.
+_NOISE_MACRO_RE = re.compile(
+    r"(?is)<ac:structured-macro\b[^>]*\bac:name=\"(?:toc|children|pagetree|"
+    r"livesearch|recently-updated|recently-updated-dashboard|contributors|"
+    r"include|excerpt-include|gallery|profile-picture|widget|anchor|view-file|"
+    r"attachments)\"[^>]*>.*?</ac:structured-macro>"
+)
+# Config parameters inside macros (layout, language, …) — drop, keep macro body.
+_AC_PARAM_RE = re.compile(r"(?is)<ac:parameter\b[^>]*>.*?</ac:parameter>")
+_AC_MACRO_ID_RE = re.compile(r"(?is)<ac:macro-id\b[^>]*>.*?</ac:macro-id>")
+_AC_EMOTICON_RE = re.compile(r"(?is)<ac:emoticon\b[^>]*/?>")
+# Resource identifiers (attachment filenames, user keys, page refs) — drop.
+_RI_PAIR_RE = re.compile(r"(?is)<ri:[\w:-]+\b[^>]*>.*?</ri:[\w:-]+>")
+_RI_SELF_RE = re.compile(r"(?is)<ri:[\w:-]+\b[^>]*/?>")
+# Links: keep the human-readable anchor text, drop the ri:/href machinery.
+_AC_LINK_RE = re.compile(r"(?is)<ac:link\b[^>]*>(.*?)</ac:link>")
+_AC_LINK_BODY_RE = re.compile(
+    r"(?is)<ac:(?:link-body|plain-text-link-body)\b[^>]*>(.*?)</ac:(?:link-body|plain-text-link-body)>"
+)
+_RI_TITLE_RE = re.compile(r'(?is)ri:(?:content-title|filename|value)="([^"]*)"')
+
+
+def _ac_link_to_text(value: str) -> str:
+    def _repl(match: "re.Match[str]") -> str:
+        inner = match.group(1)
+        body = _AC_LINK_BODY_RE.search(inner)
+        if body and normalize_ws(_strip_tags(body.group(1))):
+            return f" {_strip_tags(body.group(1))} "
+        title = _RI_TITLE_RE.search(inner)
+        if title and title.group(1).strip():
+            return f" {title.group(1)} "
+        return " "
+
+    return _AC_LINK_RE.sub(_repl, value)
+
+
+def _strip_confluence_macros(value: str) -> str:
+    """Remove Confluence-specific macro/reference noise, keeping readable prose."""
+    text = value or ""
+    text = _COMMENT_RE.sub(" ", text)
+    text = _NOISE_MACRO_RE.sub(" ", text)
+    text = _ac_link_to_text(text)  # before stripping ri: (links wrap ri: refs)
+    text = _AC_PARAM_RE.sub(" ", text)
+    text = _AC_MACRO_ID_RE.sub(" ", text)
+    text = _AC_EMOTICON_RE.sub(" ", text)
+    text = _RI_PAIR_RE.sub(" ", text)
+    text = _RI_SELF_RE.sub(" ", text)
+    # Keep code/plain-text bodies (CDATA) as literal text for downstream conversion.
+    # Escape only & < > (not quotes) so embedded "<" can't reopen tag parsing while
+    # code stays readable.
+    text = _CDATA_RE.sub(lambda m: html.escape(m.group(1), quote=False), text)
+    # Drop any stray CDATA markers left by malformed/legacy storage.
+    text = text.replace("<![CDATA[", " ").replace("]]>", " ")
+    return text
+
+
+def clean_inline_text(value: str) -> str:
+    """Clean a short inline string (e.g. a section heading) to tag-free plain text."""
+    return normalize_ws(_strip_tags(_strip_confluence_macros(value or "")))
+
+
+def _html_to_markdown_fallback(value: str) -> str:
+    """Dependency-free HTML→markdown used when ``markdownify`` is unavailable.
+
+    Preserves ATX headings, bullet lists and one-line table rows so the section
+    chunker can still split a page and the editor can make per-row edits. Never
+    emits a raw tag.
+    """
+    text = value or ""
+    for lvl in range(1, 7):
+        text = re.sub(
+            rf"(?is)<h{lvl}\b[^>]*>(.*?)</h{lvl}>",
+            lambda m, _l=lvl: "\n" + "#" * _l + " " + normalize_ws(_strip_tags(m.group(1))) + "\n",
+            text,
+        )
+    text = re.sub(
+        r"(?is)<li\b[^>]*>(.*?)</li>",
+        lambda m: "\n- " + normalize_ws(_strip_tags(m.group(1))),
+        text,
+    )
+
+    def _row(match: "re.Match[str]") -> str:
+        cells = re.findall(r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>", match.group(1))
+        if not cells:
+            return "\n"
+        return "\n| " + " | ".join(normalize_ws(_strip_tags(c)) for c in cells) + " |"
+
+    text = re.sub(r"(?is)<tr\b[^>]*>(.*?)</tr>", _row, text)
+    text = re.sub(r"(?is)</(p|div|table|ul|ol)\s*>", "\n\n", text)
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    lines = [normalize_ws(ln) for ln in text.splitlines()]
+    out: list[str] = []
+    for ln in lines:
+        if ln or (out and out[-1] != ""):
+            out.append(ln)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
+def looks_like_storage_html(value: str) -> bool:
+    """True if the text still carries XHTML/Confluence-storage tags worth cleaning."""
+    return bool(
+        re.search(r"</?(?:ac:|ri:|p|div|span|h[1-6]|table|tr|td|th|ul|ol|li|br)\b", value or "")
+    )
+
+
+def storage_to_markdown(storage_html: str, title: str = "") -> str:
+    """Convert Confluence storage XHTML to clean markdown (no tags, no macro noise).
+
+    Pipeline: strip ``ac:``/``ri:``/CDATA macro noise → convert standard HTML to
+    markdown (``markdownify`` when importable, else a dependency-free fallback that
+    keeps ``#`` headings for the chunker) → guarantee a level-1 ``# {title}``. The
+    output is what gets embedded, retrieved, evaluated, edited and shown on review
+    cards; it is deliberately tag-free.
+    """
+    cleaned = _strip_confluence_macros(storage_html or "")
+    try:
+        from markdownify import markdownify as _md
+
+        markdown = _md(
+            cleaned,
+            heading_style="ATX",
+            strip=["span"],
+            escape_asterisks=False,
+            escape_underscores=False,
+            escape_misc=False,
+        ).strip()
+    except ImportError:
+        markdown = _html_to_markdown_fallback(cleaned)
+    # Belt-and-suspenders: never let a raw tag survive into the indexed text.
+    if re.search(r"<[^>]+>", markdown):
+        markdown = _strip_tags(markdown)
+    markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
+    title = normalize_ws(title)
+    if title and not markdown.lstrip().startswith("# "):
+        markdown = f"# {title}\n\n{markdown}"
+    return markdown

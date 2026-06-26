@@ -57,28 +57,6 @@ except ImportError:
     from review_pipeline.confluence_pipeline.retrieval import PineconeHybridIndex
     from review_pipeline.confluence_pipeline.chunker import chunk_markdown_text
 
-try:
-    from markdownify import markdownify as _md
-
-    def _storage_to_markdown(html: str, title: str) -> str:
-        """Convert Confluence storage XHTML to plain markdown with a level-1 title."""
-        md = _md(
-            html or "",
-            heading_style="ATX",
-            strip=["span"],
-            escape_asterisks=False,
-            escape_underscores=False,
-            escape_misc=False,
-        ).strip()
-        if not md.lstrip().startswith("# "):
-            md = f"# {title}\n\n{md}"
-        return md
-
-except ImportError:
-    def _storage_to_markdown(html: str, title: str) -> str:  # type: ignore[misc]
-        return f"# {title}\n\n{html}"
-
-
 def _bg_extract_action_items(s: dict) -> None:
     """Run action-item extraction off the request path (LLM call is slow)."""
     import threading

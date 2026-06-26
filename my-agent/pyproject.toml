@@ -21,6 +21,7 @@ dependencies = [
     "mcp>=1.0",
     "pinecone>=5.0",
     "edge-tts>=7.2.8",
+    "markdownify>=0.13",  # Confluence storage XHTML -> clean markdown for RAG indexing
 ]
 
 [dependency-groups]

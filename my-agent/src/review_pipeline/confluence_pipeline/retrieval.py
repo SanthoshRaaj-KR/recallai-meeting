@@ -24,28 +24,15 @@ import os
 import time
 from typing import Any
 
+from ..text_utils import clean_inline_text, looks_like_storage_html, storage_to_markdown
 from .models import ChunkRecord
 
 logger = logging.getLogger(__name__)
 
 
 def _page_to_markdown(html: str, title: str) -> str:
-    """Convert Confluence storage XHTML to markdown with a guaranteed level-1 title."""
-    try:
-        from markdownify import markdownify as _md
-        markdown = _md(
-            html or "",
-            heading_style="ATX",
-            strip=["span"],
-            escape_asterisks=False,
-            escape_underscores=False,
-            escape_misc=False,
-        ).strip()
-    except ImportError:
-        markdown = html or ""
-    if not markdown.lstrip().startswith("# "):
-        markdown = f"# {title}\n\n{markdown}"
-    return markdown
+    """Convert Confluence storage XHTML to clean markdown (no tags / macro noise)."""
+    return storage_to_markdown(html or "", title)
 
 
 # Dense backend: "openai" embeds with OpenAI text-embedding-3-small and stores plain
@@ -503,13 +490,22 @@ class PineconeHybridIndex:
             section_index = int(float(fields.get("section_index") or 0))
         except (TypeError, ValueError):
             section_index = 0
+        content = str(fields.get("content") or "")
+        heading = str(fields.get("section_heading") or "")
+        # Safety net for indexes written before content cleaning: if a stored chunk
+        # still carries Confluence/XHTML tags, clean it on the way out so the editor
+        # and the review card never see raw markup (no reindex required).
+        if looks_like_storage_html(content):
+            content = storage_to_markdown(content, str(fields.get("doc_title") or ""))
+        if looks_like_storage_html(heading) or "]]>" in heading:
+            heading = clean_inline_text(heading)
         return ChunkRecord(
             chunk_id=cid,
             source_path=str(fields.get("source_path") or ""),
             source_format=str(fields.get("source_format") or "md"),
-            section_heading=str(fields.get("section_heading") or ""),
+            section_heading=heading,
             section_index=section_index,
-            content=str(fields.get("content") or ""),
+            content=content,
             doc_title=str(fields.get("doc_title") or ""),
         )
 

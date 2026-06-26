@@ -24,31 +24,15 @@ _MY_AGENT = _HERE.parents[3]  # my-agent/
 
 load_dotenv(_MY_AGENT / ".env.local")
 
-from markdownify import markdownify as _md  # noqa: E402
 from review_pipeline.confluence import RestConfluenceClient  # noqa: E402
 from review_pipeline.confluence_pipeline.chunker import chunk_markdown_text  # noqa: E402
 from review_pipeline.confluence_pipeline.retrieval import PineconeHybridIndex  # noqa: E402
+from review_pipeline.text_utils import storage_to_markdown  # noqa: E402
 
 
 def _storage_to_markdown(html: str, title: str) -> str:
-    """Convert Confluence storage XHTML to markdown, guaranteeing a level-1 title.
-
-    Escaping is disabled: markdownify by default backslash-escapes ``_``, ``*``,
-    ``$`` etc. (``threat\\_type``, ``\\$14``), which corrupts table values, pollutes
-    retrieval/eval tokens, and defeats the same-row dedup (an escaped vs unescaped
-    before-row no longer matches). The indexed text must mirror the real page text.
-    """
-    markdown = _md(
-        html or "",
-        heading_style="ATX",
-        strip=["span"],
-        escape_asterisks=False,
-        escape_underscores=False,
-        escape_misc=False,
-    ).strip()
-    if not markdown.lstrip().startswith("# "):
-        markdown = f"# {title}\n\n{markdown}"
-    return markdown
+    """Convert Confluence storage XHTML to clean markdown (no tags / macro noise)."""
+    return storage_to_markdown(html or "", title)
 
 
 def main(argv: list[str]) -> int:
