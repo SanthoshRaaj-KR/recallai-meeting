@@ -1,4 +1,7 @@
 # VM-A — realtime box: bot-service (8000) + agent worker + Alloy observability.
+# ENV FILE SOURCE (deploy): deploy/vm-a/.env  (co-located with this file — env_file: [.env])
+#   Do NOT use the repo-root Confluence/.env or my-agent/.env.local here.
+#   For local dev/testing use Confluence/docker-compose.local.yml instead.
 #
 # Phase 3 (local test): LIVEKIT_URL points at LiveKit Cloud; run this alone.
 # Phase 6 (prod VM):    run ALONGSIDE the livekit/generate compose on the VM.

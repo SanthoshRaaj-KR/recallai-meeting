@@ -1,4 +1,7 @@
 # VM-B — low-compute box: confluence-service (8001) + org-service (8003) + Caddy TLS + Alloy.
+# ENV FILE SOURCE (deploy): deploy/vm-b/.env  (co-located with this file — env_file: [.env])
+#   Do NOT use the repo-root Confluence/.env or user_service/.env here.
+#   For local dev/testing use Confluence/docker-compose.local.yml instead.
 # NOT on Azure Container Apps — ACA's 240s ingress timeout would kill the 20-min
 # proposal-pipeline SSE. Caddy has no such cap.
 #

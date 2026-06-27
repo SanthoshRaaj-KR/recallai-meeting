@@ -1,7 +1,9 @@
 # All-in-one LOCAL run of the whole backend on one machine + one network.
-# Each service reads its OWN folder env (gitignored): the my-agent services use
-# my-agent/.env.local, org-service uses user_service/.env. For real deployment
-# use deploy/vm-a + deploy/vm-b instead (this file is for local dev/testing only).
+# ENV FILE SOURCES (local testing only — deploy uses deploy/vm-a/.env + deploy/vm-b/.env):
+#   my-agent services  →  my-agent/.env.local   (bot-service, agent, confluence-service)
+#   org-service        →  user_service/.env
+# For real deployment use deploy/vm-a + deploy/vm-b instead (those compose files each
+# read their co-located .env from the deploy folder, NOT from here).
 #
 #   docker compose -f docker-compose.local.yml up -d --build
 #   curl http://localhost:8000/health   # bot-service
