@@ -15,6 +15,7 @@ of scope for this Confluence v1; edits and in-section additions are covered.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import os
 import re
@@ -165,6 +166,59 @@ def _query_text(intent: ConfluenceIntent) -> str:
     ).strip()
 
 
+def _narrow_to_changed_lines(before: str, after: str) -> tuple[str, str]:
+    """Reduce a whole-section before/after to just the line(s) that changed.
+
+    The editor reproduces the ENTIRE section as before_content, so two edits to
+    different rows of one table/section share an identical before_content and
+    collapse into a single card in `_dedupe_same_row` — silently dropping all but
+    one. Narrowing each edit to only its changed line(s) gives different-row
+    sibling edits distinct anchors, and the review card shows just the changed
+    row. The narrowed text stays a valid (tighter) anchor for the storage
+    write-back — `apply_section_edit` re-derives the phrase diff and is scoped by
+    the proposal's section heading regardless.
+    """
+    b_lines = (before or "").splitlines()
+    a_lines = (after or "").splitlines()
+    if not b_lines or not a_lines:
+        return before, after
+    sm = difflib.SequenceMatcher(a=b_lines, b=a_lines, autojunk=False)
+    b_keep: list[str] = []
+    a_keep: list[str] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        b_keep.extend(b_lines[i1:i2])
+        a_keep.extend(a_lines[j1:j2])
+    nb = "\n".join(b_keep).strip()
+    na = "\n".join(a_keep).strip()
+    # Pure insertion/deletion (one side empty) or no line-level delta: keep the
+    # full text so the write-back still has both sides to diff against.
+    if not nb or not na:
+        return before, after
+    return nb, na
+
+
+def _changed_anchor(before: str, after: str) -> str:
+    """The normalized OLD text of the minimal word-diff between before and after.
+
+    Used as the de-dup key so two edits to DIFFERENT cells of the SAME row (e.g.
+    the Standard and Professional price in one pricing header row) — which share a
+    before line but change different words — are recognised as distinct and both
+    survive, while a true duplicate (same words changed) or a same-cell conflict
+    collapses to the best. Empty when nothing changed.
+    """
+    b = (before or "").split()
+    a = (after or "").split()
+    sm = difflib.SequenceMatcher(a=b, b=a, autojunk=False)
+    olds = [
+        " ".join(b[i1:i2])
+        for tag, i1, i2, _j1, _j2 in sm.get_opcodes()
+        if tag != "equal"
+    ]
+    return " ".join(olds).strip().lower()
+
+
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
 
@@ -287,7 +341,9 @@ async def propose(
     await _emit("ready_for_review")
     proposals: list[ConfluenceProposal] = []
     for (intent, chunk), draft, ver in zip(qualified, drafts, verifications):
-        before, after = draft.before_content, draft.after_content
+        # Narrow the editor's whole-section draft to just the changed line(s) so
+        # sibling edits to the same section no longer collide in _dedupe_same_row.
+        before, after = _narrow_to_changed_lines(draft.before_content, draft.after_content)
         if after.strip() == before.strip() or not _meaningful_change(before, after):
             logger.info("confluence_pipeline.propose: dropping no-op/trivial edit on %r", chunk.section_heading)
             continue
@@ -326,14 +382,24 @@ async def propose(
 
 
 def _dedupe_same_row(proposals: list[ConfluenceProposal]) -> list[ConfluenceProposal]:
-    """Keep the best `replace` per identical before-row; pass appends through."""
+    """Keep the best `replace` per (page, changed-phrase); pass appends through.
+
+    Keying on the CHANGED PHRASE (not the whole before-row) is what lets two edits
+    to different cells of the SAME row both survive — e.g. changing the Standard
+    AND the Professional price in one pricing header row, which share a before line
+    but alter different words. A true duplicate (same words changed) or a same-cell
+    conflict still shares an anchor and collapses to the highest-quality draft.
+    """
     best: dict[tuple[str, str], ConfluenceProposal] = {}
     passthrough: list[ConfluenceProposal] = []
     for p in proposals:
         if p.edit_type != "replace" or not (p.before_content or "").strip():
             passthrough.append(p)
             continue
-        key = (p.source_chunk.source_path, " ".join((p.before_content or "").split()).lower())
+        anchor = _changed_anchor(p.before_content or "", p.after_content or "")
+        if not anchor:  # no detectable change — fall back to the whole before-row
+            anchor = " ".join((p.before_content or "").split()).lower()
+        key = (p.source_chunk.source_path, anchor)
         cur = best.get(key)
         if cur is None or (p.quality_score, p.confidence) > (cur.quality_score, cur.confidence):
             best[key] = p
