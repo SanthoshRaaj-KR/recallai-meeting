@@ -264,25 +264,15 @@ class StartBotResponse(BaseModel):
 async def start_bot(body: StartBotRequest) -> StartBotResponse:
     room_name = body.room_name or body.session_id or str(uuid.uuid4())
 
-    try:
-        bot_id = _create_recall_bot(body.meeting_url, room_name)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except requests.HTTPError as exc:
-        err_body = exc.response.text if exc.response is not None else ""
-        raise HTTPException(status_code=502, detail=f"Recall.ai error: {exc} — {err_body}")
-
-    try:
-        await _dispatch_agent(room_name, confluence_enabled=body.confluence_enabled)
-    except Exception as exc:
-        logger.warning("Agent dispatch failed (non-fatal): %s", exc)
-
+    # Write the session BEFORE calling Recall so any webhook or frontend status
+    # poll that arrives in the gap between bot creation and this function
+    # completing always finds an existing session rather than a 404.
     now = _utcnow()
     session_data = {
         "session_id": room_name,
-        "bot_id": bot_id,
+        "bot_id": None,
         "meeting_url": body.meeting_url,
-        "status": "joining",
+        "status": "pending",
         "error": None,
         "changes": [],
         "transcript": [],
@@ -298,7 +288,26 @@ async def start_bot(body: StartBotRequest) -> StartBotResponse:
     }
     session_store.upsert(room_name, session_data)
     _compactors[room_name] = _new_compactor()
+
+    try:
+        bot_id = _create_recall_bot(body.meeting_url, room_name)
+    except RuntimeError as exc:
+        session_store.patch(room_name, {"status": "error", "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    except requests.HTTPError as exc:
+        err_body = exc.response.text if exc.response is not None else ""
+        session_store.patch(room_name, {"status": "error", "error": f"Recall.ai error: {exc}"})
+        raise HTTPException(status_code=502, detail=f"Recall.ai error: {exc} — {err_body}")
+
+    # Update index and session with the real bot_id immediately so the webhook
+    # handler can do an O(1) lookup even if it fires before we finish the rest.
     _bot_index[bot_id] = room_name
+    session_store.patch(room_name, {"bot_id": bot_id, "status": "joining"})
+
+    try:
+        await _dispatch_agent(room_name, confluence_enabled=body.confluence_enabled)
+    except Exception as exc:
+        logger.warning("Agent dispatch failed (non-fatal): %s", exc)
 
     return StartBotResponse(
         status="joining",
