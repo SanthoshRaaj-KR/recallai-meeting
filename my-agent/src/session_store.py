@@ -154,7 +154,8 @@ def get(session_id: str) -> dict | None:
                 if data:
                     _sqlite_set(session_id, data[0])
                     return data[0]
-                return None
+                # Supabase returned OK but empty — could be a transient consistency
+                # gap; fall through to the local SQLite cache before giving up.
         except Exception as exc:
             logger.warning("session_store.get remote failed: %s — using local cache", exc)
     return _sqlite_get(session_id)

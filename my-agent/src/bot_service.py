@@ -87,12 +87,14 @@ _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if
 _BOT_HTML_PATH = Path(__file__).parent / "bot.html"
 
 _RECALL_STATUS_MAP = {
-    "joining": "joining",
+    "joining_call": "joining",
+    "in_waiting_room": "joining",
     "in_call_not_recording": "in_meeting",
     "in_call_recording": "in_meeting",
+    "recording_permission_denied": "error",
     "done": "ended",
     "call_ended": "ended",
-    "error": "error",
+    "fatal": "error",
 }
 
 # ── App ────────────────────────────────────────────────────────────────────────
