@@ -22,6 +22,7 @@ from .models import ChangeIntent, EditMode, ExtractedMeeting, PageCandidate, Pro
 from .rag import ConfluenceVectorIndex, VectorSearchHit
 from .text_utils import (
     append_new_section,
+    apply_section_edit,
     extract_sections,
     format_transcript,
     html_to_text,
@@ -1636,6 +1637,13 @@ class ProposalPipeline:
             if not before:
                 return {"success": False, "message": "Replace proposal has no old text anchor."}
             new_html, replaced = replace_text_in_storage(page.html, before, after)
+            if not replaced:
+                # before/after may be a whole multi-block section (confluence_pipeline
+                # editor output) that single-block replace can't anchor; fall back to a
+                # section-scoped phrase-diff that edits values in place, tags preserved.
+                new_html, replaced = apply_section_edit(
+                    page.html, before, after, proposal.get("section_heading")
+                )
             if not replaced:
                 return {
                     "success": False,

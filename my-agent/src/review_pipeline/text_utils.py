@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import html
 import re
 from typing import Any
@@ -277,3 +278,272 @@ def replace_text_in_storage(storage_html: str, before: str, after: str) -> tuple
             replacement = f"<{tag}{attrs}>{escaped_after}</{tag}>"
             return f"{value[:match.start()]}{replacement}{value[match.end():]}", True
     return value, False
+
+
+# ── Section-scoped phrase-diff apply ──────────────────────────────────────────
+# replace_text_in_storage matches a single <p>/<td>/<li>/<h*> block, so it can't
+# apply a whole-section before/after (what the confluence_pipeline editor emits)
+# when the section spans several blocks (e.g. a table). apply_section_edit derives
+# the minimal changed phrases from before→after (word-level diff, with surrounding
+# context words as a disambiguating anchor) and replaces just those phrases inside
+# the located section's storage XHTML — so the wrapping tags are preserved and only
+# the changed values move. It only ever applies a replacement whose old text is
+# found verbatim, so a miss is a no-op (never corruption).
+
+_WORD_RE = re.compile(r"\S+")
+_MD_EDGE_TOKENS = {"#", "##", "###", "####", "#####", "######", "|", "-", "*", "**", "`", "```", ">", "+", "—", "–"}
+
+
+def _trim_md_edges(tokens: list[str]) -> list[str]:
+    lo, hi = 0, len(tokens)
+    while lo < hi and tokens[lo] in _MD_EDGE_TOKENS:
+        lo += 1
+    while hi > lo and tokens[hi - 1] in _MD_EDGE_TOKENS:
+        hi -= 1
+    return tokens[lo:hi]
+
+
+def _is_structural(token: str) -> bool:
+    """A markdown structural token (table pipe, heading/list marker) that has no
+    counterpart in storage text — context must not cross it."""
+    return "|" in token or token in _MD_EDGE_TOKENS
+
+
+def _expand_within_cell(tokens: list[str], lo: int, hi: int, ctx: int) -> list[str]:
+    """Pad [lo:hi] with up to `ctx` neighbouring *word* tokens, stopping at any
+    structural token so the anchor stays inside one table cell / line segment."""
+    left = lo
+    taken = 0
+    while left > 0 and taken < ctx and not _is_structural(tokens[left - 1]):
+        left -= 1
+        taken += 1
+    right = hi
+    taken = 0
+    while right < len(tokens) and taken < ctx and not _is_structural(tokens[right]):
+        right += 1
+        taken += 1
+    return tokens[left:right]
+
+
+def _contextual_replacements(before: str, after: str, ctx: int = 2) -> list[tuple[str, str]]:
+    """Minimal (old_phrase -> new_phrase) edits, each padded with `ctx` unchanged
+    words on either side (without crossing a table cell / markdown boundary) so the
+    anchor is specific enough to replace safely against storage text."""
+    b = _WORD_RE.findall(before or "")
+    a = _WORD_RE.findall(after or "")
+    sm = difflib.SequenceMatcher(a=b, b=a, autojunk=False)
+    pairs: list[tuple[str, str]] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        old = " ".join(_trim_md_edges(_expand_within_cell(b, i1, i2, ctx))).strip()
+        new = " ".join(_trim_md_edges(_expand_within_cell(a, j1, j2, ctx))).strip()
+        if old and old != new:
+            pairs.append((old, new))
+    return pairs
+
+
+def _locate_section_span(storage_html: str, section_heading: str) -> tuple[int, int] | None:
+    """Return (start, end) of the section under `section_heading` in storage HTML."""
+    target = normalize_for_match(section_heading)
+    if not target:
+        return None
+    matches = list(_HEADING_RE.finditer(storage_html))
+    for idx, match in enumerate(matches):
+        if normalize_for_match(html_to_text(match.group(2))) != target:
+            continue
+        level = int(match.group(1))
+        end = len(storage_html)
+        for nxt in matches[idx + 1:]:
+            if int(nxt.group(1)) <= level:
+                end = nxt.start()
+                break
+        return (match.start(), end)
+    return None
+
+
+def apply_section_edit(
+    storage_html: str,
+    before: str,
+    after: str,
+    section_heading: str | None = None,
+) -> tuple[str, bool]:
+    """Apply a whole-section before→after edit to storage XHTML, preserving tags.
+
+    Scopes to the named section when it can be found (so an ambiguous value isn't
+    changed elsewhere on the page), then replaces the minimal changed phrases —
+    each anchored with neighbouring unchanged words — wherever they appear verbatim
+    in that section. Returns (new_html, replaced). A miss leaves the HTML untouched.
+    """
+    value = storage_html or ""
+    if not before or before == after:
+        return value, False
+
+    start, end = 0, len(value)
+    if section_heading:
+        span = _locate_section_span(value, section_heading)
+        if span:
+            start, end = span
+    region = value[start:end]
+
+    applied = False
+    for old, new in _contextual_replacements(before, after):
+        new_text = html.escape(new, quote=False)  # the inserted value is page text
+        # Storage may hold the old text raw or entity-escaped (&amp;/&lt;); try both.
+        for candidate in (old, html.escape(old, quote=False)):
+            if candidate and candidate != new_text and candidate in region:
+                region = region.replace(candidate, new_text, 1)
+                applied = True
+                break
+    if not applied:
+        return value, False
+    return f"{value[:start]}{region}{value[end:]}", True
+
+
+# ── Confluence storage XHTML → clean markdown ─────────────────────────────────
+# The RAG/content layer must hold clean text/markdown only — no XHTML tags and no
+# Confluence macro chrome (``ac:`` / ``ri:`` / CDATA). Real storage tags are
+# reintroduced only at write-back time (see replace_text_in_storage /
+# insert_html_in_section / append_new_section / pipeline._storage_html), so the
+# original Confluence document still renders correctly after an accepted edit.
+
+_COMMENT_RE = re.compile(r"(?is)<!--.*?-->")
+_CDATA_RE = re.compile(r"(?is)<!\[CDATA\[(.*?)\]\]>")
+# Whole macros that carry no readable prose — drop the element and its body.
+_NOISE_MACRO_RE = re.compile(
+    r"(?is)<ac:structured-macro\b[^>]*\bac:name=\"(?:toc|children|pagetree|"
+    r"livesearch|recently-updated|recently-updated-dashboard|contributors|"
+    r"include|excerpt-include|gallery|profile-picture|widget|anchor|view-file|"
+    r"attachments)\"[^>]*>.*?</ac:structured-macro>"
+)
+# Config parameters inside macros (layout, language, …) — drop, keep macro body.
+_AC_PARAM_RE = re.compile(r"(?is)<ac:parameter\b[^>]*>.*?</ac:parameter>")
+_AC_MACRO_ID_RE = re.compile(r"(?is)<ac:macro-id\b[^>]*>.*?</ac:macro-id>")
+_AC_EMOTICON_RE = re.compile(r"(?is)<ac:emoticon\b[^>]*/?>")
+# Resource identifiers (attachment filenames, user keys, page refs) — drop.
+_RI_PAIR_RE = re.compile(r"(?is)<ri:[\w:-]+\b[^>]*>.*?</ri:[\w:-]+>")
+_RI_SELF_RE = re.compile(r"(?is)<ri:[\w:-]+\b[^>]*/?>")
+# Links: keep the human-readable anchor text, drop the ri:/href machinery.
+_AC_LINK_RE = re.compile(r"(?is)<ac:link\b[^>]*>(.*?)</ac:link>")
+_AC_LINK_BODY_RE = re.compile(
+    r"(?is)<ac:(?:link-body|plain-text-link-body)\b[^>]*>(.*?)</ac:(?:link-body|plain-text-link-body)>"
+)
+_RI_TITLE_RE = re.compile(r'(?is)ri:(?:content-title|filename|value)="([^"]*)"')
+
+
+def _ac_link_to_text(value: str) -> str:
+    def _repl(match: "re.Match[str]") -> str:
+        inner = match.group(1)
+        body = _AC_LINK_BODY_RE.search(inner)
+        if body and normalize_ws(_strip_tags(body.group(1))):
+            return f" {_strip_tags(body.group(1))} "
+        title = _RI_TITLE_RE.search(inner)
+        if title and title.group(1).strip():
+            return f" {title.group(1)} "
+        return " "
+
+    return _AC_LINK_RE.sub(_repl, value)
+
+
+def _strip_confluence_macros(value: str) -> str:
+    """Remove Confluence-specific macro/reference noise, keeping readable prose."""
+    text = value or ""
+    text = _COMMENT_RE.sub(" ", text)
+    text = _NOISE_MACRO_RE.sub(" ", text)
+    text = _ac_link_to_text(text)  # before stripping ri: (links wrap ri: refs)
+    text = _AC_PARAM_RE.sub(" ", text)
+    text = _AC_MACRO_ID_RE.sub(" ", text)
+    text = _AC_EMOTICON_RE.sub(" ", text)
+    text = _RI_PAIR_RE.sub(" ", text)
+    text = _RI_SELF_RE.sub(" ", text)
+    # Keep code/plain-text bodies (CDATA) as literal text for downstream conversion.
+    # Escape only & < > (not quotes) so embedded "<" can't reopen tag parsing while
+    # code stays readable.
+    text = _CDATA_RE.sub(lambda m: html.escape(m.group(1), quote=False), text)
+    # Drop any stray CDATA markers left by malformed/legacy storage.
+    text = text.replace("<![CDATA[", " ").replace("]]>", " ")
+    return text
+
+
+def clean_inline_text(value: str) -> str:
+    """Clean a short inline string (e.g. a section heading) to tag-free plain text."""
+    return normalize_ws(_strip_tags(_strip_confluence_macros(value or "")))
+
+
+def _html_to_markdown_fallback(value: str) -> str:
+    """Dependency-free HTML→markdown used when ``markdownify`` is unavailable.
+
+    Preserves ATX headings, bullet lists and one-line table rows so the section
+    chunker can still split a page and the editor can make per-row edits. Never
+    emits a raw tag.
+    """
+    text = value or ""
+    for lvl in range(1, 7):
+        text = re.sub(
+            rf"(?is)<h{lvl}\b[^>]*>(.*?)</h{lvl}>",
+            lambda m, _l=lvl: "\n" + "#" * _l + " " + normalize_ws(_strip_tags(m.group(1))) + "\n",
+            text,
+        )
+    text = re.sub(
+        r"(?is)<li\b[^>]*>(.*?)</li>",
+        lambda m: "\n- " + normalize_ws(_strip_tags(m.group(1))),
+        text,
+    )
+
+    def _row(match: "re.Match[str]") -> str:
+        cells = re.findall(r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>", match.group(1))
+        if not cells:
+            return "\n"
+        return "\n| " + " | ".join(normalize_ws(_strip_tags(c)) for c in cells) + " |"
+
+    text = re.sub(r"(?is)<tr\b[^>]*>(.*?)</tr>", _row, text)
+    text = re.sub(r"(?is)</(p|div|table|ul|ol)\s*>", "\n\n", text)
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    lines = [normalize_ws(ln) for ln in text.splitlines()]
+    out: list[str] = []
+    for ln in lines:
+        if ln or (out and out[-1] != ""):
+            out.append(ln)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
+def looks_like_storage_html(value: str) -> bool:
+    """True if the text still carries XHTML/Confluence-storage tags worth cleaning."""
+    return bool(
+        re.search(r"</?(?:ac:|ri:|p|div|span|h[1-6]|table|tr|td|th|ul|ol|li|br)\b", value or "")
+    )
+
+
+def storage_to_markdown(storage_html: str, title: str = "") -> str:
+    """Convert Confluence storage XHTML to clean markdown (no tags, no macro noise).
+
+    Pipeline: strip ``ac:``/``ri:``/CDATA macro noise → convert standard HTML to
+    markdown (``markdownify`` when importable, else a dependency-free fallback that
+    keeps ``#`` headings for the chunker) → guarantee a level-1 ``# {title}``. The
+    output is what gets embedded, retrieved, evaluated, edited and shown on review
+    cards; it is deliberately tag-free.
+    """
+    cleaned = _strip_confluence_macros(storage_html or "")
+    try:
+        from markdownify import markdownify as _md
+
+        markdown = _md(
+            cleaned,
+            heading_style="ATX",
+            strip=["span"],
+            escape_asterisks=False,
+            escape_underscores=False,
+            escape_misc=False,
+        ).strip()
+    except ImportError:
+        markdown = _html_to_markdown_fallback(cleaned)
+    # Belt-and-suspenders: never let a raw tag survive into the indexed text.
+    if re.search(r"<[^>]+>", markdown):
+        markdown = _strip_tags(markdown)
+    markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
+    title = normalize_ws(title)
+    if title and not markdown.lstrip().startswith("# "):
+        markdown = f"# {title}\n\n{markdown}"
+    return markdown

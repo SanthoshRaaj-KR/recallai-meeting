@@ -40,6 +40,22 @@ says "Metrics for this area are reported every two weeks", even if that section 
 "Postmortems" or "Overview"). A specific, on-topic heading is a bonus, not a requirement;
 never penalise a section that contains the exact sentence the change targets.
 
+BOILERPLATE GUARD — name-dropping the topic is NOT enough. The right section must actually
+CONTAIN the concrete thing the change modifies or attaches to: the specific value, number,
+price, duration, response time, parameter, named method, rule, or the table row / list /
+enumerated field of that kind. A section that only describes the topic AREA in generic,
+templated, or boilerplate prose — mentioning the subject by name but stating NO concrete
+value, figure, parameter, rule, or list of the relevant kind — is the WRONG target: score
+it 0.2-0.4 even though the topic word appears. Examples of boilerplate that must score LOW
+for a value/spec change: "Training on this topic is delivered on a rolling basis and tracked
+to completion", "Responsibilities and limits for response SLA are set out in this section",
+"Owners must keep the document store aligned with the thresholds described here". Contrast
+with a RIGHT target, which states the actual fact: "Training duration: 8 hours", a response
+table with "P1 — 4 hours", "Output dimension: 364 features". Reserve 0.7+ for a section that
+holds the real fact/field/row being changed (or, for an ADDITION, the actual list/table/count
+the new item joins) — not merely the subject's name. This still obeys the rule above: when the
+concrete fact IS present, score on topic match and never lower it for a differing value.
+
 DOCUMENT MATCH IS DECISIVE for disambiguation. If the speaker named a specific document,
 page, company, or organization (see "Spoken context"/topic) AND the candidate's "Document"
 CLEARLY belongs to a DIFFERENT company/organization, score 0.0-0.3 even if the topic,
