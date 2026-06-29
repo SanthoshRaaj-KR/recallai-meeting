@@ -53,6 +53,9 @@ def _url(table: str) -> str:
 def _transcript_text(session: dict, limit_chars: int = 16000) -> str:
     entries = session.get("transcript") or []
     if isinstance(entries, list) and entries:
+        recall = [e for e in entries if isinstance(e, dict) and e.get("source") == "recall"]
+        if recall:
+            entries = recall
         lines = []
         for e in entries:
             if isinstance(e, dict):

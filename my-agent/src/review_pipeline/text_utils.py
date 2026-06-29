@@ -29,9 +29,21 @@ def html_to_text(value: str) -> str:
     return text
 
 
+def _prefer_recall(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return Recall-diarized entries when present, else all entries.
+
+    Keeps the post-meeting pipeline on real speaker names from AssemblyAI
+    while staying backwards-compatible with sessions recorded before
+    Recall transcription was enabled.
+    """
+    recall = [e for e in entries if e.get("source") == "recall"]
+    return recall if recall else entries
+
+
 def format_transcript(transcript: list[dict[str, Any]], max_chars: int = 60000) -> str:
+    entries = _prefer_recall(transcript)
     lines: list[str] = []
-    for entry in transcript:
+    for entry in entries:
         speaker = entry.get("participant") or entry.get("speaker") or "Speaker"
         text = normalize_ws(str(entry.get("text") or entry.get("content") or ""))
         if text:
@@ -65,8 +77,9 @@ def transcript_highlights(transcript: list[dict[str, Any]], limit: int = 500) ->
         except (TypeError, ValueError):
             pass
 
+    entries = _prefer_recall(transcript)
     highlights = []
-    for idx, entry in enumerate(transcript[-limit:]):
+    for idx, entry in enumerate(entries[-limit:]):
         ts = entry.get("timestamp")
         try:
             ts_f = float(ts)

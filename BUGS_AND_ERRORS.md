@@ -50,7 +50,7 @@
 
 ---
 
-## BUG-4 — Architecture: Recall diarized transcript must be the source of truth for logs
+## BUG-4 — Architecture: Recall diarized transcript must be the source of truth for logs ✅ FIXED (post-meeting pipeline uses recall entries; live agent pipeline unchanged)
 
 **Symptom:** Transcript entries stored in `jarvis_sessions.transcript` (which feed the Confluence proposal pipeline — decisions, changes, action items) come from LiveKit with `participant: "Meeting"` — no real speaker names, no diarization.
 

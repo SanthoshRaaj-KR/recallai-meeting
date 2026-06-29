@@ -212,6 +212,27 @@ def _create_recall_bot(meeting_url: str, room_name: str) -> str:
         "output_media": {
             "camera": {"kind": "webpage", "config": {"url": bot_page_url}},
         },
+        "recording_config": {
+            "transcript": {
+                "provider": {
+                    "assembly_ai_v3_streaming": {
+                        "language_code": "en",
+                    },
+                },
+                "diarization": {
+                    # Separate audio streams per participant give AssemblyAI
+                    # the cleanest signal for speaker attribution.
+                    "use_separate_streams_when_available": True,
+                },
+            },
+            "realtime_endpoints": [
+                {
+                    "type": "webhook",
+                    "url": f"{SERVER_URL}/recall-webhook",
+                    "events": ["transcript.data"],
+                },
+            ],
+        },
     }
 
     response = requests.post(
@@ -552,6 +573,52 @@ async def recall_webhook(request: Request) -> dict:
                     if new_status == "ended":
                         org_activity.record_meeting_activity({**s, **updates})
                         _bg_extract_action_items({**s, **updates})
+
+    # ── Recall real-time diarized transcript (AssemblyAI v3 via Recall native) ──
+    # Recall fires transcript.data for each finalized utterance with participant
+    # name and diarized words. We store these as the authoritative transcript
+    # for the post-meeting Confluence pipeline (decisions, changes, action items).
+    # The LiveKit STT pipeline (/livekit-transcript) is left untouched — it still
+    # feeds the agent's real-time voice responses.
+    elif event == "transcript.data":
+        bot_id = (data.get("bot") or {}).get("id", "")
+        if bot_id:
+            session_id = _bot_index.get(bot_id)
+            s = session_store.get(session_id) if session_id else None
+            if s is None:
+                all_sessions = session_store.list_all()
+                s = next((x for x in all_sessions if x.get("bot_id") == bot_id), None)
+                if s:
+                    _bot_index[bot_id] = s["session_id"]
+            if s:
+                inner = data.get("data") or {}
+                participant = inner.get("participant") or {}
+                speaker_name = (
+                    participant.get("name")
+                    or f"Speaker {participant.get('id', '?')}"
+                )
+                words = inner.get("words") or []
+                text = " ".join(w.get("text", "") for w in words).strip()
+                if text:
+                    first_word = words[0] if words else {}
+                    ts_obj = first_word.get("start_timestamp") or {}
+                    timestamp = ts_obj.get("relative") or datetime.datetime.utcnow().timestamp()
+
+                    entry = {
+                        "participant": speaker_name,
+                        "text": text,
+                        "timestamp": timestamp,
+                        "source": "recall",
+                    }
+                    transcript = list(s.get("transcript") or [])
+                    transcript.append(entry)
+                    if len(transcript) > 2000:
+                        transcript = transcript[-2000:]
+                    session_store.patch(s["session_id"], {"transcript": transcript})
+                    logger.debug(
+                        "Recall transcript → session %s speaker=%s len=%d",
+                        s["session_id"], speaker_name, len(words),
+                    )
 
     return {"ok": True}
 
