@@ -14,17 +14,20 @@ router = APIRouter(prefix="/invites", tags=["invites"])
 
 
 def _load_and_validate(code: str) -> dict:
-    invite = select_one("org_team_invitations", {"code": f"eq.{code}", "status": "eq.pending"})
+    invite = select_one("org_team_invitations", {"code": f"eq.{code}"})
     if not invite:
-        raise HTTPException(404, "Invite not found or already used")
+        raise HTTPException(404, "Invite not found. Check the code and try again.")
+    if invite["status"] == "accepted":
+        raise HTTPException(410, "This invite has already been used.")
+    if invite["status"] != "pending":
+        raise HTTPException(404, "Invite not found. Check the code and try again.")
     expires = dt.datetime.fromisoformat(invite["expires_at"].replace("Z", "+00:00"))
     if dt.datetime.now(dt.timezone.utc) > expires:
-        # Hard-delete expired invites (codes must not linger in the DB).
         try:
             delete("org_team_invitations", {"code": f"eq.{code}"})
         except Exception:
             pass
-        raise HTTPException(410, "This invite has expired")
+        raise HTTPException(410, "This invite has expired. Ask the team admin to send a new one.")
     return invite
 
 
