@@ -2,23 +2,22 @@
 
 ---
 
-## BUG-1 — 404 on bot join (transient, self-resolves in seconds)
+## BUG-1 — 404 on bot join ✅ FIXED
 
-**Symptom:** Frontend sees a 404 immediately after `/bot/start`, then the bot enters the meeting and works normally within a few seconds.
+**Symptom:** Frontend sees a 404 immediately after `/bot/start`, then the bot enters the meeting and works normally within a few seconds. Also: mid-meeting "Backend connection issue" 404 during waiting room.
 
-**Root cause:** Race condition between the bot being created and the session being queryable.
+**Root cause (two issues):**
+1. Race condition: `session_store.upsert` + `_bot_index` were written AFTER `_create_recall_bot()` returned, so Recall's instant webhook and frontend polls had nothing to find.
+2. `session_store.get()` returned `None` on Supabase 200+empty-array without falling back to SQLite local cache — transient Supabase hiccup = 404.
+3. `_RECALL_STATUS_MAP` had wrong keys (`"joining"` / `"error"` instead of `"joining_call"` / `"fatal"`); `"in_waiting_room"` was missing entirely.
 
-The sequence is:
-1. `/bot/start` calls `_create_recall_bot()` → Recall creates the bot and immediately fires a `bot.status_change` webhook back.
-2. The webhook handler at `/recall-webhook` receives `bot_id` and does `_bot_index.get(bot_id)` / `session_store.get(session_id)`.
-3. **BUT** `session_store.upsert(room_name, session_data)` and `_bot_index[bot_id] = room_name` happen AFTER `_create_recall_bot()` returns — i.e. AFTER Recall already fired the webhook.
-4. So if the frontend polls `/sessions/{session_id}/bot/status` in that narrow window (before `upsert` completes), the session doesn't exist yet → 404.
+**Fix applied:**
+- `bot_service.py` `start_bot()`: session upserted with `status:"pending"` BEFORE `_create_recall_bot()`; `_bot_index` + patch to `status:"joining"` set immediately after bot_id is known.
+- `session_store.py` `get()`: removed early `return None` when Supabase returns empty; now falls through to `_sqlite_get()`.
+- `_RECALL_STATUS_MAP` corrected: `joining_call`, `in_waiting_room`, `fatal`, `recording_permission_denied` added/fixed.
+- `types.ts` `BotStatus`: added `"pending"` to the union.
 
-The bot is already in the meeting by the time the session is written to Supabase; a re-poll a few seconds later succeeds.
-
-**Fix (do later):** Write the session record to `session_store` BEFORE calling `_create_recall_bot()`, so any webhook or status poll that arrives immediately has something to find. Move the `upsert` above the Recall API call with `status: "pending"`.
-
-**File:** `my-agent/src/bot_service.py` — `start_bot()` around line 264–305.
+**Bot kick verified working post-fix. ✅**
 
 ---
 
