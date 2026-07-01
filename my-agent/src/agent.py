@@ -20,6 +20,7 @@ from livekit.agents import (
     ModelSettings,
     StopResponse,
     cli,
+    inference,
     llm,
     mcp,
     room_io,
@@ -33,12 +34,10 @@ from typing import AsyncIterable
 try:
     from .memory_compaction import TranscriptCompactor
     from .confluence_rag import ConfluenceLiveRAG
-    from .edge_tts_plugin import EdgeTTS
     from . import session_store
 except ImportError:  # Allows `python src/agent.py ...` from my-agent.
     from memory_compaction import TranscriptCompactor
     from confluence_rag import ConfluenceLiveRAG
-    from edge_tts_plugin import EdgeTTS
     import session_store
 
 logger = logging.getLogger("agent")
@@ -763,7 +762,7 @@ async def my_agent(ctx: JobContext):
                 model="nova-3",
                 language="en",
             ),
-            tts=EdgeTTS(),
+            tts=inference.TTS(model="deepgram/aura-2", voice="athena", language="en"),
             turn_detection=turn_detector,
             vad=ctx.proc.userdata["vad"],
         )
@@ -800,7 +799,7 @@ async def my_agent(ctx: JobContext):
             language="en",
             keyterm=["Jarvis", "Hey Jarvis"],
         ),
-        tts=EdgeTTS(),
+        tts=inference.TTS(model="deepgram/aura-2", voice="athena", language="en"),
         turn_detection=turn_detector,
         vad=ctx.proc.userdata["vad"],
         # Disabled: on_user_turn_completed always rewrites or clears the message,
