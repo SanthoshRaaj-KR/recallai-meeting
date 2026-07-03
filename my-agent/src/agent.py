@@ -65,6 +65,14 @@ _WAKE_PATTERN = re.compile(
     r"(?:hey\s+)?(?:jarvis|jarvas|jervis|jarvus)[,.\s!?]*\s*(.*)",
     re.IGNORECASE | re.DOTALL,
 )
+# ── Audio primer ──────────────────────────────────────────────────────────────
+# Silent audio frames injected into the first TTS output to prime the WebRTC
+# connection and jitter buffer before the greeting is heard.
+# 24 kHz, 16-bit PCM — matches deepgram/aura-2 output.  10 ms chunks × N.
+_SILENCE_PRIMER_SAMPLE_RATE = 24_000
+_SILENCE_PRIMER_CHUNK_SAMPLES = _SILENCE_PRIMER_SAMPLE_RATE // 100  # 10 ms
+_SILENCE_PRIMER_FRAMES = max(1, int(os.getenv("JARVIS_SILENCE_PRIMER_MS", "500")) // 10)
+
 # Full in-memory transcript buffer — all utterances are kept here.
 _TRANSCRIPT_MAX = 500
 # ── Sliding window limits ─────────────────────────────────────────────────────
@@ -281,6 +289,9 @@ class Assistant(Agent):
         # chat history never accumulates multiple embedded transcripts.
         self._transcript_msg_id: str | None = None
         self._opening_greeting_task: asyncio.Task | None = None
+        # Flipped to True just before the opening TTS call so the first audio
+        # output is prefixed with silence to prime the WebRTC jitter buffer.
+        self._should_prime_audio: bool = False
 
     async def on_enter(self) -> None:
         # Do NOT call session.generate_reply() here directly.
@@ -335,6 +346,7 @@ class Assistant(Agent):
         # from a meeting participant is served without cold-start latency.
         if _OPENING_GREETING_DELAY_S > 0:
             await asyncio.sleep(_OPENING_GREETING_DELAY_S)
+        self._should_prime_audio = True
         try:
             logger.info("Sending warmup intro prompt to LLM pipeline")
             handle = self.session.generate_reply(
@@ -491,6 +503,17 @@ class Assistant(Agent):
         model_settings: ModelSettings,
     ) -> AsyncIterable[rtc.AudioFrame]:
         """Spy on text sent to TTS so Jarvis's spoken replies are added to the transcript."""
+        if self._should_prime_audio:
+            self._should_prime_audio = False
+            _silence = rtc.AudioFrame(
+                data=bytes(_SILENCE_PRIMER_CHUNK_SAMPLES * 2),
+                sample_rate=_SILENCE_PRIMER_SAMPLE_RATE,
+                num_channels=1,
+                samples_per_channel=_SILENCE_PRIMER_CHUNK_SAMPLES,
+            )
+            for _ in range(_SILENCE_PRIMER_FRAMES):
+                yield _silence
+
         collected: list[str] = []
 
         async def _spy(source: AsyncIterable[str]) -> AsyncIterable[str]:
