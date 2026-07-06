@@ -245,6 +245,56 @@ def test_rag_upsert_skips_unchanged_page_and_reindexes_changed_page():
     assert index.fake_index.vectors["page-1:0"]["fields"]["chunk_count"] == 1
 
 
+def test_rag_reindex_only_rebuilds_changed_chunks(monkeypatch):
+    """A section edit re-enriches only the changed chunk (plus the :0 freshness
+    sentinel); unchanged chunks are reused, skipping their enrichment/re-embed."""
+    monkeypatch.setattr("review_pipeline.rag._CONTEXTUAL_ENRICHMENT", True)
+    index = LocalVectorIndex()
+    enriched: list[str] = []
+    monkeypatch.setattr(
+        index,
+        "_generate_chunk_context",
+        lambda chunk: (enriched.append(chunk.id) or "ctx"),
+    )
+
+    page = PageCandidate(
+        page_id="p1",
+        title="Doc",
+        html=(
+            "<h2>Alpha</h2><p>first section original</p>"
+            "<h2>Bravo</h2><p>second section original</p>"
+            "<h2>Charlie</h2><p>third section original</p>"
+        ),
+        version=1,
+    )
+    index.upsert_page(page)
+    assert sorted(enriched) == ["p1:0", "p1:1", "p1:2"]  # initial index enriches all
+
+    enriched.clear()
+    index.fake_index.upsert_calls = 0
+    changed = PageCandidate(
+        page_id="p1",
+        title="Doc",
+        html=(
+            "<h2>Alpha</h2><p>first section original</p>"
+            "<h2>Bravo</h2><p>second section UPDATED</p>"
+            "<h2>Charlie</h2><p>third section original</p>"
+        ),
+        version=2,
+    )
+    index.upsert_page(changed)
+
+    # Bravo (:1) changed -> re-enriched; :0 always rebuilt (sentinel); Charlie (:2)
+    # unchanged -> reused, NOT re-enriched.
+    assert "p1:1" in enriched
+    assert "p1:2" not in enriched
+    assert set(enriched) <= {"p1:0", "p1:1"}
+    assert index.fake_index.upsert_calls == 1  # only rebuilt chunks upserted
+    assert index.fake_index.vectors["p1:0"]["fields"]["version"] == 2  # sentinel advanced
+    assert index.fake_index.vectors["p1:1"]["fields"]["version"] == 2  # changed chunk updated
+    assert "UPDATED" in index.fake_index.vectors["p1:1"]["fields"]["text"]
+
+
 def test_vector_rag_search_with_rerank_finds_metric_page(monkeypatch):
     pipeline = ProposalPipeline()
     pipeline._client = VectorOnlyConfluenceClient()
@@ -525,6 +575,50 @@ def test_execute_replace_handles_text_wrapped_in_block():
     assert result["success"] is True
     assert "3rd December" in fake.updated_html
     assert "2nd September" not in fake.updated_html
+
+
+def test_execute_schedules_rag_index_off_critical_path():
+    """Accept returns as soon as the Confluence write lands; the RAG re-index runs
+    after, off the request's critical path (freshness is best-effort)."""
+    import threading
+
+    indexed = threading.Event()
+
+    class SlowRag:
+        enabled = True
+
+        def upsert_page(self, page):
+            indexed.set()
+
+    async def scenario():
+        pipeline = ProposalPipeline()
+        fake = FakeConfluenceClient()
+        pipeline._client = fake
+        pipeline._rag = SlowRag()
+        proposal = {
+            "change_type": "edit",
+            "page_id": "page-1",
+            "page_title": "Q3 Meeting Plan",
+            "section_heading": "Timeline",
+            "before_content": "The Q3 meeting plan is currently scheduled for 2nd September.",
+            "after_content": "The Q3 meeting plan is currently scheduled for 3rd December.",
+            "edit_mode": "replace",
+        }
+
+        result = await pipeline.execute(proposal)
+
+        # The Confluence write is already applied and success is returned…
+        assert result["success"] is True
+        assert "3rd December" in fake.updated_html
+        # …but the RAG re-index was scheduled, not awaited.
+        assert pipeline._bg_tasks, "re-index must be scheduled as a background task"
+        assert not indexed.is_set(), "execute must not block on the RAG re-index"
+
+        # Draining the loop lets the background index complete.
+        await asyncio.gather(*list(pipeline._bg_tasks))
+        assert indexed.is_set()
+
+    asyncio.run(scenario())
 
 
 class TaskConfluenceClient:

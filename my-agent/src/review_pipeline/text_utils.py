@@ -338,22 +338,48 @@ def _expand_within_cell(tokens: list[str], lo: int, hi: int, ctx: int) -> list[s
     return tokens[left:right]
 
 
-def _contextual_replacements(before: str, after: str, ctx: int = 2) -> list[tuple[str, str]]:
-    """Minimal (old_phrase -> new_phrase) edits, each padded with `ctx` unchanged
-    words on either side (without crossing a table cell / markdown boundary) so the
-    anchor is specific enough to replace safely against storage text."""
+def _strip_inline_md(text: str) -> str:
+    """Drop markdown emphasis/code markers (``*``, ``**``, `` ` ``) so a markdown-derived
+    anchor matches the plain inner text inside storage tags — e.g. ``*$8/device/year*``
+    matches the text inside ``<em>$8/device/year</em>``."""
+    return re.sub(r"[*`]+", "", text)
+
+
+def _change_anchors(before: str, after: str, ctx: int = 2) -> list[list[tuple[str, str]]]:
+    """For each change between before->after, an ordered list of (old, new) anchor
+    candidates, most specific first: (1) the contextual phrase — the changed words padded
+    with `ctx` unchanged neighbours without crossing a table cell / markdown boundary;
+    (2) the same phrase with markdown emphasis stripped; (3) the bare changed value alone,
+    emphasis stripped. apply_section_edit tries them in order and applies the first found
+    verbatim in the section. The context form is preferred (safest), but a value wrapped in
+    tags (``<em>``) or split from its label by ``<br/>`` — where the contextual markdown
+    phrase has no literal counterpart in storage — still anchors on the bare value."""
     b = _WORD_RE.findall(before or "")
     a = _WORD_RE.findall(after or "")
     sm = difflib.SequenceMatcher(a=b, b=a, autojunk=False)
-    pairs: list[tuple[str, str]] = []
+    changes: list[list[tuple[str, str]]] = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             continue
-        old = " ".join(_trim_md_edges(_expand_within_cell(b, i1, i2, ctx))).strip()
-        new = " ".join(_trim_md_edges(_expand_within_cell(a, j1, j2, ctx))).strip()
-        if old and old != new:
-            pairs.append((old, new))
-    return pairs
+        forms = (
+            (  # contextual phrase (padded within the cell)
+                " ".join(_trim_md_edges(_expand_within_cell(b, i1, i2, ctx))).strip(),
+                " ".join(_trim_md_edges(_expand_within_cell(a, j1, j2, ctx))).strip(),
+            ),
+            (  # bare changed tokens, no context
+                " ".join(_trim_md_edges(b[i1:i2])).strip(),
+                " ".join(_trim_md_edges(a[j1:j2])).strip(),
+            ),
+        )
+        candidates: list[tuple[str, str]] = []
+        for old, new in forms:
+            for pair in ((old, new), (_strip_inline_md(old), _strip_inline_md(new))):
+                o, n = pair
+                if o and o != n and pair not in candidates:
+                    candidates.append(pair)
+        if candidates:
+            changes.append(candidates)
+    return changes
 
 
 def _locate_section_span(storage_html: str, section_heading: str) -> tuple[int, int] | None:
@@ -400,13 +426,19 @@ def apply_section_edit(
     region = value[start:end]
 
     applied = False
-    for old, new in _contextual_replacements(before, after):
-        new_text = html.escape(new, quote=False)  # the inserted value is page text
-        # Storage may hold the old text raw or entity-escaped (&amp;/&lt;); try both.
-        for candidate in (old, html.escape(old, quote=False)):
-            if candidate and candidate != new_text and candidate in region:
-                region = region.replace(candidate, new_text, 1)
-                applied = True
+    for anchor_ladder in _change_anchors(before, after):
+        # Try candidates most-specific first; stop this change at the first that lands.
+        for old, new in anchor_ladder:
+            new_text = html.escape(new, quote=False)  # the inserted value is page text
+            # Storage may hold the old text raw or entity-escaped (&amp;/&lt;); try both.
+            hit = False
+            for candidate in (old, html.escape(old, quote=False)):
+                if candidate and candidate != new_text and candidate in region:
+                    region = region.replace(candidate, new_text, 1)
+                    applied = True
+                    hit = True
+                    break
+            if hit:
                 break
     if not applied:
         return value, False
