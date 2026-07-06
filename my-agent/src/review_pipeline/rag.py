@@ -152,39 +152,49 @@ class ConfluenceVectorIndex:
         if not chunks:
             return
         index = self._index()
+        chunk_hashes = [self._chunk_hash(chunk) for chunk in chunks]
+        # Incremental re-index: only rebuild chunks whose text changed, so an edit to
+        # one section skips the per-chunk enrichment LLM call + re-embed for every
+        # unchanged chunk. Chunk :0 is always rebuilt because its content_hash/version
+        # is the page-level freshness sentinel checked by _indexed_page_is_fresh.
+        existing = self._fetch_existing_chunk_hashes(page.page_id, len(chunks))
+        rebuild = [
+            i for i, chunk in enumerate(chunks) if i == 0 or existing.get(chunk.id) != chunk_hashes[i]
+        ]
         # Contextual enrichment (MY_AGENT_RAG_CONTEXTUAL_ENRICHMENT=1): prepend an
         # LLM-generated context summary to chunk_text before embedding. Reduces
         # retrieval failure by 35-67% for generic-heading sections (Anthropic, 2024).
-        if _CONTEXTUAL_ENRICHMENT:
-            embed_texts: list[str] = []
-            for chunk in chunks:
+        records = []
+        for i in rebuild:
+            chunk = chunks[i]
+            if _CONTEXTUAL_ENRICHMENT:
                 try:
                     ctx = self._generate_chunk_context(chunk)
-                    embed_texts.append((ctx + "\n" + self._embedding_text(chunk))[: self.max_metadata_chars])
+                    embed_text = (ctx + "\n" + self._embedding_text(chunk))[: self.max_metadata_chars]
                 except Exception as exc:
                     logger.warning("Context generation failed for chunk %s: %s", chunk.id, exc)
-                    embed_texts.append(self._embedding_text(chunk)[: self.max_metadata_chars])
-        else:
-            embed_texts = [self._embedding_text(chunk)[: self.max_metadata_chars] for chunk in chunks]
-        # Integrated index: Pinecone embeds `chunk_text` server-side (llama-text-embed-v2).
-        # `text` is stored as display metadata; `chunk_text` is what gets embedded.
-        records = [
-            {
-                "_id": chunk.id,
-                "chunk_text": embed_text,
-                "text": chunk.text[: self.max_metadata_chars],
-                "page_id": chunk.page_id,
-                "title": chunk.title,
-                "space_key": chunk.space_key,
-                "heading": chunk.heading,
-                "section_order": chunk.section_order,
-                "chunk_order": chunk.chunk_order,
-                "version": chunk.version or 0,
-                "content_hash": content_hash,
-                "chunk_count": len(chunks),
-            }
-            for chunk, embed_text in zip(chunks, embed_texts)
-        ]
+                    embed_text = self._embedding_text(chunk)[: self.max_metadata_chars]
+            else:
+                embed_text = self._embedding_text(chunk)[: self.max_metadata_chars]
+            # Integrated index: Pinecone embeds `chunk_text` server-side (llama-text-embed-v2).
+            # `text` is stored as display metadata; `chunk_text` is what gets embedded.
+            records.append(
+                {
+                    "_id": chunk.id,
+                    "chunk_text": embed_text,
+                    "text": chunk.text[: self.max_metadata_chars],
+                    "page_id": chunk.page_id,
+                    "title": chunk.title,
+                    "space_key": chunk.space_key,
+                    "heading": chunk.heading,
+                    "section_order": chunk.section_order,
+                    "chunk_order": chunk.chunk_order,
+                    "version": chunk.version or 0,
+                    "content_hash": content_hash,
+                    "chunk_hash": chunk_hashes[i],
+                    "chunk_count": len(chunks),
+                }
+            )
         for start in range(0, len(records), 96):
             index.upsert_records(namespace=self.namespace, records=records[start : start + 96])
         self._delete_stale_chunks(page.page_id, len(chunks))
@@ -497,6 +507,43 @@ class ConfluenceVectorIndex:
             ]
         )
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def _chunk_hash(self, chunk: PageChunk) -> str:
+        """Hash of the inputs that drive a chunk's embedding + enrichment (title,
+        heading, space, text). Unchanged hash -> the indexed chunk is still valid,
+        so it can be reused without re-enriching or re-embedding."""
+        value = "\n".join(
+            [chunk.title or "", chunk.heading or "", chunk.space_key or "", chunk.text or ""]
+        )
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def _fetch_existing_chunk_hashes(self, page_id: str, count: int) -> dict[str, str]:
+        """Return {chunk_id: chunk_hash} for the currently-indexed chunks of a page.
+
+        Used to decide which chunks actually changed. On any error (or an index that
+        predates chunk_hash) it returns {}, so upsert_page falls back to a full rebuild."""
+        if not page_id or count <= 0:
+            return {}
+        ids = [f"{page_id}:{idx}" for idx in range(count)]
+        try:
+            result = self._index().fetch(ids=ids, namespace=self.namespace)
+        except Exception as exc:
+            logger.debug("Vector RAG chunk-hash fetch failed for %s: %s", page_id, exc)
+            return {}
+        if isinstance(result, dict):
+            records = result.get("vectors") or result.get("records") or {}
+        else:
+            records = getattr(result, "vectors", None) or getattr(result, "records", None) or {}
+        hashes: dict[str, str] = {}
+        for chunk_id, record in records.items():
+            if isinstance(record, dict):
+                fields = record.get("metadata") or record.get("fields") or {}
+            else:
+                fields = getattr(record, "metadata", None) or getattr(record, "fields", None) or {}
+            chunk_hash = str(fields.get("chunk_hash") or "")
+            if chunk_hash:
+                hashes[str(chunk_id)] = chunk_hash
+        return hashes
 
 
     # ── Incremental sync ──────────────────────────────────────────────────────

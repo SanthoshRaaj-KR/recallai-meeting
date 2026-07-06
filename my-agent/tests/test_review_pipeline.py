@@ -245,6 +245,56 @@ def test_rag_upsert_skips_unchanged_page_and_reindexes_changed_page():
     assert index.fake_index.vectors["page-1:0"]["fields"]["chunk_count"] == 1
 
 
+def test_rag_reindex_only_rebuilds_changed_chunks(monkeypatch):
+    """A section edit re-enriches only the changed chunk (plus the :0 freshness
+    sentinel); unchanged chunks are reused, skipping their enrichment/re-embed."""
+    monkeypatch.setattr("review_pipeline.rag._CONTEXTUAL_ENRICHMENT", True)
+    index = LocalVectorIndex()
+    enriched: list[str] = []
+    monkeypatch.setattr(
+        index,
+        "_generate_chunk_context",
+        lambda chunk: (enriched.append(chunk.id) or "ctx"),
+    )
+
+    page = PageCandidate(
+        page_id="p1",
+        title="Doc",
+        html=(
+            "<h2>Alpha</h2><p>first section original</p>"
+            "<h2>Bravo</h2><p>second section original</p>"
+            "<h2>Charlie</h2><p>third section original</p>"
+        ),
+        version=1,
+    )
+    index.upsert_page(page)
+    assert sorted(enriched) == ["p1:0", "p1:1", "p1:2"]  # initial index enriches all
+
+    enriched.clear()
+    index.fake_index.upsert_calls = 0
+    changed = PageCandidate(
+        page_id="p1",
+        title="Doc",
+        html=(
+            "<h2>Alpha</h2><p>first section original</p>"
+            "<h2>Bravo</h2><p>second section UPDATED</p>"
+            "<h2>Charlie</h2><p>third section original</p>"
+        ),
+        version=2,
+    )
+    index.upsert_page(changed)
+
+    # Bravo (:1) changed -> re-enriched; :0 always rebuilt (sentinel); Charlie (:2)
+    # unchanged -> reused, NOT re-enriched.
+    assert "p1:1" in enriched
+    assert "p1:2" not in enriched
+    assert set(enriched) <= {"p1:0", "p1:1"}
+    assert index.fake_index.upsert_calls == 1  # only rebuilt chunks upserted
+    assert index.fake_index.vectors["p1:0"]["fields"]["version"] == 2  # sentinel advanced
+    assert index.fake_index.vectors["p1:1"]["fields"]["version"] == 2  # changed chunk updated
+    assert "UPDATED" in index.fake_index.vectors["p1:1"]["fields"]["text"]
+
+
 def test_vector_rag_search_with_rerank_finds_metric_page(monkeypatch):
     pipeline = ProposalPipeline()
     pipeline._client = VectorOnlyConfluenceClient()
