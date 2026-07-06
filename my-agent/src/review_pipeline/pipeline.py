@@ -269,6 +269,9 @@ class ProposalPipeline:
         self._openai: OpenAI | None = None
         self._cerebras: OpenAI | None = None
         self.last_diagnostics: list[dict[str, Any]] = []
+        # Strong refs to fire-and-forget RAG re-index tasks (see
+        # _schedule_index_page_for_rag) so they aren't garbage-collected mid-run.
+        self._bg_tasks: set[asyncio.Task[None]] = set()
 
     async def run(
         self,
@@ -892,6 +895,23 @@ class ProposalPipeline:
             await asyncio.to_thread(self.rag.upsert_page, page)
         except Exception as exc:  # noqa: BLE001
             logger.debug("Vector RAG indexing failed for page %s: %s", page.page_id, exc)
+
+    def _schedule_index_page_for_rag(self, page: PageCandidate) -> None:
+        """Re-index a just-written page into RAG off the request's critical path.
+
+        The Confluence write has already succeeded and RAG freshness is best-effort,
+        so an Accept must not wait on re-embedding (which re-chunks the page and makes
+        one enrichment LLM call per chunk). Schedule it on the running loop and keep a
+        strong reference until it finishes so the task isn't garbage-collected."""
+        coro = self._index_page_for_rag(page)
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            # No running loop (e.g. a synchronous caller) — index inline as a fallback.
+            asyncio.run(coro)
+            return
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
 
     # ── New RAG retrieval ─────────────────────────────────────────────────────
@@ -1589,7 +1609,7 @@ class ProposalPipeline:
             result = await self.client.create_page(title, html_content)
             new_page_id = str(result.get("id") or result.get("page_id") or "")
             if new_page_id:
-                await self._index_page_for_rag(
+                self._schedule_index_page_for_rag(
                     PageCandidate(
                         page_id=new_page_id,
                         title=title,
@@ -1612,7 +1632,7 @@ class ProposalPipeline:
             if not new_title:
                 return {"success": False, "message": "Title proposal has no new title."}
             await self.client.update_page(str(page_id), page.html, title=new_title, expected_version=page.version)
-            await self._index_page_for_rag(self._updated_page_candidate(page, page.html, title=new_title))
+            self._schedule_index_page_for_rag(self._updated_page_candidate(page, page.html, title=new_title))
             return {"success": True, "message": f"Renamed page to {new_title}."}
 
         if change_type == "delete":
@@ -1657,7 +1677,7 @@ class ProposalPipeline:
             new_html = insert_html_in_section(page.html, proposal.get("section_heading"), addition)
 
         await self.client.update_page(str(page_id), new_html, expected_version=page.version)
-        await self._index_page_for_rag(self._updated_page_candidate(page, new_html))
+        self._schedule_index_page_for_rag(self._updated_page_candidate(page, new_html))
         return {"success": True, "message": "Applied change to Confluence."}
 
     def _updated_page_candidate(
