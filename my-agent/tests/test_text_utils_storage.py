@@ -148,3 +148,31 @@ def test_apply_section_edit_miss_is_noop():
     new_html, ok = apply_section_edit(MULTI_BLOCK, "value not present here", "something else", "Support Tiers")
     assert not ok
     assert new_html == MULTI_BLOCK
+
+
+# Real Confluence storage: a header cell splits its label and value with <br/> and
+# wraps the value in <em>. The markdown-derived anchor is "Standard *$8/device/year*",
+# which exists nowhere literally in the storage — the edit must still anchor on the
+# bare, emphasis-stripped value ($8/device/year) inside <em>…</em>.
+EMPHASIS_TABLE = (
+    "<h2>Plan Comparison</h2><table><tbody>"
+    "<tr>"
+    "<th>Feature</th>"
+    "<th>Starter<br /><em>Free up to 50 devices</em></th>"
+    "<th>Standard<br /><em>$8/device/year</em></th>"
+    "<th>Professional<br /><em>$15/device/year</em></th>"
+    "</tr>"
+    "</tbody></table>"
+)
+
+
+def test_apply_section_edit_anchors_bare_value_inside_em_tags():
+    before = "| Feature | Starter *Free up to 50 devices* | Standard *$8/device/year* | Professional *$15/device/year* |"
+    after = "| Feature | Starter *Free up to 50 devices* | Standard *$10/device/year* | Professional *$15/device/year* |"
+    new_html, ok = apply_section_edit(EMPHASIS_TABLE, before, after, "Plan Comparison")
+    assert ok, "must anchor on the emphasis-stripped bare value"
+    assert "<em>$10/device/year</em>" in new_html  # value changed, tags intact
+    assert "<em>$15/device/year</em>" in new_html  # sibling cell untouched
+    assert "$8/device/year" not in new_html
+    assert "*" not in new_html.split("Plan Comparison", 1)[-1]  # no markdown leaked into storage
+    assert "&lt;" not in new_html
