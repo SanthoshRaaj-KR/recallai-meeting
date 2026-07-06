@@ -64,7 +64,16 @@ COPY . .
 # Pre-download any ML models or files the agent needs
 # This ensures the container is ready to run immediately without downloading
 # dependencies at runtime, which improves startup time and reliability
-RUN uv run "src/agent.py" download-files
+#
+# The COPY . . layer above is invalidated on nearly every source change, which
+# would otherwise force a full re-download here too. Download into a BuildKit
+# cache mount (persists across builds regardless of layer invalidation) and
+# copy the result into the image, so a source change only costs a local copy,
+# not a re-download.
+RUN --mount=type=cache,target=/root/.cache/agent-model-dl \
+    HF_HOME=/root/.cache/agent-model-dl uv run "src/agent.py" download-files && \
+    mkdir -p /app/.cache/huggingface && \
+    cp -a /root/.cache/agent-model-dl/. /app/.cache/huggingface/
 
 # --- Production stage ---
 # Build tools (gcc, g++, python3-dev) are not included in the final image
