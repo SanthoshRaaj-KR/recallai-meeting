@@ -527,6 +527,50 @@ def test_execute_replace_handles_text_wrapped_in_block():
     assert "2nd September" not in fake.updated_html
 
 
+def test_execute_schedules_rag_index_off_critical_path():
+    """Accept returns as soon as the Confluence write lands; the RAG re-index runs
+    after, off the request's critical path (freshness is best-effort)."""
+    import threading
+
+    indexed = threading.Event()
+
+    class SlowRag:
+        enabled = True
+
+        def upsert_page(self, page):
+            indexed.set()
+
+    async def scenario():
+        pipeline = ProposalPipeline()
+        fake = FakeConfluenceClient()
+        pipeline._client = fake
+        pipeline._rag = SlowRag()
+        proposal = {
+            "change_type": "edit",
+            "page_id": "page-1",
+            "page_title": "Q3 Meeting Plan",
+            "section_heading": "Timeline",
+            "before_content": "The Q3 meeting plan is currently scheduled for 2nd September.",
+            "after_content": "The Q3 meeting plan is currently scheduled for 3rd December.",
+            "edit_mode": "replace",
+        }
+
+        result = await pipeline.execute(proposal)
+
+        # The Confluence write is already applied and success is returned…
+        assert result["success"] is True
+        assert "3rd December" in fake.updated_html
+        # …but the RAG re-index was scheduled, not awaited.
+        assert pipeline._bg_tasks, "re-index must be scheduled as a background task"
+        assert not indexed.is_set(), "execute must not block on the RAG re-index"
+
+        # Draining the loop lets the background index complete.
+        await asyncio.gather(*list(pipeline._bg_tasks))
+        assert indexed.is_set()
+
+    asyncio.run(scenario())
+
+
 class TaskConfluenceClient:
     def __init__(self):
         self.updated_html = None
