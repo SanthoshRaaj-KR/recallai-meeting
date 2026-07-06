@@ -112,7 +112,11 @@ class ConfluenceVectorIndex:
             or os.getenv("PINECONE_NAMESPACE")
             or "confluence-review"
         ).strip()
-        self.max_chunk_words = int(os.getenv("MY_AGENT_RAG_CHUNK_WORDS", "350"))
+        # Larger chunks -> fewer chunks -> fewer per-chunk enrichment LLM calls
+        # (input tokens are cheap, the generated summary output is the costly part).
+        # 500 words ~= 665 tokens embed input, well under llama-text-embed-v2's limit
+        # and the 5000-char metadata cap below.
+        self.max_chunk_words = int(os.getenv("MY_AGENT_RAG_CHUNK_WORDS", "500"))
         self.max_metadata_chars = int(os.getenv("MY_AGENT_RAG_METADATA_CHARS", "5000"))
         self.create_index = os.getenv("MY_AGENT_RAG_CREATE_INDEX", "1").strip().lower() in {
             "1",
@@ -687,7 +691,7 @@ def _extract_table_rows(section_html: str) -> list[str]:
     return rows
 
 
-def chunk_page(page: PageCandidate, *, max_words: int = 350) -> list[PageChunk]:
+def chunk_page(page: PageCandidate, *, max_words: int = 500) -> list[PageChunk]:
     """Split one Confluence page into page-owned chunks.
 
     Chunks never combine multiple Confluence pages. Heading-delimited sections
