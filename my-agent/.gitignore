@@ -11,6 +11,11 @@ KMS
 .pytest_cache
 .ruff_cache
 
+# Local SQLite session-store fallback (runtime artifact, never commit)
+.sessions.db
+.sessions.db-shm
+.sessions.db-wal
+
 # Claude Code
 .claude/settings.local.json
 .claude/worktrees/
