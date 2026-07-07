@@ -2028,21 +2028,90 @@ def _token_overlap(a: str, b: str) -> float:
     return len(ta & tb) / max(len(ta), len(tb))
 
 
+_MD_TABLE_SEP_CELL_RE = re.compile(r"^:?-{1,}:?$")
+
+
+def _looks_like_md_table_row(line: str) -> bool:
+    """A markdown table row: starts with a pipe and has at least two cell delimiters."""
+    s = line.strip()
+    return s.startswith("|") and s.count("|") >= 2
+
+
+def _split_md_row(line: str) -> list[str]:
+    """Split a ``| a | b |`` row into trimmed cell strings (outer pipes dropped)."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [cell.strip() for cell in s.split("|")]
+
+
+def _md_inline_to_storage(text: str) -> str:
+    """Escape a cell's text, then restore simple markdown emphasis as storage tags
+    (``**b**`` -> ``<strong>``, ``*i*`` -> ``<em>``) so cell values render, not leak."""
+    escaped = html.escape(text, quote=False)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"\*([^*]+?)\*", r"<em>\1</em>", escaped)
+    return escaped
+
+
+def _md_table_to_storage(rows: list[str]) -> str:
+    """Convert a block of markdown table rows into Confluence storage table XHTML.
+
+    A separator row of dashes (``| --- | --- |``) splits header rows (rendered as
+    ``<th>``) from body rows (``<td>``); without one, every row is a body row."""
+    parsed = [_split_md_row(r) for r in rows]
+    sep_idx = next(
+        (
+            i
+            for i, cells in enumerate(parsed)
+            if cells and all(_MD_TABLE_SEP_CELL_RE.match(c) for c in cells)
+        ),
+        None,
+    )
+    header = parsed[:sep_idx] if sep_idx is not None else []
+    body = parsed[sep_idx + 1 :] if sep_idx is not None else parsed
+    out = ["<table><tbody>"]
+    for cells in header:
+        out.append("<tr>" + "".join(f"<th>{_md_inline_to_storage(c)}</th>" for c in cells) + "</tr>")
+    for cells in body:
+        out.append("<tr>" + "".join(f"<td>{_md_inline_to_storage(c)}</td>" for c in cells) + "</tr>")
+    out.append("</tbody></table>")
+    return "".join(out)
+
+
 def _storage_html(markdownish: str) -> str:
     lines = [line.rstrip() for line in (markdownish or "").splitlines()]
-    html_lines = []
+    html_lines: list[str] = []
     in_list = False
+    table_rows: list[str] = []
+
+    def _close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            html_lines.append("</ul>")
+            in_list = False
+
+    def _flush_table() -> None:
+        nonlocal table_rows
+        if table_rows:
+            html_lines.append(_md_table_to_storage(table_rows))
+            table_rows = []
+
     for line in lines:
         stripped = line.strip()
+        # Markdown table rows -> a real <table>, not <p>| a | b |</p> (which leaks pipes).
+        if _looks_like_md_table_row(stripped):
+            _close_list()
+            table_rows.append(stripped)
+            continue
+        _flush_table()
         if not stripped:
-            if in_list:
-                html_lines.append("</ul>")
-                in_list = False
+            _close_list()
             continue
         if stripped.startswith("## "):
-            if in_list:
-                html_lines.append("</ul>")
-                in_list = False
+            _close_list()
             html_lines.append(f"<h2>{html.escape(stripped[3:].strip())}</h2>")
         elif stripped.startswith("- "):
             if not in_list:
@@ -2050,10 +2119,8 @@ def _storage_html(markdownish: str) -> str:
                 in_list = True
             html_lines.append(f"<li>{html.escape(stripped[2:].strip())}</li>")
         else:
-            if in_list:
-                html_lines.append("</ul>")
-                in_list = False
+            _close_list()
             html_lines.append(f"<p>{html.escape(stripped)}</p>")
-    if in_list:
-        html_lines.append("</ul>")
+    _flush_table()
+    _close_list()
     return "\n".join(html_lines) or "<p></p>"
