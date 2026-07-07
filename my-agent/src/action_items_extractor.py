@@ -56,18 +56,16 @@ def _url(table: str) -> str:
 
 
 def _transcript_text(session: dict, limit_chars: int = 16000) -> str:
-    # Meeting transcript now lives in session_transcript_turns (Recall-sourced only).
+    # Post-meeting extraction uses the diarized Recall transcript only
+    # (session_transcript_turns) — no LiveKit fallback.
     entries = session_store.get_transcript_turns(session.get("session_id", ""))
-    if entries:
-        lines = []
-        for e in entries:
-            who = e.get("participant") or e.get("speaker") or "?"
-            txt = e.get("text") or ""
-            if txt:
-                lines.append(f"{who}: {txt}")
-        text = "\n".join(lines)
-    else:
-        text = session.get("transcript_memory_text") or ""
+    lines = []
+    for e in entries:
+        who = e.get("participant") or e.get("speaker") or "?"
+        txt = e.get("text") or ""
+        if txt:
+            lines.append(f"{who}: {txt}")
+    text = "\n".join(lines)
     return text[-limit_chars:]  # keep the tail (most recent / wrap-up) if very long
 
 

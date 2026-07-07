@@ -231,7 +231,7 @@ async def execute_changes(session_id: str, body: ExecuteBody) -> dict:
 async def propose_changes(session_id: str, body: ProposeBody) -> dict:
     s = _require_session(session_id)
     transcript = session_store.get_transcript_turns(session_id)
-    memory_context = s.get("transcript_memory_text") or ""
+    memory_context = ""  # post-meeting uses the Recall transcript only (no LiveKit memory)
     changes: list[dict] = list(s.get("changes") or [])
 
     pipeline = _pipeline()
@@ -484,7 +484,7 @@ async def _run_pipeline_job(job_id: str) -> None:
         meeting, proposals = await _propose(
             session_id=session_id,
             transcript=transcript,
-            memory_context=s.get("transcript_memory_text") or "",
+            memory_context="",  # post-meeting uses the Recall transcript only
             emit=emit,
         )
         summary = pipeline.summary_response(session_id, meeting, transcript)
