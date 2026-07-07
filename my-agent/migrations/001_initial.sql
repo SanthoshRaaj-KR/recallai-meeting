@@ -25,6 +25,7 @@ create table if not exists jarvis_sessions (
     extracted_meeting      jsonb,
     pipeline_diagnostics   jsonb       not null default '[]'::jsonb,
     pipeline_cache         jsonb       not null default '{}'::jsonb,   -- written by review_pipeline (stage cache)
+    participants           jsonb       not null default '{}'::jsonb,   -- real presence map (Phase 1 attendance)
     confluence_enabled     boolean     not null default false,        -- written by /bot/start
     team_id                uuid,                                       -- FK added by org-service migration
     started_at             timestamptz not null default now(),

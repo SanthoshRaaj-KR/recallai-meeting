@@ -159,6 +159,105 @@ def _utcnow() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
 
 
+def _session_for_bot(bot_id: str) -> dict | None:
+    """Resolve a session dict from a Recall bot_id, via the O(1) local index with
+    a Supabase-scan fallback for process restarts. Returns None if unknown."""
+    if not bot_id:
+        return None
+    session_id = _bot_index.get(bot_id)
+    s = session_store.get(session_id) if session_id else None
+    if s is None:
+        s = next((x for x in session_store.list_all() if x.get("bot_id") == bot_id), None)
+    if s:
+        _bot_index[bot_id] = s["session_id"]
+    return s
+
+
+def _record_participant_event(bot_id: str, participant: dict, kind: str, ts: str) -> None:
+    """Merge one Recall participant join/leave into the session's presence map.
+
+    Presence lives in jarvis_sessions.participants (jsonb) keyed by Recall
+    participant id: {name, is_host, joined_at, left_at, email?}. Low-frequency
+    (a few events per meeting), so a read-merge-write patch is fine here.
+    Identity resolution (Recall name → org_user) happens later, at meeting end.
+    """
+    try:
+        s = _session_for_bot(bot_id)
+        if not s:
+            return
+        pid = str(participant.get("id", "")) or (participant.get("name") or "").strip()
+        if not pid:
+            return
+        presence: dict = dict(s.get("participants") or {})
+        entry = dict(presence.get(pid) or {})
+        entry.setdefault("name", participant.get("name"))
+        if participant.get("is_host") is not None:
+            entry["is_host"] = participant.get("is_host")
+        email = (participant.get("extra_data") or {}).get("email") or participant.get("email")
+        if email and not entry.get("email"):
+            entry["email"] = email
+        if kind == "join" and not entry.get("joined_at"):
+            entry["joined_at"] = ts
+        if kind == "leave":
+            entry["left_at"] = ts
+        presence[pid] = entry
+        session_store.patch(s["session_id"], {"participants": presence})
+        logger.info(
+            "participant %s → session %s pid=%s name=%s",
+            kind, s["session_id"], pid, entry.get("name"),
+        )
+    except Exception as exc:  # presence tracking must never break the webhook
+        logger.warning("participant event skipped: %s", exc)
+
+
+def _backfill_participants_from_recall(s: dict) -> None:
+    """On meeting end, pull the authoritative participant list (with join/leave
+    timestamps) from GET /bot/{id} and merge it into the presence map — covers any
+    join/leave webhook we missed. Never raises."""
+    try:
+        bot_id = s.get("bot_id")
+        if not bot_id or not RECALL_API_KEY:
+            return
+        resp = requests.get(
+            f"{RECALL_BASE_URL}/bot/{bot_id}/",
+            headers={"Authorization": f"Token {RECALL_API_KEY}"},
+            timeout=8,
+        )
+        if not resp.ok:
+            return
+        parts = resp.json().get("meeting_participants") or []
+        if not parts:
+            return
+        presence: dict = dict(s.get("participants") or {})
+        for p in parts:
+            pid = str(p.get("id", "")) or (p.get("name") or "").strip()
+            if not pid:
+                continue
+            entry = dict(presence.get(pid) or {})
+            entry.setdefault("name", p.get("name"))
+            if p.get("is_host") is not None:
+                entry.setdefault("is_host", p.get("is_host"))
+            events = p.get("events") or {}
+            join_ts = (events.get("join") or {}).get("absolute") or p.get("join_at")
+            leave_ts = (events.get("leave") or {}).get("absolute") or p.get("leave_at")
+            if join_ts and not entry.get("joined_at"):
+                entry["joined_at"] = join_ts
+            if leave_ts:
+                entry["left_at"] = leave_ts
+            email = (p.get("extra_data") or {}).get("email") or p.get("email")
+            if email and not entry.get("email"):
+                entry["email"] = email
+            presence[pid] = entry
+        if presence:
+            session_store.patch(s["session_id"], {"participants": presence})
+            logger.info(
+                "participant backfill → session %s (%d participants)",
+                s["session_id"], len(presence),
+            )
+    except Exception as exc:
+        logger.warning("participant backfill skipped: %s", exc)
+
+
 def _new_compactor() -> TranscriptCompactor:
     return TranscriptCompactor(
         window_size=2000,
@@ -229,7 +328,13 @@ def _create_recall_bot(meeting_url: str, room_name: str) -> str:
                 {
                     "type": "webhook",
                     "url": f"{SERVER_URL}/recall-webhook",
-                    "events": ["transcript.data"],
+                    # transcript.data → diarized transcript; participant_events →
+                    # real per-person presence (join/leave) for attendance analytics.
+                    "events": [
+                        "transcript.data",
+                        "participant_events.join",
+                        "participant_events.leave",
+                    ],
                 },
             ],
         },
@@ -439,6 +544,9 @@ async def stop_bot(session_id: str) -> dict:
 
     session_store.patch(session_id, {"status": "ended", "ended_at": _utcnow()})
     s = session_store.get(session_id) or s
+    # Authoritative participant list before crediting attendance.
+    _backfill_participants_from_recall(s)
+    s = session_store.get(session_id) or s
     org_activity.record_meeting_activity(s)
     _bg_extract_action_items(s)
     return {
@@ -550,29 +658,34 @@ async def recall_webhook(request: Request) -> dict:
 
     if event in ("bot.status_change", "bot.done"):
         bot_id = data.get("bot_id", "")
-        if bot_id:
-            # O(1) lookup via local index; fall back to Supabase scan if not cached
-            session_id = _bot_index.get(bot_id)
-            s = session_store.get(session_id) if session_id else None
-            if s is None:
-                # Process restart — rebuild index entry from Supabase
-                all_sessions = session_store.list_all()
-                s = next((x for x in all_sessions if x.get("bot_id") == bot_id), None)
-                if s:
-                    _bot_index[bot_id] = s["session_id"]
-            if s:
-                status_obj = data.get("status") or {}
-                code = status_obj.get("code") or (data.get("code") if event == "bot.done" else "")
-                new_status = _RECALL_STATUS_MAP.get(code, "")
-                if new_status and new_status != s.get("status"):
-                    updates: dict = {"status": new_status}
-                    if new_status in ("ended", "error") and not s.get("ended_at"):
-                        updates["ended_at"] = _utcnow()
-                    session_store.patch(s["session_id"], updates)
-                    logger.info("Webhook %s → session %s status=%s", event, s["session_id"], new_status)
-                    if new_status == "ended":
-                        org_activity.record_meeting_activity({**s, **updates})
-                        _bg_extract_action_items({**s, **updates})
+        s = _session_for_bot(bot_id)
+        if s:
+            status_obj = data.get("status") or {}
+            code = status_obj.get("code") or (data.get("code") if event == "bot.done" else "")
+            new_status = _RECALL_STATUS_MAP.get(code, "")
+            if new_status and new_status != s.get("status"):
+                updates: dict = {"status": new_status}
+                if new_status in ("ended", "error") and not s.get("ended_at"):
+                    updates["ended_at"] = _utcnow()
+                session_store.patch(s["session_id"], updates)
+                logger.info("Webhook %s → session %s status=%s", event, s["session_id"], new_status)
+                if new_status == "ended":
+                    ended = {**s, **updates}
+                    # Pull the authoritative participant list before crediting attendance.
+                    _backfill_participants_from_recall(ended)
+                    ended = session_store.get(s["session_id"]) or ended
+                    org_activity.record_meeting_activity(ended)
+                    _bg_extract_action_items(ended)
+
+    # ── Recall participant presence (real attendance: join / leave) ──────────────
+    elif event in ("participant_events.join", "participant_events.leave"):
+        bot_id = (data.get("bot") or {}).get("id", "") or data.get("bot_id", "")
+        inner = data.get("data") or {}
+        participant = inner.get("participant") or data.get("participant") or {}
+        ts = (inner.get("timestamp") or {}).get("absolute") or _utcnow()
+        kind = "join" if event.endswith("join") else "leave"
+        if bot_id and participant:
+            _record_participant_event(bot_id, participant, kind, ts)
 
     # ── Recall real-time diarized transcript (AssemblyAI v3 via Recall native) ──
     # Recall fires transcript.data for each finalized utterance with participant
@@ -583,13 +696,7 @@ async def recall_webhook(request: Request) -> dict:
     elif event == "transcript.data":
         bot_id = (data.get("bot") or {}).get("id", "")
         if bot_id:
-            session_id = _bot_index.get(bot_id)
-            s = session_store.get(session_id) if session_id else None
-            if s is None:
-                all_sessions = session_store.list_all()
-                s = next((x for x in all_sessions if x.get("bot_id") == bot_id), None)
-                if s:
-                    _bot_index[bot_id] = s["session_id"]
+            s = _session_for_bot(bot_id)
             if s:
                 inner = data.get("data") or {}
                 participant = inner.get("participant") or {}
