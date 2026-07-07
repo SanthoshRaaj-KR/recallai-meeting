@@ -91,6 +91,21 @@ def select_one(table: str, filters: dict[str, str], columns: str | None = None) 
     return rows[0] if rows else None
 
 
+def rpc(fn: str, params: dict) -> list[dict]:
+    """Call a Postgres function via PostgREST (POST /rpc/<fn>). Used to push
+    aggregation into the DB instead of looping in Python."""
+    _check_configured()
+    resp = _call(
+        requests.post,
+        f"{_SUPABASE_URL}/rest/v1/rpc/{fn}",
+        headers=_headers(),
+        json=params,
+        timeout=15,
+    )
+    _raise_for(resp)
+    return resp.json()
+
+
 def insert(table: str, data: dict) -> dict:
     _check_configured()
     resp = _call(requests.post, _url(table), headers=_headers(return_repr=True), json=data, timeout=8)
