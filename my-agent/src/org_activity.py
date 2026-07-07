@@ -126,7 +126,7 @@ def _team_roster(team_id: str) -> tuple[dict[str, str], str | None]:
     users = requests.get(
         _url("org_users"),
         headers=_headers(),
-        params={"id": f"in.({','.join(uids)})", "select": "id,name,org_id"},
+        params={"id": f"in.({','.join(uids)})", "select": "id,name,org_id,display_name_aliases"},
         timeout=5,
     )
     if not users.ok:
@@ -138,6 +138,12 @@ def _team_roster(team_id: str) -> tuple[dict[str, str], str | None]:
         key = _normalize_name(u.get("name"))
         if key and key not in roster:  # first wins on duplicate names
             roster[key] = u["id"]
+        # Admin-set aliases resolve deterministically (Phase 3). Stored normalised;
+        # an alias always wins for its owner (overwrites a name collision).
+        for alias in (u.get("display_name_aliases") or []):
+            ak = _normalize_name(alias)
+            if ak:
+                roster[ak] = u["id"]
     return roster, org_id
 
 

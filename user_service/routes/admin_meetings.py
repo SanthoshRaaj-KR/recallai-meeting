@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 
-from ..database import select, select_one
+from ..database import select, select_one, update
 from ..models import OrgRole
 from ..rbac import require_admin_or_above
 
@@ -191,6 +192,83 @@ def meeting_detail(session_id: str, claims: dict = Depends(require_admin_or_abov
     item["transcript"] = s.get("transcript") or []
     item["changes"] = s.get("changes") or []
     return item
+
+
+# ── Participants (real attendance) ────────────────────────────────────────────
+
+def _normalize_name(name: str | None) -> str:
+    """Mirror org_activity._normalize_name so aliases match the resolver."""
+    if not name:
+        return ""
+    n = re.sub(r"[^a-z0-9 ]+", "", name.strip().lower())
+    return re.sub(r"\s+", " ", n).strip()
+
+
+@router.get("/{session_id}/participants")
+def meeting_participants(session_id: str, claims: dict = Depends(require_admin_or_above())):
+    """Real attendees for a meeting: who joined, resolved identity, and time in call.
+
+    Guests (unmatched Recall names) are flagged so an admin can map them to a user.
+    """
+    _require_owned_session(session_id, claims)  # org-ownership gate
+    rows = select(
+        "meeting_participants",
+        {"session_id": f"eq.{session_id}", "order": "joined_at.asc"},
+    )
+    return [
+        {
+            "id": r.get("id"),
+            "recall_name": r.get("recall_name"),
+            "user_id": r.get("user_id"),
+            "match_confidence": r.get("match_confidence"),
+            "is_guest": r.get("is_guest"),
+            "joined_at": r.get("joined_at"),
+            "left_at": r.get("left_at"),
+            "duration_mins": r.get("duration_mins"),
+        }
+        for r in rows
+    ]
+
+
+@router.post("/{session_id}/participants/{row_id}/assign")
+def assign_participant(
+    session_id: str,
+    row_id: str,
+    user_id: str = Body(..., embed=True),
+    add_alias: bool = Body(True, embed=True),
+    claims: dict = Depends(require_admin_or_above()),
+):
+    """Map a (usually guest) participant row to an org_user. Optionally stores the
+    Recall name as a display-name alias so future meetings auto-match (Phase 3)."""
+    _require_owned_session(session_id, claims)
+
+    row = select_one("meeting_participants", {
+        "id": f"eq.{row_id}", "session_id": f"eq.{session_id}",
+    })
+    if not row:
+        raise HTTPException(404, "Participant row not found")
+
+    target = select_one("org_users", {"id": f"eq.{user_id}"}, columns="id,org_id,display_name_aliases")
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target.get("org_id") != claims.get("org_id"):
+        raise HTTPException(403, "That user is not in your organisation")
+
+    update("meeting_participants", {"id": f"eq.{row_id}"}, {
+        "user_id": user_id,
+        "is_guest": False,
+        "match_confidence": "high",  # explicit admin assignment is authoritative
+    })
+
+    if add_alias:
+        alias = _normalize_name(row.get("recall_name"))
+        existing = target.get("display_name_aliases") or []
+        if alias and alias not in existing:
+            update("org_users", {"id": f"eq.{user_id}"}, {
+                "display_name_aliases": existing + [alias],
+            })
+
+    return {"ok": True, "session_id": session_id, "row_id": row_id, "user_id": user_id}
 
 
 @router.post("/{session_id}/kick")
