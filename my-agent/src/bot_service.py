@@ -548,6 +548,7 @@ async def stop_bot(session_id: str) -> dict:
     _backfill_participants_from_recall(s)
     s = session_store.get(session_id) or s
     org_activity.record_meeting_activity(s)
+    org_activity.record_participants(s)  # real per-attendee rows
     _bg_extract_action_items(s)
     return {
         "status": "ended", "session_id": session_id, "bot_id": s.get("bot_id"),
@@ -675,6 +676,7 @@ async def recall_webhook(request: Request) -> dict:
                     _backfill_participants_from_recall(ended)
                     ended = session_store.get(s["session_id"]) or ended
                     org_activity.record_meeting_activity(ended)
+                    org_activity.record_participants(ended)  # real per-attendee rows
                     _bg_extract_action_items(ended)
 
     # ── Recall participant presence (real attendance: join / leave) ──────────────
