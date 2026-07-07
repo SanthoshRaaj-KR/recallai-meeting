@@ -230,7 +230,7 @@ async def execute_changes(session_id: str, body: ExecuteBody) -> dict:
 @app.post("/sessions/{session_id}/review/changes/propose")
 async def propose_changes(session_id: str, body: ProposeBody) -> dict:
     s = _require_session(session_id)
-    transcript = s.get("transcript") or []
+    transcript = session_store.get_transcript_turns(session_id)
     memory_context = s.get("transcript_memory_text") or ""
     changes: list[dict] = list(s.get("changes") or [])
 
@@ -296,7 +296,7 @@ async def test_propose_from_transcript(body: TestTranscriptBody) -> dict:
 @app.get("/sessions/{session_id}/review/summary")
 async def get_summary(session_id: str) -> dict:
     s = _require_session(session_id)
-    transcript = s.get("transcript") or []
+    transcript = session_store.get_transcript_turns(session_id)
     cached = s.get("summary")
     # Don't serve a cached summary that has empty decisions when there is transcript
     # content — it means a prior LLM call failed silently; retry so the UI doesn't
@@ -320,7 +320,7 @@ async def chat_with_meeting(session_id: str, body: ChatBody) -> dict:
     from openai import AsyncOpenAI
 
     s = _require_session(session_id)
-    transcript = s.get("transcript") or []
+    transcript = session_store.get_transcript_turns(session_id)
 
     transcript_lines = [
         f"{e.get('participant') or e.get('speaker') or 'Speaker'}: {e.get('text', '')}"
@@ -428,12 +428,14 @@ async def pipeline_start(body: PipelineStartBody) -> dict:
 @app.post("/review/pipeline/start-with-transcript")
 async def pipeline_start_with_transcript(body: PipelineStartWithTranscriptBody) -> dict:
     session_id = str(uuid.uuid4())
-    transcript = [{"participant": "Meeting", "text": body.transcript.strip()}]
     session_store.upsert(session_id, {
         "status": "ended",
-        "transcript": transcript,
         "transcript_memory_text": "",
         "changes": [],
+    })
+    # Store the supplied transcript as a single Recall-sourced turn (turns table).
+    session_store.append_transcript_turn(session_id, {
+        "participant": "Meeting", "text": body.transcript.strip(), "source": "recall",
     })
     job_id = str(uuid.uuid4())
     _pipelines[job_id] = {
@@ -478,13 +480,14 @@ async def _run_pipeline_job(job_id: str) -> None:
         _record_pipeline_event(job_id, event)
 
     try:
+        transcript = session_store.get_transcript_turns(session_id)
         meeting, proposals = await _propose(
             session_id=session_id,
-            transcript=s.get("transcript") or [],
+            transcript=transcript,
             memory_context=s.get("transcript_memory_text") or "",
             emit=emit,
         )
-        summary = pipeline.summary_response(session_id, meeting, s.get("transcript") or [])
+        summary = pipeline.summary_response(session_id, meeting, transcript)
         summary["proposal_diagnostics"] = pipeline.last_diagnostics
         _save_summary(session_id, summary, meeting, pipeline.last_diagnostics)
 

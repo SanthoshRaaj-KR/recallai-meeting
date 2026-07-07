@@ -715,7 +715,7 @@ def _load_meeting_context(session_id: str) -> str:
         mem_text = (sess.get("transcript_memory_text") or "").strip()
         if mem_text:
             parts.append(f"[Meeting memory (compacted)]\n{mem_text}")
-        transcript = sess.get("transcript") or []
+        transcript = session_store.get_transcript_turns(session_id)
         if transcript:
             recent = transcript[-150:]
             lines: list[str] = []

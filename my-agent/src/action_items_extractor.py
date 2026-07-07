@@ -18,6 +18,11 @@ import requests
 from dotenv import load_dotenv
 from pathlib import Path
 
+try:
+    from . import session_store
+except ImportError:  # standalone / non-package execution
+    import session_store
+
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
 logger = logging.getLogger(__name__)
@@ -51,18 +56,15 @@ def _url(table: str) -> str:
 
 
 def _transcript_text(session: dict, limit_chars: int = 16000) -> str:
-    entries = session.get("transcript") or []
-    if isinstance(entries, list) and entries:
-        recall = [e for e in entries if isinstance(e, dict) and e.get("source") == "recall"]
-        if recall:
-            entries = recall
+    # Meeting transcript now lives in session_transcript_turns (Recall-sourced only).
+    entries = session_store.get_transcript_turns(session.get("session_id", ""))
+    if entries:
         lines = []
         for e in entries:
-            if isinstance(e, dict):
-                who = e.get("participant") or e.get("speaker") or "?"
-                txt = e.get("text") or ""
-                if txt:
-                    lines.append(f"{who}: {txt}")
+            who = e.get("participant") or e.get("speaker") or "?"
+            txt = e.get("text") or ""
+            if txt:
+                lines.append(f"{who}: {txt}")
         text = "\n".join(lines)
     else:
         text = session.get("transcript_memory_text") or ""

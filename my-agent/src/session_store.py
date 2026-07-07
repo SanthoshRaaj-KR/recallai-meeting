@@ -89,6 +89,21 @@ def _ensure_table() -> None:
                         updated_at TEXT
                     )
                 """)
+                # Append-only transcript turns (mirror of the Supabase table).
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS transcript_turns (
+                        session_id  TEXT NOT NULL,
+                        seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+                        participant TEXT,
+                        text        TEXT NOT NULL,
+                        ts          REAL,
+                        source      TEXT NOT NULL DEFAULT 'recall'
+                    )
+                """)
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_turns_session "
+                    "ON transcript_turns(session_id, seq)"
+                )
                 conn.commit()
     except Exception as exc:
         logger.warning("SQLite setup failed (will rely on Supabase): %s", exc)
@@ -226,3 +241,101 @@ def require(session_id: str) -> dict:
     if s is None:
         raise KeyError(session_id)
     return s
+
+
+# ── Transcript turns (append-only; Recall meeting transcript only) ──────────────
+
+_TURNS_TABLE = "session_transcript_turns"
+_TURNS_PAGE = 1000  # PostgREST caps rows per response; page through in chunks.
+
+
+def append_transcript_turn(session_id: str, entry: dict) -> None:
+    """Append one meeting-transcript turn — O(1) INSERT, no blob rewrite.
+
+    ``entry`` uses the same shape callers already produce:
+    ``{participant, text, timestamp, source}``. Only ``text`` is required.
+    """
+    text = (entry.get("text") or "").strip()
+    if not text:
+        return
+    row = {
+        "session_id": session_id,
+        "participant": entry.get("participant"),
+        "text": text,
+        "ts": entry.get("timestamp"),
+        "source": entry.get("source") or "recall",
+    }
+    # Local mirror first so bot-only dev works without Supabase.
+    try:
+        with _db_lock:
+            with _db_conn() as conn:
+                conn.execute(
+                    "INSERT INTO transcript_turns (session_id, participant, text, ts, source) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (session_id, row["participant"], text, row["ts"], row["source"]),
+                )
+                conn.commit()
+    except Exception as exc:
+        logger.debug("SQLite transcript append failed: %s", exc)
+    if _use_supabase():
+        try:
+            requests.post(
+                f"{_SUPABASE_URL}/rest/v1/{_TURNS_TABLE}",
+                headers=_headers(),
+                json=row,
+                timeout=5,
+            )
+        except Exception as exc:
+            logger.warning("append_transcript_turn remote failed: %s", exc)
+
+
+def get_transcript_turns(session_id: str) -> list[dict]:
+    """Return a session's meeting transcript in chronological order.
+
+    Shape matches the old inline transcript entries so readers are unchanged:
+    ``[{participant, text, timestamp, source}, ...]``.
+    """
+    if _use_supabase():
+        try:
+            out: list[dict] = []
+            offset = 0
+            while True:
+                resp = requests.get(
+                    f"{_SUPABASE_URL}/rest/v1/{_TURNS_TABLE}",
+                    headers=_headers(),
+                    params={
+                        "session_id": f"eq.{session_id}",
+                        "select": "participant,text,ts,source,seq",
+                        "order": "seq.asc",
+                        "limit": str(_TURNS_PAGE),
+                        "offset": str(offset),
+                    },
+                    timeout=8,
+                )
+                if not resp.ok:
+                    break
+                rows = resp.json()
+                out.extend(
+                    {"participant": r.get("participant"), "text": r.get("text"),
+                     "timestamp": r.get("ts"), "source": r.get("source")}
+                    for r in rows
+                )
+                if len(rows) < _TURNS_PAGE:
+                    return out
+                offset += _TURNS_PAGE
+            if out:
+                return out
+            # Remote reachable but empty — fall through to local mirror.
+        except Exception as exc:
+            logger.warning("get_transcript_turns remote failed: %s — using local", exc)
+    with _db_lock:
+        with _db_conn() as conn:
+            rows = conn.execute(
+                "SELECT participant, text, ts, source FROM transcript_turns "
+                "WHERE session_id = ? ORDER BY seq ASC",
+                (session_id,),
+            ).fetchall()
+    return [
+        {"participant": r[0], "text": r[1], "timestamp": r[2], "source": r[3]}
+        for r in rows
+    ]
