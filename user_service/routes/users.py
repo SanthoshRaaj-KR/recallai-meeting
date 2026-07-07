@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import get_current_user
-from ..database import select, select_one, update, DBError
+from ..database import rpc, select, select_one, update, DBError
 from ..models import UserOut, UserUpdate, MeetingStats, OrgRole
 from ..rbac import require_admin_or_above
 
@@ -118,67 +118,37 @@ def get_direct_reports(user_id: str, claims: dict = Depends(get_current_user)):
 
 @router.get("/me/stats", response_model=MeetingStats)
 def get_my_stats(claims: dict = Depends(get_current_user)):
-    """Return meeting stats for the current user based on their team memberships."""
-    user_id = claims["sub"]
-    memberships = select("org_team_members", {"user_id": f"eq.{user_id}"})
-    team_ids = [m["team_id"] for m in memberships]
+    """Return REAL meeting stats for the current user — meetings they actually
+    attended and their true time-in-call, from meeting_participants (Phase 4).
 
-    if not team_ids:
+    Previously this counted every one of the user's team meetings and credited the
+    full duration whether or not they joined; now a no-show correctly shows zero.
+    """
+    user_id = claims["sub"]
+    now = datetime.now(timezone.utc)
+    week_iso = (now - timedelta(days=7)).replace(microsecond=0).isoformat()
+    month_iso = (now - timedelta(days=30)).replace(microsecond=0).isoformat()
+
+    try:
+        rows = rpc("user_attendance_stats", {
+            "p_user": user_id, "p_week": week_iso, "p_month": month_iso,
+        })
+    except DBError as exc:
+        logger.warning("me/stats rpc failed for %s: %s", user_id, exc)
         return MeetingStats(total_meetings=0, total_minutes=0)
 
-    now = datetime.now(timezone.utc)
-    month_ago = now - timedelta(days=30)
-    week_ago = now - timedelta(days=7)
-    month_ago_iso = month_ago.replace(microsecond=0).isoformat()
-
-    all_sessions: list[dict] = []
-    recent_sessions: list[dict] = []
-    for tid in team_ids:
-        all_sessions.extend(select("jarvis_sessions", {"team_id": f"eq.{tid}", "status": "eq.ended"}))
-        recent_sessions.extend(select("jarvis_sessions", {
-            "team_id": f"eq.{tid}", "status": "eq.ended", "started_at": f"gte.{month_ago_iso}",
-        }))
-
-    total_minutes = 0.0
-    durations: list[float] = []
-    last_meeting_at: str | None = None
-
-    for s in all_sessions:
-        started_raw = s.get("started_at")
-        ended_raw = s.get("ended_at")
-        if started_raw and ended_raw:
-            try:
-                start = datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
-                end = datetime.fromisoformat(ended_raw.replace("Z", "+00:00"))
-                dur = (end - start).total_seconds() / 60
-                total_minutes += dur
-                durations.append(dur)
-            except Exception:
-                pass
-        if ended_raw and (last_meeting_at is None or ended_raw > last_meeting_at):
-            last_meeting_at = ended_raw
-
-    meetings_this_week = 0
-    meetings_this_month = 0
-    for s in recent_sessions:
-        try:
-            start = datetime.fromisoformat((s.get("started_at") or "").replace("Z", "+00:00"))
-            if start >= week_ago:
-                meetings_this_week += 1
-            if start >= month_ago:
-                meetings_this_month += 1
-        except Exception:
-            pass
-
-    avg_mins = round(sum(durations) / len(durations), 1) if durations else 0.0
+    r = rows[0] if rows else {}
+    attended = int(r.get("meetings_attended") or 0)
+    total_min = float(r.get("total_minutes") or 0)
+    dur_count = int(r.get("dur_count") or 0)
 
     return MeetingStats(
-        total_meetings=len(all_sessions),
-        total_minutes=round(total_minutes),
-        last_meeting_at=last_meeting_at,
-        meetings_this_week=meetings_this_week,
-        meetings_this_month=meetings_this_month,
-        avg_meeting_duration_mins=avg_mins,
+        total_meetings=attended,
+        total_minutes=round(total_min),
+        last_meeting_at=r.get("last_attended"),
+        meetings_this_week=int(r.get("attended_week") or 0),
+        meetings_this_month=int(r.get("attended_month") or 0),
+        avg_meeting_duration_mins=round(total_min / dur_count, 1) if dur_count else 0.0,
     )
 
 
