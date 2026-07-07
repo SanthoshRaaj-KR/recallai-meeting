@@ -46,7 +46,7 @@ SESSIONS = [
 ]
 
 
-def _fake_select(table, filters=None, limit=None):
+def _fake_select(table, filters=None, limit=None, columns=None):
     filters = filters or {}
     if table == "org_teams":
         org = (filters.get("org_id") or "").replace("eq.", "")
@@ -67,7 +67,7 @@ def _fake_select(table, filters=None, limit=None):
     return []
 
 
-def _fake_select_one(table, filters):
+def _fake_select_one(table, filters, columns=None):
     if table == "jarvis_sessions":
         sid = (filters.get("session_id") or "").replace("eq.", "")
         return next((s for s in SESSIONS if s["session_id"] == sid), None)

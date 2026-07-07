@@ -61,11 +61,24 @@ def _call(fn, *args, **kwargs):
         raise DBError(str(exc)) from exc
 
 
-def select(table: str, filters: dict[str, str] | None = None, limit: int | None = None) -> list[dict]:
+def select(
+    table: str,
+    filters: dict[str, str] | None = None,
+    limit: int | None = None,
+    columns: str | None = None,
+) -> list[dict]:
+    """Query a table. Pass ``columns`` (a PostgREST ``select=`` string) to project
+    only the fields you need — critical for tables with large jsonb blobs
+    (jarvis_sessions.transcript/summary/changes) so list/analytics reads don't
+    transfer megabytes to use a handful of scalars. Supports embedding, e.g.
+    ``columns="id,name,org_teams(name)"``. Omit for the old SELECT * behaviour.
+    """
     _check_configured()
     params: dict[str, Any] = {}
     if filters:
         params.update(filters)
+    if columns:
+        params["select"] = columns
     if limit:
         params["limit"] = str(limit)
     resp = _call(requests.get, _url(table), headers=_headers(), params=params, timeout=8)
@@ -73,8 +86,8 @@ def select(table: str, filters: dict[str, str] | None = None, limit: int | None 
     return resp.json()
 
 
-def select_one(table: str, filters: dict[str, str]) -> dict | None:
-    rows = select(table, filters, limit=1)
+def select_one(table: str, filters: dict[str, str], columns: str | None = None) -> dict | None:
+    rows = select(table, filters, limit=1, columns=columns)
     return rows[0] if rows else None
 
 

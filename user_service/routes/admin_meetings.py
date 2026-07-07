@@ -76,13 +76,30 @@ def _org_team_map(org_id: str | None) -> dict[str, str]:
     return {t["id"]: t["name"] for t in teams}
 
 
+# Skinny projection for list/board views — never loads the transcript / summary /
+# changes / diagnostics blobs. `title` comes from summary->>title server-side, and
+# `change_count` is the generated column (3b), so counting is free.
+_LIST_COLS = (
+    "session_id,team_id,status,meeting_url,bot_id,started_at,ended_at,"
+    "change_count,title:summary->>title"
+)
+
+
 def _title(s: dict) -> str:
+    # Projected rows carry a top-level `title`; full rows carry summary.title.
+    title = s.get("title")
+    if title:
+        return title
     summary = s.get("summary") or {}
     return summary.get("title") or f"Meeting {str(s.get('session_id', ''))[:8]}"
 
 
 def _base_fields(s: dict, team_map: dict[str, str]) -> dict:
     tid = s.get("team_id")
+    # Prefer the generated change_count column; fall back to counting a loaded blob.
+    change_count = s.get("change_count")
+    if change_count is None:
+        change_count = len(s.get("changes") or [])
     return {
         "session_id": s.get("session_id"),
         "team_id": tid,
@@ -93,7 +110,7 @@ def _base_fields(s: dict, team_map: dict[str, str]) -> dict:
         "bot_id": s.get("bot_id"),
         "started_at": s.get("started_at"),
         "ended_at": s.get("ended_at"),
-        "change_count": len(s.get("changes") or []),
+        "change_count": change_count,
     }
 
 
@@ -103,7 +120,7 @@ def _sessions_for_org(team_ids: list[str], extra: dict[str, str]) -> list[dict]:
         return []
     csv = ",".join(team_ids)
     filters = {"team_id": f"in.({csv})", **extra}
-    return select("jarvis_sessions", filters)
+    return select("jarvis_sessions", filters, columns=_LIST_COLS)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────

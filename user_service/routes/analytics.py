@@ -78,11 +78,15 @@ def _session_duration_mins(s: dict) -> float:
 
 
 def _fetch_team_sessions(team_id: str, since: datetime | None = None) -> list[dict]:
-    """Fetch ended sessions for a team, with optional date lower-bound."""
+    """Fetch ended sessions for a team, with optional date lower-bound.
+
+    Projects only the three fields the stats need — never loads the
+    transcript/summary/changes blobs (which duration math never touches).
+    """
     filters: dict[str, str] = {"team_id": f"eq.{team_id}", "status": "eq.ended"}
     if since:
         filters["started_at"] = f"gte.{_iso(since)}"
-    return select("jarvis_sessions", filters)
+    return select("jarvis_sessions", filters, columns="session_id,started_at,ended_at")
 
 
 def _compute_stats(all_sessions: list[dict], recent: list[dict]) -> dict:
