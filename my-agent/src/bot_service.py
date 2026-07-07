@@ -623,25 +623,64 @@ async def recall_webhook(request: Request) -> dict:
 # ── Endpoints: transcript ingestion ───────────────────────────────────────────
 @app.post("/livekit-transcript/{session_id}")
 async def receive_livekit_transcript(session_id: str, request: Request) -> dict:
-    """Deprecated ingest path — INTENTIONALLY IGNORED.
+    """Live meeting transcript ingest — LiveKit STT (fast, used DURING the call).
 
-    The meeting transcript is sourced exclusively from Recall native
-    transcription (the `transcript.data` webhook → session_transcript_turns).
-    The agent's LiveKit STT stream duplicated that content and drove the old
-    O(N^2) blob rewrite, so it is no longer stored. The endpoint stays (the
-    agent posts to it fire-and-forget) but is now a no-op acknowledgement.
+    This is the live/real-time transcript stored on jarvis_sessions.transcript and
+    shown in the live view. Post-meeting artifacts (proposals/summary/MOM/action
+    items) instead use the diarized Recall transcript in session_transcript_turns.
     """
-    return {"ok": True, "ignored": "livekit transcript not stored (recall is source of truth)"}
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return {"ok": True}
+
+    s = session_store.get(session_id)
+    if s is None:
+        now = _utcnow()
+        s = {
+            "session_id": session_id, "bot_id": None, "meeting_url": None,
+            "status": "in_meeting", "error": None, "changes": [], "transcript": [],
+            "transcript_memory_text": "", "summary": None, "extracted_meeting": None,
+            "pipeline_diagnostics": [], "started_at": now, "ended_at": None,
+            "updated_at": now, "team_id": None,
+        }
+        session_store.upsert(session_id, s)
+
+    entry = {
+        "participant": (body.get("speaker") or body.get("participant") or "Meeting").strip(),
+        "text": text,
+        "timestamp": body.get("timestamp") or datetime.datetime.utcnow().timestamp(),
+        "source": body.get("source") or "livekit",
+    }
+
+    transcript = list(s.get("transcript") or [])
+    transcript.append(entry)
+    if len(transcript) > 2000:
+        transcript = transcript[-2000:]
+
+    if session_id not in _compactors:
+        _compactors[session_id] = _new_compactor()
+        for prev in transcript[:-1]:
+            _compactors[session_id].observe_entry(prev)
+    _compactors[session_id].observe_entry(entry)
+    memory_text = _compactors[session_id].memory_text()
+
+    session_store.patch(session_id, {
+        "transcript": transcript,
+        "transcript_memory_text": memory_text,
+    })
+
+    return {"ok": True, "transcript_entries": len(transcript)}
 
 
 # ── Endpoints: transcript read ─────────────────────────────────────────────────
 @app.get("/sessions/{session_id}/review/transcript")
 async def get_transcript(session_id: str) -> list:
     try:
-        session_store.require(session_id)
+        s = session_store.require(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
-    return session_store.get_transcript_turns(session_id)
+    return s.get("transcript") or []
 
 
 # ── Endpoints: history ─────────────────────────────────────────────────────────
@@ -661,7 +700,7 @@ async def list_history() -> list:
             "summary": summary_obj.get("summary"),
             "change_count": len(s.get("changes") or []),
             "stats": {
-                "transcript_entries": s.get("transcript_turn_count") or 0,
+                "transcript_entries": len(s.get("transcript") or []),
                 "topic_count": len(summary_obj.get("key_topics") or []),
                 "decision_count": len(summary_obj.get("decisions") or []),
                 "action_item_count": len(summary_obj.get("action_items") or []),
