@@ -221,6 +221,82 @@ def record_participants(session: dict) -> None:
         logger.warning("org_activity.record_participants skipped: %s", exc)
 
 
+def _session_has_participants(session_id: str) -> bool:
+    resp = requests.get(
+        _url("meeting_participants"),
+        headers=_headers(),
+        params={"session_id": f"eq.{session_id}", "select": "id", "limit": "1"},
+        timeout=5,
+    )
+    return bool(resp.ok and resp.json())
+
+
+def backfill_participants_from_transcript(session: dict, speaker_names: list[str]) -> int:
+    """Best-effort historical attendance: derive attendees from a past meeting's
+    diarized speaker names (no join/leave available). Rows are flagged
+    source='backfill' and credited the whole-meeting duration. Skips any session
+    that already has real presence rows. Returns rows written. Never raises."""
+    try:
+        if not _configured():
+            return 0
+        session_id = session.get("session_id")
+        team_id = session.get("team_id")
+        if not session_id or not team_id or not speaker_names:
+            return 0
+        if str(session_id).startswith("seed-"):
+            return 0
+        if _session_has_participants(session_id):
+            return 0  # real attendance already recorded — don't overwrite with a guess
+
+        roster, org_id = _team_roster(team_id)
+        duration = _duration_mins(session)
+        started = session.get("started_at")
+        ended = session.get("ended_at")
+
+        # Distinct speaker names (case/space-insensitive), ignore the bot itself.
+        seen: dict[str, str] = {}
+        for raw in speaker_names:
+            key = _normalize_name(raw)
+            if not key or key in ("jarvis", "meeting", "meeting assistant"):
+                continue
+            seen.setdefault(key, raw)
+
+        rows = []
+        for key, raw in seen.items():
+            uid, confidence = _resolve_participant(raw, roster)
+            rows.append({
+                "session_id": session_id,
+                "team_id": team_id,
+                "org_id": org_id,
+                "recall_participant_id": f"backfill:{key}",
+                "recall_name": raw,
+                "user_id": uid,
+                "match_confidence": confidence,
+                "is_guest": uid is None,
+                "joined_at": started,
+                "left_at": ended,
+                "duration_mins": duration or None,
+                "source": "backfill",
+            })
+        if not rows:
+            return 0
+        resp = requests.post(
+            _url("meeting_participants"),
+            headers=_headers(prefer="resolution=merge-duplicates"),
+            params={"on_conflict": "session_id,recall_participant_id"},
+            json=rows,
+            timeout=8,
+        )
+        if resp.ok or resp.status_code == 409:
+            logger.info("backfill: %d participants for session %s", len(rows), session_id)
+            return len(rows)
+        logger.warning("backfill insert failed (%s): %s", resp.status_code, resp.text[:120])
+        return 0
+    except Exception as exc:
+        logger.warning("org_activity.backfill_participants skipped: %s", exc)
+        return 0
+
+
 def record_meeting_activity(session: dict) -> None:
     """Record per-member attendance for an ended meeting. Never raises."""
     try:

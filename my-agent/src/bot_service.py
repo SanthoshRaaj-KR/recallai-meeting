@@ -494,7 +494,9 @@ async def session_bot_status(session_id: str) -> dict:
                     session_store.patch(session_id, updates)
                     s = {**s, **updates}
                     if new_status == "ended":
-                        org_activity.record_meeting_activity(s)
+                        _backfill_participants_from_recall(s)
+                        s = session_store.get(session_id) or s
+                        org_activity.record_participants(s)  # real per-attendee attendance
                         _bg_extract_action_items(s)
         except Exception as exc:
             logger.debug("Recall status poll error: %s", exc)
@@ -547,8 +549,7 @@ async def stop_bot(session_id: str) -> dict:
     # Authoritative participant list before crediting attendance.
     _backfill_participants_from_recall(s)
     s = session_store.get(session_id) or s
-    org_activity.record_meeting_activity(s)
-    org_activity.record_participants(s)  # real per-attendee rows
+    org_activity.record_participants(s)  # real per-attendee attendance
     _bg_extract_action_items(s)
     return {
         "status": "ended", "session_id": session_id, "bot_id": s.get("bot_id"),
@@ -675,8 +676,7 @@ async def recall_webhook(request: Request) -> dict:
                     # Pull the authoritative participant list before crediting attendance.
                     _backfill_participants_from_recall(ended)
                     ended = session_store.get(s["session_id"]) or ended
-                    org_activity.record_meeting_activity(ended)
-                    org_activity.record_participants(ended)  # real per-attendee rows
+                    org_activity.record_participants(ended)  # real per-attendee attendance
                     _bg_extract_action_items(ended)
 
     # ── Recall participant presence (real attendance: join / leave) ──────────────
