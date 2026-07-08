@@ -24,6 +24,7 @@ import os
 import time
 from typing import Any
 
+from ..rag import page_needs_reindex
 from ..text_utils import clean_inline_text, looks_like_storage_html, storage_to_markdown
 from .models import ChunkRecord
 
@@ -426,14 +427,9 @@ class PineconeHybridIndex:
                 stale.append(listing)
             else:
                 live_version: int | None = listing.get("version")
-                pinecone_version = stored_versions.get(pid)
-                is_new = pid not in stored_versions
-                is_changed = (
-                    live_version is not None
-                    and pinecone_version is not None
-                    and live_version > pinecone_version
-                )
-                if is_new or is_changed:
+                if page_needs_reindex(
+                    live_version, stored_versions.get(pid), pid in stored_versions
+                ):
                     stale.append(listing)
                 else:
                     skipped += 1

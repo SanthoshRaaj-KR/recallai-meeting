@@ -64,6 +64,36 @@ def _bm25_scores(query: str, texts: list[str]) -> list[float]:
     return scores
 
 
+def page_needs_reindex(
+    live_version: int | None,
+    stored_version: int | None,
+    is_indexed: bool,
+) -> bool:
+    """Decide whether a page must be re-embedded during an incremental sync.
+
+    Re-index unless we can POSITIVELY confirm the indexed copy is current:
+      - not indexed yet              -> reindex (new page)
+      - stored version unknown       -> reindex. This is the important one: the
+        Pinecone version fetch may have FAILED for a batch (metadata unreadable),
+        or the stored metadata simply lacked a version. Either way we cannot
+        verify freshness, so we must NOT silently skip a possibly-stale page.
+      - live version > stored        -> reindex (page was edited in Confluence)
+      - live version <= stored       -> fresh, skip
+      - live version unknown, stored known -> skip (can't detect a change; avoid
+        re-embedding every page on every sync when the listing lacks a version)
+
+    Shared by ConfluenceVectorIndex and PineconeHybridIndex so the two indexes
+    can never drift apart on this correctness-critical decision.
+    """
+    if not is_indexed:
+        return True
+    if stored_version is None:
+        return True
+    if live_version is None:
+        return False
+    return live_version > stored_version
+
+
 @dataclass
 class PageChunk:
     id: str
@@ -632,14 +662,9 @@ class ConfluenceVectorIndex:
                 stale.append(listing)
                 continue
             live_version: int | None = listing.get("version")
-            pinecone_version = stored_versions.get(pid)
-            is_new = pid not in stored_versions
-            is_changed = (
-                live_version is not None
-                and pinecone_version is not None
-                and live_version > pinecone_version
-            )
-            if is_new or is_changed:
+            if page_needs_reindex(
+                live_version, stored_versions.get(pid), pid in stored_versions
+            ):
                 stale.append(listing)
             else:
                 skipped += 1
