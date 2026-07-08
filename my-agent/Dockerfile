@@ -62,24 +62,25 @@ COPY requirements-otel.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /app/.venv/bin/python -r requirements-otel.txt
 
-# Copy all remaining application files into the container
-# This includes source code, configuration files, and dependency specifications
-# (Excludes files specified in .dockerignore)
-COPY . .
-
-# Pre-download any ML models or files the agent needs
-# This ensures the container is ready to run immediately without downloading
-# dependencies at runtime, which improves startup time and reliability
+# Pre-download ML models (Silero VAD + turn detector) BEFORE copying the app
+# source. This runs a STANDALONE script (src/download_models.py) that imports only
+# the model plugins — not agent.py — so this layer depends ONLY on that script +
+# the installed deps. A change to any OTHER application source file therefore does
+# NOT invalidate this layer: the models are cached exactly like `uv sync` and are
+# never re-downloaded on an app-code rebuild.
 #
-# The COPY . . layer above is invalidated on nearly every source change, which
-# would otherwise force a full re-download here too. Download into a BuildKit
-# cache mount (persists across builds regardless of layer invalidation) and
-# copy the result into the image, so a source change only costs a local copy,
-# not a re-download.
+# The BuildKit cache mount additionally avoids a network re-download on the rare
+# dep/script change that does re-run this layer.
+COPY src/download_models.py ./src/download_models.py
 RUN --mount=type=cache,target=/root/.cache/agent-model-dl \
-    HF_HOME=/root/.cache/agent-model-dl uv run "src/agent.py" download-files && \
+    HF_HOME=/root/.cache/agent-model-dl uv run --no-sync src/download_models.py && \
     mkdir -p /app/.cache/huggingface && \
     cp -a /root/.cache/agent-model-dl/. /app/.cache/huggingface/
+
+# Copy all remaining application files into the container. This layer is
+# invalidated on any source change, but the deps + model layers above stay cached.
+# (Excludes files specified in .dockerignore)
+COPY . .
 
 # --- Production stage ---
 # Build tools (gcc, g++, python3-dev) are not included in the final image
