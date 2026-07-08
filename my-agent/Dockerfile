@@ -49,12 +49,18 @@ RUN mkdir -p src
 # --locked ensures we use exact versions from uv.lock for reproducible builds
 # This creates a virtual environment and installs all dependencies
 # Ensure your uv.lock file is checked in for consistency across environments
-RUN uv sync --locked
+#
+# The BuildKit cache mount persists uv's package cache ACROSS builds, so even if
+# this layer re-runs (e.g. uv.lock changed) wheels come from the local cache
+# instead of being re-downloaded from PyPI.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked
 
 # Observability deps in an ISOLATED layer so uv.lock stays pristine and
 # `uv sync --locked` above keeps working. See deploy/observability/README.md.
 COPY requirements-otel.txt ./
-RUN uv pip install --python /app/.venv/bin/python -r requirements-otel.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /app/.venv/bin/python -r requirements-otel.txt
 
 # Copy all remaining application files into the container
 # This includes source code, configuration files, and dependency specifications
