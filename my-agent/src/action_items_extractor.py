@@ -66,6 +66,12 @@ def _transcript_text(session: dict, limit_chars: int = 16000) -> str:
         if txt:
             lines.append(f"{who}: {txt}")
     text = "\n".join(lines)
+    # Diagnostic: how much diarized Recall transcript actually reached the LLM.
+    # If this logs 0 turns, the post-meeting input is empty (nothing for the LLM).
+    logger.info(
+        "action_items: transcript for %s — %d Recall turns, %d chars",
+        session.get("session_id", ""), len(entries), len(text),
+    )
     return text[-limit_chars:]  # keep the tail (most recent / wrap-up) if very long
 
 
@@ -115,6 +121,7 @@ def _org_id_for_team(team_id: str) -> str | None:
 def _llm_extract(transcript: str, roster: list[dict]) -> list[dict]:
     """Ask the LLM for [{description, assignee, due}]. Returns [] on any failure."""
     if not transcript.strip():
+        logger.warning("action_items: transcript is EMPTY — no Recall diarized turns; skipping LLM")
         return []
     names = [m["name"] for m in roster if m["name"]]
     sys_prompt = (
@@ -144,17 +151,23 @@ def _llm_extract(transcript: str, roster: list[dict]) -> list[dict]:
         return resp.choices[0].message.content or "{}"
 
     raw = None
+    provider = None
     if _CEREBRAS_API_KEY:
         try:
             raw = _call(OpenAI(api_key=_CEREBRAS_API_KEY, base_url=_CEREBRAS_BASE_URL), _CEREBRAS_MODEL)
+            provider = f"cerebras:{_CEREBRAS_MODEL}"
         except Exception as exc:
             logger.warning("action_items: Cerebras extract failed (%s); trying OpenAI", exc)
     if raw is None:
         try:
             raw = _call(OpenAI(), "gpt-4o-mini")
+            provider = "openai:gpt-4o-mini"
         except Exception as exc:
             logger.warning("action_items: LLM extract failed: %s", exc)
             return []
+
+    # Log the raw answer the LLM sent back (truncated) so it can be inspected in logs.
+    logger.info("action_items: LLM answer (%s): %s", provider, (raw or "")[:1500])
 
     try:
         data = json.loads(raw)
