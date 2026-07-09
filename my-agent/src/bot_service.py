@@ -42,6 +42,7 @@ try:
     from .memory_compaction import TranscriptCompactor
     from . import session_store
     from . import org_activity
+    from . import rag_sync_store
     from . import action_items_extractor
     from .review_pipeline.rag import ConfluenceVectorIndex
     from .review_pipeline.confluence import RestConfluenceClient
@@ -51,6 +52,7 @@ except ImportError:
     from memory_compaction import TranscriptCompactor
     import session_store
     import org_activity
+    import rag_sync_store
     import action_items_extractor
     from review_pipeline.rag import ConfluenceVectorIndex
     from review_pipeline.confluence import RestConfluenceClient
@@ -81,6 +83,9 @@ LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 SERVER_URL = os.getenv("BRIDGE_SERVER_URL", "").rstrip("/")
 BOT_NAME = os.getenv("BOT_NAME", "Meeting Assistant")
 AGENT_NAME = os.getenv("AGENT_NAME", "my-agent")
+# This bot-service serves a single organisation; used to key the durable, org-global
+# RAG sync status so every admin/manager sees the same "last synced".
+_ORG_ID = os.getenv("ORG_ID", "").strip()
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "8"))
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
@@ -942,9 +947,11 @@ async def _run_rag_sync(job_id: str) -> None:
             "RAG sync %s complete: rag_changed=%d hybrid_changed=%d skipped=%d failed=%d",
             job_id, result["changed"], hybrid_result["changed"], result["skipped"], result["failed"],
         )
+        rag_sync_store.save(job, _ORG_ID)  # durable org-global status
     except Exception as exc:  # noqa: BLE001
         logger.error("RAG sync %s failed: %s", job_id, exc)
         job.update({"status": "error", "error": str(exc), "finished_at": _utcnow()})
+        rag_sync_store.save(job, _ORG_ID)
 
 
 # ── Knowledge-base write auth ───────────────────────────────────────────────────
@@ -1004,23 +1011,36 @@ async def start_rag_sync(claims: dict = Depends(require_kb_editor)) -> dict:
         "error": None,
         "started_at": _utcnow(),
         "finished_at": None,
+        "synced_by": claims.get("sub"),
     }
+    rag_sync_store.save(_sync_jobs[job_id], _ORG_ID)  # publish "running" org-wide
     asyncio.create_task(_run_rag_sync(job_id))
     return {"job_id": job_id, "status": "running"}
 
 
 @app.get("/rag/sync/latest")
 async def get_latest_rag_sync() -> dict:
-    """Return the most recently started sync job, or 404 if none."""
-    if not _sync_jobs:
-        raise HTTPException(status_code=404, detail="No sync job found")
-    latest = max(_sync_jobs.values(), key=lambda j: j.get("started_at", ""))
-    return latest
+    """Return the org's latest sync — durable and shared across restarts.
+
+    Prefers the in-memory job while one is live (for real-time progress), otherwise
+    reads the persisted org-global status from Supabase.
+    """
+    mem = max(_sync_jobs.values(), key=lambda j: j.get("started_at", "")) if _sync_jobs else None
+    db = rag_sync_store.latest(_ORG_ID)
+    # In-memory wins on ties so live progress is shown during an active sync.
+    if mem and (not db or mem.get("started_at", "") >= db.get("started_at", "")):
+        return mem
+    if db:
+        return db
+    raise HTTPException(status_code=404, detail="No sync job found")
 
 
 @app.get("/rag/sync/{job_id}")
 async def get_rag_sync_status(job_id: str) -> dict:
-    """Poll the status and progress of a sync job."""
-    if job_id not in _sync_jobs:
-        raise HTTPException(status_code=404, detail=f"Sync job {job_id!r} not found")
-    return _sync_jobs[job_id]
+    """Poll the status and progress of a sync job (in-memory, else persisted)."""
+    if job_id in _sync_jobs:
+        return _sync_jobs[job_id]
+    db = rag_sync_store.get(job_id, _ORG_ID)
+    if db:
+        return db
+    raise HTTPException(status_code=404, detail=f"Sync job {job_id!r} not found")
