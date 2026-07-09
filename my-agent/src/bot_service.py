@@ -790,11 +790,19 @@ async def receive_livekit_transcript(session_id: str, request: Request) -> dict:
 # ── Endpoints: transcript read ─────────────────────────────────────────────────
 @app.get("/sessions/{session_id}/review/transcript")
 async def get_transcript(session_id: str) -> list:
+    """Return a session's transcript entries ({participant, text, timestamp, source}).
+
+    Includes the diarized Recall turns (source="recall", real speaker names) — which
+    the UI displays — followed by the live LiveKit STT lines (source="livekit") so any
+    consumer can filter by source. Recall turns first, in chronological (seq) order.
+    """
     try:
         s = session_store.require(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
-    return s.get("transcript") or []
+    recall_turns = session_store.get_transcript_turns(session_id)
+    livekit = s.get("transcript") or []
+    return recall_turns + livekit
 
 
 # ── Endpoints: history ─────────────────────────────────────────────────────────
