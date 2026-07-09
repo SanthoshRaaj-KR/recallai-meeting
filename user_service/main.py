@@ -42,7 +42,8 @@ API surface:
 
     GET    /teams/{id}/bot                 assigned bot
     POST   /teams/{id}/bot                 assign bot (CEO)
-    GET    /teams/{id}/meetings            team-scoped meetings
+    GET    /teams/{id}/meetings            team meeting history (any team member)
+    GET    /teams/{id}/meetings/{sid}/participants  per-person in-call time (team manager/ADMIN)
 
     GET    /admin/meetings/live           live meetings org-wide (ADMIN/CEO)
     GET    /admin/meetings                meeting history org-wide (ADMIN/CEO)

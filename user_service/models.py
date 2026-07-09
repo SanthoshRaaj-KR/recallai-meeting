@@ -127,6 +127,10 @@ class TeamOut(BaseModel):
     member_count: int = 0
     bot_assigned: bool = False
     description: Optional[str] = None
+    # The requesting caller's role *within this team* ("MANAGER"/"MEMBER"/…), or
+    # their org role ("CEO"/"ADMIN") if they aren't a member. Lets the UI decide
+    # which management controls to show without an extra round-trip.
+    viewer_team_role: Optional[str] = None
 
 
 class TeamUpdate(BaseModel):
