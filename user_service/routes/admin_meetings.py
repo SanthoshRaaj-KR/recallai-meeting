@@ -271,12 +271,14 @@ def assign_participant(
     return {"ok": True, "session_id": session_id, "row_id": row_id, "user_id": user_id}
 
 
-@router.post("/{session_id}/kick")
-def kick_meeting(session_id: str, claims: dict = Depends(require_admin_or_above())):
-    """Remove the Jarvis bot from a running meeting (org-ownership enforced)."""
-    s, _ = _require_owned_session(session_id, claims)
+def stop_meeting_bot(session_id: str, session: dict, actor: str | None = None) -> dict:
+    """Proxy a bot-stop to bot-service (the executor). Shared by the org-wide admin
+    kick and the team-scoped manager kick — both authorize first, then call this.
 
-    if s.get("status") in ("ended", "error"):
+    `session` is the already-loaded jarvis_sessions row (for the ended-state check).
+    Raises HTTPException (409/502/503) on any problem; returns bot-service's JSON.
+    """
+    if session.get("status") in ("ended", "error"):
         raise HTTPException(409, "This meeting has already ended")
 
     if not _BOT_SERVICE_URL:
@@ -302,10 +304,15 @@ def kick_meeting(session_id: str, claims: dict = Depends(require_admin_or_above(
         logger.warning("kick: bot-service returned %s for %s", resp.status_code, session_id)
         raise HTTPException(502, f"Bot service rejected the stop ({resp.status_code})")
 
-    logger.info(
-        "kick: admin %s stopped meeting %s", claims.get("sub"), session_id
-    )
+    logger.info("kick: %s stopped meeting %s", actor or "admin", session_id)
     try:
         return resp.json()
     except Exception:
         return {"status": "ended", "session_id": session_id}
+
+
+@router.post("/{session_id}/kick")
+def kick_meeting(session_id: str, claims: dict = Depends(require_admin_or_above())):
+    """Remove the Jarvis bot from a running meeting (org-ownership enforced)."""
+    s, _ = _require_owned_session(session_id, claims)
+    return stop_meeting_bot(session_id, s, actor=claims.get("sub"))

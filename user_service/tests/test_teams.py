@@ -136,8 +136,15 @@ def test_plain_member_cannot_add_member():
     assert r.status_code == 403
 
 
-def test_team_manager_can_add_member():
+def test_team_manager_cannot_add_member():
+    # People-management is ADMIN/CEO-only now: a team MANAGER may NOT add members.
     client = _as("MEMBER", "u-mgr")  # team MANAGER
+    r = client.post("/teams/tA/members", json={"user_id": "u-new", "role": "MEMBER"})
+    assert r.status_code == 403
+
+
+def test_admin_can_add_member():
+    client = _as("ADMIN", "u-admin")
     r = client.post("/teams/tA/members", json={"user_id": "u-new", "role": "MEMBER"})
     assert r.status_code == 201
     assert r.json()["user_id"] == "u-new"
@@ -148,6 +155,6 @@ def test_admin_can_remove_member():
     assert client.delete("/teams/tA/members/u-mem").status_code == 204
 
 
-def test_plain_member_cannot_remove_member():
-    client = _as("MEMBER", "u-mem")
-    assert client.delete("/teams/tA/members/u-mgr").status_code == 403
+def test_team_manager_cannot_remove_member():
+    client = _as("MEMBER", "u-mgr")  # team MANAGER, but no people-management
+    assert client.delete("/teams/tA/members/u-mem").status_code == 403

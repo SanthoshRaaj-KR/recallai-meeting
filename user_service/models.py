@@ -202,3 +202,11 @@ class HierarchyNode(BaseModel):
 
 
 HierarchyNode.model_rebuild()
+
+
+class PersonalHierarchy(BaseModel):
+    """A user-centric reporting view: the chain of managers above them (nearest
+    first) and the subtree of people who report to them."""
+    me: UserOut
+    manager_chain: list[UserOut] = []       # direct manager → … → top
+    reports: list[HierarchyNode] = []        # direct-report subtrees

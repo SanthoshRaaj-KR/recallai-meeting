@@ -17,10 +17,19 @@ def is_team_manager(team_id: str, user_id: str) -> bool:
 
 
 def can_manage_team(claims: dict, team_id: str) -> bool:
-    """Effective team-write privilege: org ADMIN/CEO, or the MANAGER of *this* team.
+    """Team-**write** privilege (create/delete team, add/remove/invite member, edit):
+    ADMIN/CEO only. Managers cannot manage people — that is an admin power.
+    """
+    return claims.get("role") in OrgRole.admin_and_above
 
-    This is the single source of truth behind every team-scoped write (add/remove
-    member, invite, edit) and the manager-only meeting participant view.
+
+def can_oversee_team(claims: dict, team_id: str) -> bool:
+    """Team **oversight** privilege (view per-meeting participant in-call time, kick a
+    bot from the team's meeting): ADMIN/CEO, or the MANAGER of *this* team.
+
+    Read/observe only — never grants people-management. Kept separate from
+    ``can_manage_team`` so a team manager can watch their meetings without being able
+    to add or remove members.
     """
     if claims.get("role") in OrgRole.admin_and_above:
         return True

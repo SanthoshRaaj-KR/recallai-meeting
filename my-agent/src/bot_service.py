@@ -32,7 +32,7 @@ from typing import Optional
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from livekit import api as livekit_api
@@ -947,9 +947,34 @@ async def _run_rag_sync(job_id: str) -> None:
         job.update({"status": "error", "error": str(exc), "finished_at": _utcnow()})
 
 
+# ── Knowledge-base write auth ───────────────────────────────────────────────────
+# Updating the KB is a manager-and-above action. The org-service issues the JWT
+# (HS256, shared JWT_SECRET); we verify it here and check the role. Fails closed:
+# if JWT_SECRET is unset we refuse rather than silently allow.
+
+_JWT_SECRET = os.getenv("JWT_SECRET", "")
+_KB_EDITOR_ROLES = {"CEO", "ADMIN", "MANAGER"}
+
+
+def require_kb_editor(authorization: Optional[str] = Header(default=None)) -> dict:
+    if not _JWT_SECRET:
+        raise HTTPException(503, "Knowledge-base auth is not configured (JWT_SECRET unset)")
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        import jwt as _pyjwt
+        claims = _pyjwt.decode(token, _JWT_SECRET, algorithms=["HS256"])
+    except Exception as exc:  # noqa: BLE001 — any decode/expiry failure → 401
+        raise HTTPException(status_code=401, detail=f"Invalid or expired token: {exc}")
+    if claims.get("role") not in _KB_EDITOR_ROLES:
+        raise HTTPException(status_code=403, detail="Only a manager, ADMIN, or CEO can update the knowledge base")
+    return claims
+
+
 @app.post("/rag/sync")
-async def start_rag_sync() -> dict:
-    """Start an incremental Confluence → Pinecone re-index job.
+async def start_rag_sync(claims: dict = Depends(require_kb_editor)) -> dict:
+    """Start an incremental Confluence → Pinecone re-index job. Manager+ only.
 
     Returns immediately with a ``job_id``.  Poll ``GET /rag/sync/{job_id}``
     for progress.  Only pages whose Confluence version number is higher than

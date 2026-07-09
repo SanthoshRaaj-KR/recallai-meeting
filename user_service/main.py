@@ -44,6 +44,10 @@ API surface:
     POST   /teams/{id}/bot                 assign bot (CEO)
     GET    /teams/{id}/meetings            team meeting history (any team member)
     GET    /teams/{id}/meetings/{sid}/participants  per-person in-call time (team manager/ADMIN)
+    POST   /teams/{id}/meetings/{sid}/kick  kick bot from a team meeting (team manager/ADMIN)
+
+    GET    /org/hierarchy                  full org tree (ADMIN/CEO)
+    GET    /org/hierarchy/me               personal reporting tree (any user)
 
     GET    /admin/meetings/live           live meetings org-wide (ADMIN/CEO)
     GET    /admin/meetings                meeting history org-wide (ADMIN/CEO)

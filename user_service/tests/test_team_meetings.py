@@ -18,6 +18,7 @@ from user_service.main import app
 from user_service.auth import get_current_user
 from user_service import rbac
 from user_service.routes import bots
+from user_service.routes import admin_meetings as am
 
 
 # ── Fake data ────────────────────────────────────────────────────────────────
@@ -42,6 +43,10 @@ SESSIONS = [
     {"session_id": "s-tZ", "team_id": "tZ", "status": "ended",
      "meeting_url": "uZ", "started_at": "2026-06-19T09:00:00Z",
      "ended_at": "2026-06-19T09:10:00Z", "summary": {}, "changes": [], "bot_id": "bZ"},
+    # A live meeting for the kick tests.
+    {"session_id": "s-live", "team_id": "tA", "status": "in_meeting",
+     "meeting_url": "uL", "started_at": "2026-06-19T10:00:00Z", "ended_at": None,
+     "summary": {"title": "Standup"}, "changes": [], "bot_id": "bL"},
 ]
 
 PARTICIPANTS = [
@@ -122,9 +127,10 @@ def test_member_can_list_team_meetings():
     r = client.get("/teams/tA/meetings")
     assert r.status_code == 200
     body = r.json()
-    assert {m["session_id"] for m in body} == {"s-tA"}
-    assert body[0]["duration_mins"] == 30.0
-    assert body[0]["change_count"] == 2
+    assert {m["session_id"] for m in body} == {"s-tA", "s-live"}
+    sprint = next(m for m in body if m["session_id"] == "s-tA")
+    assert sprint["duration_mins"] == 30.0
+    assert sprint["change_count"] == 2
 
 
 def test_non_member_forbidden_on_list():
@@ -165,3 +171,44 @@ def test_plain_member_forbidden_on_participants():
 def test_participants_wrong_team_rejected():
     client = _as("MEMBER", "u-mgr")  # manager of tA asking for a tZ session via tA
     assert client.get("/teams/tA/meetings/s-tZ/participants").status_code == 403
+
+
+# ── Kick: team manager / admin only ──────────────────────────────────────────
+
+class _StopResp:
+    ok = True
+    status_code = 200
+
+    def json(self):
+        return {"status": "ended", "session_id": "s-live"}
+
+
+def test_manager_can_kick(monkeypatch):
+    monkeypatch.setattr(am, "_BOT_SERVICE_URL", "http://bot.test")
+    captured = {}
+
+    def _fake_post(url, headers=None, timeout=None):
+        captured["url"] = url
+        return _StopResp()
+
+    monkeypatch.setattr(am.requests, "post", _fake_post)
+    client = _as("MEMBER", "u-mgr")  # team MANAGER
+    r = client.post("/teams/tA/meetings/s-live/kick")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ended"
+    assert captured["url"] == "http://bot.test/sessions/s-live/bot/stop"
+
+
+def test_plain_member_cannot_kick():
+    client = _as("MEMBER", "u-mem")  # member of tA, not its manager
+    assert client.post("/teams/tA/meetings/s-live/kick").status_code == 403
+
+
+def test_kick_wrong_team_rejected():
+    client = _as("MEMBER", "u-mgr")  # tZ session via tA
+    assert client.post("/teams/tA/meetings/s-tZ/kick").status_code == 403
+
+
+def test_kick_already_ended_conflict():
+    client = _as("ADMIN", "u-admin")
+    assert client.post("/teams/tA/meetings/s-tA/kick").status_code == 409  # s-tA is ended

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import get_current_user
 from ..database import select, select_one
-from ..models import UserOut, HierarchyNode, OrgRole
+from ..models import UserOut, HierarchyNode, PersonalHierarchy, OrgRole
 from ..rbac import require_admin_or_above
 
 router = APIRouter(prefix="/org", tags=["hierarchy"])
@@ -48,3 +48,37 @@ def full_org_hierarchy(claims: dict = Depends(require_admin_or_above())):
         raise HTTPException(404, "No CEO found in this organisation")
 
     return _build_tree(ceo["id"], all_users, hierarchy_rows)
+
+
+@router.get("/hierarchy/me", response_model=PersonalHierarchy)
+def my_hierarchy(claims: dict = Depends(get_current_user)):
+    """Any user: their own reporting view — the manager chain above them and the
+    subtree of people who report to them. Powers the member/manager org chart."""
+    uid = claims["sub"]
+    me = select_one("org_users", {"id": f"eq.{uid}"})
+    if not me:
+        raise HTTPException(404, "User not found")
+
+    # Manager chain: ancestors at depth>0, nearest manager first.
+    anc_rows = select("org_reporting_hierarchy", {
+        "descendant_id": f"eq.{uid}", "depth": "gt.0", "order": "depth.asc",
+    })
+    manager_chain: list[UserOut] = []
+    for r in anc_rows:
+        u = select_one("org_users", {"id": f"eq.{r['ancestor_id']}"})
+        if u:
+            manager_chain.append(_to_user_out(u))
+
+    # Reports subtree: reuse _build_tree rooted at this user over the org's rows.
+    org_id = me.get("org_id")
+    users_list = select("org_users", {"org_id": f"eq.{org_id}"}) if org_id else []
+    all_users = {u["id"]: u for u in users_list}
+    all_users.setdefault(uid, me)
+    hierarchy_rows = select("org_reporting_hierarchy", {})
+    subtree = _build_tree(uid, all_users, hierarchy_rows)
+
+    return PersonalHierarchy(
+        me=_to_user_out(me),
+        manager_chain=manager_chain,
+        reports=subtree.direct_reports,
+    )

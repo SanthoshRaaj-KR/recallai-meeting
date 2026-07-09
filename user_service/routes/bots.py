@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from ..auth import get_current_user
 from ..database import select, select_one, insert, DBError
 from ..models import BotCreate, BotOut, OrgRole, TeamRole
-from ..rbac import require_admin_or_above, can_manage_team
+from ..rbac import require_admin_or_above, can_oversee_team
 
 router = APIRouter(tags=["bots"])
 
@@ -120,7 +120,7 @@ def team_meeting_participants(
         raise HTTPException(404, "Team not found")
     if team.get("org_id") != claims.get("org_id"):
         raise HTTPException(403, "This team is not in your organisation")
-    if not can_manage_team(claims, team_id):
+    if not can_oversee_team(claims, team_id):
         raise HTTPException(403, "Only a team manager, ADMIN, or CEO can view participant activity")
 
     s = select_one("jarvis_sessions", {"session_id": f"eq.{session_id}"}, columns="session_id,team_id")
@@ -153,3 +153,27 @@ def team_meeting_participants(
         }
         for r in rows
     ]
+
+
+@router.post("/teams/{team_id}/meetings/{session_id}/kick")
+def kick_team_meeting(
+    team_id: str, session_id: str, claims: dict = Depends(get_current_user),
+):
+    """Remove the Jarvis bot from one of a team's live meetings. Team MANAGER (or
+    ADMIN/CEO) only — the manager counterpart to the org-wide admin kick."""
+    team = select_one("org_teams", {"id": f"eq.{team_id}"}, columns="id,org_id")
+    if not team:
+        raise HTTPException(404, "Team not found")
+    if team.get("org_id") != claims.get("org_id"):
+        raise HTTPException(403, "This team is not in your organisation")
+    if not can_oversee_team(claims, team_id):
+        raise HTTPException(403, "Only a team manager, ADMIN, or CEO can kick a meeting")
+
+    s = select_one("jarvis_sessions", {"session_id": f"eq.{session_id}"}, columns="session_id,team_id,status")
+    if not s:
+        raise HTTPException(404, "Meeting not found")
+    if s.get("team_id") != team_id:
+        raise HTTPException(403, "This meeting does not belong to that team")
+
+    from .admin_meetings import stop_meeting_bot
+    return stop_meeting_bot(session_id, s, actor=claims.get("sub"))
