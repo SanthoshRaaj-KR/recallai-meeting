@@ -31,7 +31,7 @@ _TABLE = "rag_sync_status"
 _COLS = (
     "job_id", "status", "total", "total_stale", "checked", "changed",
     "skipped", "failed", "deleted", "current_page", "error",
-    "started_at", "finished_at", "synced_by",
+    "started_at", "finished_at", "synced_by", "synced_by_name",
 )
 
 
@@ -98,4 +98,22 @@ def get(job_id: str, org_id: str) -> dict | None:
     row = latest(org_id)
     if row and row.get("job_id") == job_id:
         return row
+    return None
+
+
+def user_name(user_id: str | None) -> str | None:
+    """Resolve an org_user's display name (for 'last synced by …'). Never raises."""
+    if not _configured() or not user_id:
+        return None
+    try:
+        resp = requests.get(
+            f"{_SUPABASE_URL}/rest/v1/org_users",
+            headers=_headers(),
+            params={"id": f"eq.{user_id}", "select": "name", "limit": "1"},
+            timeout=5,
+        )
+        if resp.ok and resp.json():
+            return resp.json()[0].get("name")
+    except Exception as exc:
+        logger.warning("rag_sync_store.user_name skipped: %s", exc)
     return None

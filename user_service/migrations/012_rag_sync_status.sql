@@ -26,5 +26,9 @@ create table if not exists rag_sync_status (
     started_at   timestamptz,
     finished_at  timestamptz,
     synced_by    text,
+    synced_by_name text,
     updated_at   timestamptz default now()
 );
+
+-- If the table already existed from an earlier run, add the name column.
+alter table rag_sync_status add column if not exists synced_by_name text;

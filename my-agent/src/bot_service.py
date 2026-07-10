@@ -1020,6 +1020,7 @@ async def start_rag_sync(claims: dict = Depends(require_kb_editor)) -> dict:
         "started_at": _utcnow(),
         "finished_at": None,
         "synced_by": claims.get("sub"),
+        "synced_by_name": rag_sync_store.user_name(claims.get("sub")),
     }
     rag_sync_store.save(_sync_jobs[job_id], _ORG_ID)  # publish "running" org-wide
     asyncio.create_task(_run_rag_sync(job_id))
