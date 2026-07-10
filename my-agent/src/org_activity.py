@@ -16,7 +16,6 @@ caller (meeting-end paths must not break on analytics).
 """
 
 import datetime
-import difflib
 import logging
 import os
 import re
@@ -24,6 +23,11 @@ import re
 import requests
 from dotenv import load_dotenv
 from pathlib import Path
+
+try:
+    from . import name_match
+except ImportError:
+    import name_match
 
 load_dotenv(Path(__file__).parent.parent / ".env.local")
 
@@ -77,9 +81,6 @@ def _duration_mins(session: dict) -> float:
 
 # ── Identity resolution: Recall display name → org_user (Phase 2) ───────────────
 
-_FUZZY_THRESHOLD = 0.85  # min SequenceMatcher ratio for a 'medium' match
-
-
 def _normalize_name(name: str | None) -> str:
     """Lowercase, strip, collapse whitespace, drop punctuation — so 'Alice B.' and
     'alice  b' compare equal. Device/label names ('iPhone') simply won't match."""
@@ -89,29 +90,18 @@ def _normalize_name(name: str | None) -> str:
     return re.sub(r"\s+", " ", n).strip()
 
 
-def _resolve_participant(rec_name: str, roster: dict[str, str]) -> tuple[str | None, str]:
-    """Match a Recall display name against a team roster {normalized_name: user_id}.
+def _resolve_participant(rec_name: str, candidates: list[dict]) -> tuple[str | None, str]:
+    """Match a Recall display name to one org user via token-aware matching.
 
-    Returns (user_id, confidence) where confidence is 'high' (exact normalized),
-    'medium' (fuzzy >= threshold), or 'none' (guest).
+    `candidates` is [{user_id, name, aliases}]. Returns (user_id, confidence) with
+    confidence 'high' / 'medium' / 'none' (see name_match.resolve). Ambiguous or
+    unmatched names return (None, 'none') so the caller records a guest row.
     """
-    key = _normalize_name(rec_name)
-    if not key:
-        return None, "none"
-    if key in roster:
-        return roster[key], "high"
-    best_uid, best_ratio = None, 0.0
-    for cand_key, uid in roster.items():
-        ratio = difflib.SequenceMatcher(None, key, cand_key).ratio()
-        if ratio > best_ratio:
-            best_uid, best_ratio = uid, ratio
-    if best_uid and best_ratio >= _FUZZY_THRESHOLD:
-        return best_uid, "medium"
-    return None, "none"
+    return name_match.resolve(rec_name, candidates)
 
 
-def _team_roster(team_id: str) -> tuple[dict[str, str], str | None]:
-    """Return ({normalized_name: user_id} for the team's members, org_id)."""
+def _team_roster(team_id: str) -> tuple[list[dict], str | None]:
+    """Return ([{user_id, name, aliases}] for the team's members, org_id)."""
     members = requests.get(
         _url("org_team_members"),
         headers=_headers(),
@@ -119,10 +109,10 @@ def _team_roster(team_id: str) -> tuple[dict[str, str], str | None]:
         timeout=5,
     )
     if not members.ok:
-        return {}, None
+        return [], None
     uids = [m["user_id"] for m in members.json() if m.get("user_id")]
     if not uids:
-        return {}, None
+        return [], None
     users = requests.get(
         _url("org_users"),
         headers=_headers(),
@@ -130,21 +120,17 @@ def _team_roster(team_id: str) -> tuple[dict[str, str], str | None]:
         timeout=5,
     )
     if not users.ok:
-        return {}, None
-    roster: dict[str, str] = {}
+        return [], None
+    candidates: list[dict] = []
     org_id: str | None = None
     for u in users.json():
         org_id = org_id or u.get("org_id")
-        key = _normalize_name(u.get("name"))
-        if key and key not in roster:  # first wins on duplicate names
-            roster[key] = u["id"]
-        # Admin-set aliases resolve deterministically (Phase 3). Stored normalised;
-        # an alias always wins for its owner (overwrites a name collision).
-        for alias in (u.get("display_name_aliases") or []):
-            ak = _normalize_name(alias)
-            if ak:
-                roster[ak] = u["id"]
-    return roster, org_id
+        candidates.append({
+            "user_id": u["id"],
+            "name": u.get("name") or "",
+            "aliases": u.get("display_name_aliases") or [],
+        })
+    return candidates, org_id
 
 
 def _participant_duration_mins(entry: dict, session: dict) -> float | None:
