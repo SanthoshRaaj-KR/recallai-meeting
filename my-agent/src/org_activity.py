@@ -100,6 +100,33 @@ def _resolve_participant(rec_name: str, candidates: list[dict]) -> tuple[str | N
     return name_match.resolve(rec_name, candidates)
 
 
+def _resolve_by_email(email: str | None, org_id: str | None) -> str | None:
+    """Authoritative match by the participant's login email — everyone signs in with
+    their work Google account, so the email uniquely identifies the org user
+    regardless of team (two 'Akshath's have different emails). Scoped to the meeting's
+    org so an email from another company is never matched. Returns user_id or None;
+    never raises."""
+    if not email or not org_id:
+        return None
+    try:
+        resp = requests.get(
+            _url("org_users"),
+            headers=_headers(),
+            params={
+                "email": f"eq.{email.strip().lower()}",
+                "org_id": f"eq.{org_id}",
+                "select": "id",
+                "limit": "1",
+            },
+            timeout=5,
+        )
+        if resp.ok and resp.json():
+            return resp.json()[0]["id"]
+    except Exception as exc:
+        logger.warning("org_activity: email resolve skipped: %s", exc)
+    return None
+
+
 def _team_roster(team_id: str) -> tuple[list[dict], str | None]:
     """Return ([{user_id, name, aliases}] for the team's members, org_id)."""
     members = requests.get(
@@ -162,7 +189,13 @@ def record_participants(session: dict) -> None:
         rows = []
         for pid, entry in presence.items():
             rec_name = entry.get("name")
-            uid, confidence = _resolve_participant(rec_name, roster)
+            # 1) Email is authoritative (work Google login) — match org-wide, exact.
+            uid = _resolve_by_email(entry.get("email"), org_id)
+            confidence = "high" if uid else "none"
+            # 2) No email (or not an org member) → fall back to name matching; still
+            #    unmatched → guest (uid stays None, is_guest below).
+            if not uid:
+                uid, confidence = _resolve_participant(rec_name, roster)
             rows.append({
                 "session_id": session_id,
                 "team_id": team_id,
