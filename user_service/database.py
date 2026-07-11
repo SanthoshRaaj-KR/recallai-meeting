@@ -91,6 +91,30 @@ def select_one(table: str, filters: dict[str, str], columns: str | None = None) 
     return rows[0] if rows else None
 
 
+def find_by_text_ci(table: str, column: str, value: str) -> dict | None:
+    """Case-insensitive, whitespace-trimmed single-row lookup by a text column.
+
+    PostgREST ``eq.`` is case-sensitive, so an email stored as ``John@x.com`` will
+    never match the ``john@x.com`` that Google/Supabase hands back — which wrongly
+    reports an existing user as "not in org". This tries the exact match first
+    (fast path / preserves behaviour), then falls back to a case-insensitive
+    ``ilike`` and confirms the hit with an exact lowercased compare in Python so
+    that wildcard characters in the value (``_`` and ``%`` are LIKE wildcards, and
+    ``_`` is legal in an email local part) can never produce a false positive.
+    """
+    norm = (value or "").strip()
+    if not norm:
+        return None
+    exact = select_one(table, {column: f"eq.{norm}"})
+    if exact:
+        return exact
+    escaped = norm.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    for cand in select(table, {column: f"ilike.{escaped}"}):
+        if str(cand.get(column) or "").strip().lower() == norm.lower():
+            return cand
+    return None
+
+
 def rpc(fn: str, params: dict) -> list[dict]:
     """Call a Postgres function via PostgREST (POST /rpc/<fn>). Used to push
     aggregation into the DB instead of looping in Python."""

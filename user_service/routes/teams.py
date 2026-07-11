@@ -246,8 +246,65 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     )
 
 
+def _team_manager_id(team_id: str) -> str | None:
+    """Return the user_id of the team's MANAGER, or None if the team has none."""
+    row = select_one("org_team_members", {
+        "team_id": f"eq.{team_id}", "role": f"eq.{TeamRole.MANAGER}",
+    })
+    return row["user_id"] if row else None
+
+
+def _link_member_to_manager(user_id: str, manager_id: str) -> None:
+    """Point one report at their manager: a depth-1 edge, plus a copy of the
+    manager's own ancestor chain at depth+1 so the member also rolls up to the CEO.
+
+    Idempotent — a duplicate (ancestor, descendant) pair violates the closure
+    table's primary key and raises DBError, which we swallow.
+    """
+    if not manager_id or user_id == manager_id:
+        return
+    try:
+        insert("org_reporting_hierarchy", {
+            "ancestor_id": manager_id, "descendant_id": user_id, "depth": 1,
+        })
+    except DBError:
+        pass
+    ancestors = select("org_reporting_hierarchy", {
+        "descendant_id": f"eq.{manager_id}", "depth": "gt.0",
+    })
+    for anc in ancestors:
+        try:
+            insert("org_reporting_hierarchy", {
+                "ancestor_id": anc["ancestor_id"],
+                "descendant_id": user_id,
+                "depth": anc["depth"] + 1,
+            })
+        except DBError:
+            pass
+
+
+def _wire_existing_members_under_manager(team_id: str, manager_id: str) -> None:
+    """Retro-wire every current MEMBER/ASSOCIATE of a team under its manager.
+
+    Called when a MANAGER is added to (or backfilled onto) a team: members who
+    were added *before* the manager existed had no reporting edge and were left
+    orphaned. Additive and idempotent — it never removes an existing edge, so a
+    member already reporting to this manager is untouched.
+    """
+    for m in select("org_team_members", {"team_id": f"eq.{team_id}"}):
+        if m.get("role") == TeamRole.MANAGER or m["user_id"] == manager_id:
+            continue
+        _link_member_to_manager(m["user_id"], manager_id)
+
+
 def _wire_hierarchy(team_id: str, user_id: str, team_role: str) -> None:
-    """Insert closure table rows so the new member appears in the right sub-tree."""
+    """Insert closure-table rows so a newly added member appears in the right
+    sub-tree.
+
+    - MANAGER → linked under the CEO, then **adopts every existing member of the
+      team** so people added before the manager report to them (not nobody).
+    - MEMBER/ASSOCIATE → linked under the team's current manager (if any).
+    """
     try:
         # Always add self-loop
         insert("org_reporting_hierarchy", {
@@ -257,38 +314,17 @@ def _wire_hierarchy(team_id: str, user_id: str, team_role: str) -> None:
         pass  # already exists (re-added after removal)
 
     if team_role == TeamRole.MANAGER:
-        # Find the CEO to link MANAGER → CEO at depth 1
+        # Link MANAGER → CEO at depth 1
         ceo = select_one("org_users", {"role": f"eq.{OrgRole.CEO}"})
-        if ceo:
+        if ceo and ceo["id"] != user_id:
             try:
                 insert("org_reporting_hierarchy", {
                     "ancestor_id": ceo["id"], "descendant_id": user_id, "depth": 1,
                 })
             except DBError:
                 pass
+        # A manager assigned after members already exist must adopt them, else
+        # those members report to no one — the "everyone reports to the manager" fix.
+        _wire_existing_members_under_manager(team_id, user_id)
     else:
-        # Find the team's manager to link MEMBER/ASSOCIATE → MANAGER at depth 1
-        manager_row = select_one("org_team_members", {
-            "team_id": f"eq.{team_id}", "role": f"eq.{TeamRole.MANAGER}",
-        })
-        if manager_row:
-            manager_id = manager_row["user_id"]
-            try:
-                insert("org_reporting_hierarchy", {
-                    "ancestor_id": manager_id, "descendant_id": user_id, "depth": 1,
-                })
-                # Also propagate the manager's ancestors (CEO) to this member at depth+1
-                ancestors = select("org_reporting_hierarchy", {
-                    "descendant_id": f"eq.{manager_id}", "depth": "gt.0",
-                })
-                for anc in ancestors:
-                    try:
-                        insert("org_reporting_hierarchy", {
-                            "ancestor_id": anc["ancestor_id"],
-                            "descendant_id": user_id,
-                            "depth": anc["depth"] + 1,
-                        })
-                    except DBError:
-                        pass
-            except DBError:
-                pass
+        _link_member_to_manager(user_id, _team_manager_id(team_id))

@@ -11,7 +11,7 @@ from ..auth import (
     create_access_token, decode_token,
     get_current_user,
 )
-from ..database import select_one, insert, update, DBError
+from ..database import select_one, insert, update, DBError, find_by_text_ci
 from ..models import RegisterRequest, LoginRequest, GoogleExchangeRequest, TokenResponse, OrgRole
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ def register(body: RegisterRequest):
         if existing_ceo:
             raise HTTPException(409, "An organisation already has a CEO. Contact your admin to be invited.")
 
-    existing = select_one("org_users", {"email": f"eq.{body.email}"})
+    existing = find_by_text_ci("org_users", "email", body.email)
     if existing:
         raise HTTPException(409, "Email already registered")
 
@@ -93,7 +93,7 @@ def register(body: RegisterRequest):
 
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest):
-    user = select_one("org_users", {"email": f"eq.{body.email}"})
+    user = find_by_text_ci("org_users", "email", body.email)
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(401, "Invalid email or password")
     if not user.get("is_active"):
@@ -162,7 +162,10 @@ def google_exchange(body: GoogleExchangeRequest):
     if not email:
         raise HTTPException(401, "Supabase token has no email claim")
 
-    user = select_one("org_users", {"email": f"eq.{email}"})
+    # Case-insensitive match: Google/Supabase may return the email in a different
+    # case than it was stored (invite/manual-add), which previously mis-reported an
+    # existing member — even a manager — as "not_in_org" and stranded them at login.
+    user = find_by_text_ci("org_users", "email", email)
     if not user:
         raise HTTPException(404, "not_in_org")
 

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import get_current_user
-from ..database import rpc, select, select_one, update, DBError
+from ..database import rpc, select, select_one, update, DBError, find_by_text_ci
 from ..models import UserOut, UserUpdate, MeetingStats, OrgRole
 from ..rbac import require_admin_or_above
 
@@ -89,7 +89,7 @@ def get_user_by_email(email: str, claims: dict = Depends(get_current_user)):
     """Look up a user by email. CEO or manager can use this for the invite flow."""
     if claims["role"] not in OrgRole.managers_and_above:
         raise HTTPException(403, "Only managers, ADMIN, or CEO can look up users by email")
-    row = select_one("org_users", {"email": f"eq.{email}"})
+    row = find_by_text_ci("org_users", "email", email)
     if not row:
         raise HTTPException(404, f"No user found with email {email}")
     return _to_user_out(row)

@@ -6,7 +6,7 @@ import datetime as dt
 from fastapi import APIRouter, HTTPException
 
 from ..auth import create_access_token, hash_password
-from ..database import DBError, delete, insert, select_one, update
+from ..database import DBError, delete, insert, select_one, update, find_by_text_ci
 from ..models import AcceptInviteRequest, OrgRole, TeamInviteOut
 from .teams import _wire_hierarchy
 
@@ -35,7 +35,7 @@ def _load_and_validate(code: str) -> dict:
 def get_invite(code: str):
     invite = _load_and_validate(code)
     team = select_one("org_teams", {"id": f"eq.{invite['team_id']}"})
-    existing = select_one("org_users", {"email": f"eq.{invite['email']}"})
+    existing = find_by_text_ci("org_users", "email", invite["email"])
     return TeamInviteOut(
         id=invite["id"],
         team_id=invite["team_id"],
@@ -59,7 +59,7 @@ def accept_invite(code: str, body: AcceptInviteRequest):
     if not team:
         raise HTTPException(404, "Team no longer exists")
 
-    existing_user = select_one("org_users", {"email": f"eq.{invite['email']}"})
+    existing_user = find_by_text_ci("org_users", "email", invite["email"])
 
     if existing_user:
         user_id = existing_user["id"]
