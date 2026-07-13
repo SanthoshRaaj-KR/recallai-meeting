@@ -1,13 +1,21 @@
-# VM-A — realtime box: bot-service (8000) + agent worker + Caddy TLS.
+# VM-A — realtime box: bot-service (8000) + agent worker.
+#
+# TLS/public HTTPS is handled by the SEPARATE self-hosted LiveKit stack
+# (~/livekit/vm-a-livekit-jarvis.../ on the VM — its own docker-compose.yaml +
+# caddy.yaml, all network_mode: host). That Caddy already automates a cert for
+# bot.104-43-112-6.nip.io and proxies it to localhost:8000. Do NOT add a
+# second Caddy here — two Caddys both binding :443 on the same VM just fight
+# over the port. Do NOT edit anything under ~/livekit/ from this repo either;
+# that stack is managed separately, out of band.
+#
+# Because the LiveKit Caddy dials plain "localhost:8000" (it's on host
+# networking), bot-service below publishes to the VM's loopback so that
+# Caddy can actually reach it — not to 0.0.0.0, so bot-service itself is never
+# directly reachable from the internet, only via Caddy's TLS front door.
+#
 # ENV FILE SOURCE (deploy): deploy/vm-a/.env  (co-located with this file — env_file: [.env])
 #   Do NOT use the repo-root Confluence/.env or my-agent/.env.local here.
 #   For local dev/testing use Confluence/docker-compose.local.yml instead.
-#
-# Phase 3 (local test): LIVEKIT_URL points at LiveKit Cloud; run this alone.
-# Phase 6 (prod VM):    run ALONGSIDE the livekit/generate compose on the VM.
-#   On Linux prod, prefer host networking so agent→127.0.0.1:8000 and
-#   agent→local livekit work; then set BRIDGE_INTERNAL_URL=http://127.0.0.1:8000.
-#   (Locally on Win/Mac, the bridge network + service DNS below is simpler.)
 #
 # Build the image once: `docker build -t my-agent:latest ../../my-agent`
 # (requires Docker Desktop running).
@@ -19,8 +27,8 @@ services:
       context: ../../my-agent
     command: ["uv", "run", "--no-sync", "uvicorn", "src.bot_service:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file: [.env]
-    expose:
-      - "8000"              # fronted by caddy below (public HTTPS via nip.io)
+    ports:
+      - "127.0.0.1:8000:8000"   # loopback only — reached by the host-networked LiveKit Caddy via localhost:8000
     restart: unless-stopped
 
   agent:
@@ -32,20 +40,3 @@ services:
     depends_on:
       - bot-service
     restart: unless-stopped
-
-  caddy:
-    image: caddy:2
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - bot-service
-    restart: unless-stopped
-
-volumes:
-  caddy_data:
-  caddy_config:
