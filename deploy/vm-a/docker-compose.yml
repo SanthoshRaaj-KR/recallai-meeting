@@ -29,6 +29,11 @@ services:
     env_file: [.env]
     ports:
       - "127.0.0.1:8000:8000"   # loopback only — reached by the host-networked LiveKit Caddy via localhost:8000
+    extra_hosts:
+      # Hairpin-NAT fix (documented in deploy/PROCESS.md, validated 2026-06-15):
+      # LIVEKIT_URL is this VM's own public domain. Without this, a container
+      # on the VM cannot connect back out to its own public IP to reach it.
+      - "vm-a-livekit-jarvis.southeastasia.cloudapp.azure.com:host-gateway"
     restart: unless-stopped
 
   agent:
@@ -37,6 +42,8 @@ services:
     env_file: [.env]
     environment:
       BRIDGE_INTERNAL_URL: "http://bot-service:8000"
+    extra_hosts:
+      - "vm-a-livekit-jarvis.southeastasia.cloudapp.azure.com:host-gateway"
     depends_on:
       - bot-service
     restart: unless-stopped
