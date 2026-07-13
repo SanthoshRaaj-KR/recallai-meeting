@@ -5,39 +5,63 @@
 # For real deployment use deploy/vm-a + deploy/vm-b instead (those compose files each
 # read their co-located .env from the deploy folder, NOT from here).
 #
-#   docker compose -f docker-compose.local.yml up -d --build
+# LIVE-RELOAD: source folders are bind-mounted into the containers so edits show up
+# without a rebuild. We deliberately mount only `src/` (my-agent) and the app folder
+# (user_service) — NOT the whole project directory — because the image's baked
+# .venv (my-agent, Linux-built by `uv sync`) and pre-downloaded HF models
+# (/app/.cache/huggingface) live under /app too. A `.:/app` style mount like a
+# Node.js `.:/app` bind-mount would shadow both and break the container (wrong-OS
+# binaries / models missing). uvicorn's `--reload` and the LiveKit `dev` command's
+# built-in watcher pick up the mounted changes automatically — no restart needed for
+# most edits.
+#
+#   docker compose -f docker-compose.local.yml up -d --build   # first run / after deps or Dockerfile change
+#   docker compose -f docker-compose.local.yml up -d           # subsequent runs — no rebuild needed
 #   curl http://localhost:8000/health   # bot-service
 #   curl http://localhost:8001/health   # confluence-service
 #   curl http://localhost:8003/health   # org-service
 #   docker compose -f docker-compose.local.yml logs -f agent
 #   docker compose -f docker-compose.local.yml down
+#
+# Rebuild (--build) only when you touch: pyproject.toml/uv.lock, requirements*.txt,
+# a Dockerfile, or add/remove a whole file that needs to exist at image-build time.
+# Plain edits to existing .py files under src/ never need a rebuild.
 
 services:
   bot-service:
     image: my-agent:latest
     build:
       context: ./my-agent
-    command: ["uv", "run", "--no-sync", "uvicorn", "src.bot_service:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uv", "run", "--no-sync", "uvicorn", "src.bot_service:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/src"]
     env_file: [my-agent/.env.local]
+    volumes:
+      - ./my-agent/src:/app/src
     ports:
       - "8000:8000"
     restart: unless-stopped
 
   agent:
     image: my-agent:latest
-    command: ["uv", "run", "--no-sync", "src/agent.py", "start"]
+    # `dev` (vs `start`) enables the LiveKit CLI's built-in file watcher, which
+    # restarts the worker on any change under the mounted src/ — same effect as
+    # nodemon, just LiveKit's own implementation.
+    command: ["uv", "run", "--no-sync", "src/agent.py", "dev"]
     env_file: [my-agent/.env.local]
     environment:
       # Reach bot-service over the compose network (transcript POST target).
       BRIDGE_INTERNAL_URL: "http://bot-service:8000"
+    volumes:
+      - ./my-agent/src:/app/src
     depends_on:
       - bot-service
     restart: unless-stopped
 
   confluence-service:
     image: my-agent:latest
-    command: ["uv", "run", "--no-sync", "uvicorn", "src.recall_bridge:app", "--host", "0.0.0.0", "--port", "8001"]
+    command: ["uv", "run", "--no-sync", "uvicorn", "src.recall_bridge:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--reload-dir", "/app/src"]
     env_file: [my-agent/.env.local]
+    volumes:
+      - ./my-agent/src:/app/src
     ports:
       - "8001:8001"
     restart: unless-stopped
@@ -47,7 +71,12 @@ services:
     build:
       context: ./user_service
     # org-service uses its own folder env (Supabase, JWT, CORS, SMTP, BOT_SERVICE_URL).
+    command: ["uvicorn", "user_service.main:app", "--host", "0.0.0.0", "--port", "8003", "--reload", "--reload-dir", "/app/user_service"]
     env_file: [user_service/.env]
+    volumes:
+      # user_service has no baked venv under this path (deps install to system
+      # site-packages), so the whole app folder is safe to mount.
+      - ./user_service:/app/user_service
     ports:
       - "8003:8003"
     restart: unless-stopped
