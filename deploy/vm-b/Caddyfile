@@ -1,4 +1,6 @@
-# VM-B reverse proxy. Replace api.your-domain.com with your real VM-B domain.
+# VM-B reverse proxy. Domain is nip.io (free wildcard DNS: <anything>.20-6-9-169.nip.io
+# resolves to 20.6.9.169) since there's no purchased domain for VM-B yet — swap
+# for a real domain later if you get one; just update this one line.
 # Caddy auto-provisions Let's Encrypt TLS for the domain.
 #
 # Path convention (must match the frontend's VITE_* base URLs, SERVICE_MAP §6):
@@ -7,7 +9,7 @@
 # handle_path strips the prefix so the upstream sees its native routes
 # (e.g. /conf-api/review/pipeline/start → /review/pipeline/start).
 
-api.your-domain.com {
+api.20-6-9-169.nip.io {
 	handle_path /conf-api/* {
 		reverse_proxy confluence-service:8001 {
 			# Stream SSE immediately — no buffering — so the 20-min
