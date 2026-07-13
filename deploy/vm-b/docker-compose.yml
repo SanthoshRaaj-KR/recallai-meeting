@@ -1,4 +1,4 @@
-# VM-B — low-compute box: confluence-service (8001) + org-service (8003) + Caddy TLS + Alloy.
+# VM-B — low-compute box: confluence-service (8001) + org-service (8003) + Caddy TLS.
 # ENV FILE SOURCE (deploy): deploy/vm-b/.env  (co-located with this file — env_file: [.env])
 #   Do NOT use the repo-root Confluence/.env or user_service/.env here.
 #   For local dev/testing use Confluence/docker-compose.local.yml instead.
@@ -17,8 +17,6 @@ services:
     # --no-sync: skip the runtime package rebuild (~20s). Deps are baked at image build.
     command: ["uv", "run", "--no-sync", "uvicorn", "src.recall_bridge:app", "--host", "0.0.0.0", "--port", "8001"]
     env_file: [.env]
-    environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4318"
     expose:
       - "8001"
     restart: unless-stopped
@@ -28,8 +26,6 @@ services:
     build:
       context: ../../user_service
     env_file: [.env]
-    environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4318"
     expose:
       - "8003"
     restart: unless-stopped
@@ -46,22 +42,6 @@ services:
     depends_on:
       - confluence-service
       - org-service
-    restart: unless-stopped
-
-  alloy:
-    image: grafana/alloy:latest
-    user: root          # needed to read /proc, /sys, and docker.sock
-    volumes:
-      - ../observability/alloy/config-vm-b.alloy:/etc/alloy/config.alloy:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /:/host/root:ro
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-    env_file:
-      - ../observability/alloy.env
-    ports:
-      - "127.0.0.1:12345:12345"   # Alloy debug UI — localhost only, SSH-tunnel to use
-    command: run /etc/alloy/config.alloy --server.http.listen-addr=0.0.0.0:12345
     restart: unless-stopped
 
 volumes:

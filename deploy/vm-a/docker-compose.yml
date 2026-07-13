@@ -1,4 +1,4 @@
-# VM-A — realtime box: bot-service (8000) + agent worker + Alloy observability.
+# VM-A — realtime box: bot-service (8000) + agent worker.
 # ENV FILE SOURCE (deploy): deploy/vm-a/.env  (co-located with this file — env_file: [.env])
 #   Do NOT use the repo-root Confluence/.env or my-agent/.env.local here.
 #   For local dev/testing use Confluence/docker-compose.local.yml instead.
@@ -8,8 +8,6 @@
 #   On Linux prod, prefer host networking so agent→127.0.0.1:8000 and
 #   agent→local livekit work; then set BRIDGE_INTERNAL_URL=http://127.0.0.1:8000.
 #   (Locally on Win/Mac, the bridge network + service DNS below is simpler.)
-#   NOTE: if you switch to network_mode: host, also change the OTEL endpoint to
-#   http://127.0.0.1:4318 and update alloy scrape targets to 127.0.0.1:<port>.
 #
 # Build the image once: `docker build -t my-agent:latest ../../my-agent`
 # (requires Docker Desktop running).
@@ -21,8 +19,6 @@ services:
       context: ../../my-agent
     command: ["uv", "run", "--no-sync", "uvicorn", "src.bot_service:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file: [.env]
-    environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4318"
     ports:
       - "8000:8000"        # public (Recall loads /bot-page, posts /recall-webhook)
     restart: unless-stopped
@@ -33,23 +29,6 @@ services:
     env_file: [.env]
     environment:
       BRIDGE_INTERNAL_URL: "http://bot-service:8000"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4318"
     depends_on:
       - bot-service
-    restart: unless-stopped
-
-  alloy:
-    image: grafana/alloy:latest
-    user: root          # needed to read /proc, /sys, and docker.sock
-    volumes:
-      - ../observability/alloy/config-vm-a.alloy:/etc/alloy/config.alloy:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /:/host/root:ro
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-    env_file:
-      - ../observability/alloy.env
-    ports:
-      - "127.0.0.1:12345:12345"   # Alloy debug UI — localhost only, SSH-tunnel to use
-    command: run /etc/alloy/config.alloy --server.http.listen-addr=0.0.0.0:12345
     restart: unless-stopped

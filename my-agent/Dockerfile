@@ -56,12 +56,6 @@ RUN mkdir -p src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked
 
-# Observability deps in an ISOLATED layer so uv.lock stays pristine and
-# `uv sync --locked` above keeps working. See deploy/observability/README.md.
-COPY requirements-otel.txt ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /app/.venv/bin/python -r requirements-otel.txt
-
 # Pre-download ML models (Silero VAD + turn detector) BEFORE copying the app
 # source. This runs a STANDALONE script (src/download_models.py) that imports only
 # the model plugins — not agent.py — so this layer depends ONLY on that script +

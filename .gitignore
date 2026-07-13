@@ -1,7 +1,5 @@
 myenv
 .env
-alloy.env
-deploy/observability/alloy.env
 env*.mp3
 *.wav
 
