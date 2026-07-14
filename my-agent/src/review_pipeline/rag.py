@@ -605,8 +605,9 @@ class ConfluenceVectorIndex:
                             at minimum ``{"page_id": str, "version": int|None}``.
             fetch_page_fn:  Callable ``(page_id: str) -> PageCandidate`` that
                             fetches the full page HTML.  Must be synchronous.
-            progress_cb:    Optional callable ``(done, total, page_title)``
-                            called after each page is processed.
+            progress_cb:    Optional callable ``(done, total, page_title, status)``
+                            called after each page is processed. ``status`` is
+                            ``"changed"`` or ``"failed"``.
 
         Returns:
             ``{"checked": int, "changed": int, "skipped": int, "failed": int}``
@@ -704,18 +705,20 @@ class ConfluenceVectorIndex:
         for listing in stale:
             pid = listing["page_id"]
             title = listing.get("title", pid)
+            status = "changed"
             try:
                 page = fetch_page_fn(pid)
                 self.upsert_page(page)
                 changed += 1
-                logger.debug("sync_index: re-indexed %r (page_id=%s)", title, pid)
+                logger.info("sync_index: [%d/%d] re-indexed %r (page_id=%s)", checked + 1, len(stale), title, pid)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
+                status = "failed"
                 logger.warning("sync_index: failed to re-index %r: %s", title, exc)
             checked += 1
             if progress_cb:
                 try:
-                    progress_cb(checked, len(stale), title)
+                    progress_cb(checked, len(stale), title, status)
                 except Exception:  # noqa: BLE001
                     pass
 

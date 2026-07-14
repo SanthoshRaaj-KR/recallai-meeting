@@ -442,6 +442,7 @@ class PineconeHybridIndex:
         for listing in stale:
             pid = listing["page_id"]
             title = listing.get("title", pid)
+            status = "changed"
             try:
                 page = fetch_page_fn(pid)
                 content_hash = hashlib.sha256(
@@ -465,14 +466,15 @@ class PineconeHybridIndex:
                             logger.warning("Context prefix failed for %s/%s: %s", pid, chunk.section_heading, _ctx_exc)
                 self.upsert_chunks(chunks)
                 changed += 1
-                logger.debug("sync_index (hybrid): re-indexed %r (page_id=%s)", title, pid)
+                logger.info("sync_index (hybrid): [%d/%d] re-indexed %r (page_id=%s)", checked + 1, len(stale), title, pid)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
+                status = "failed"
                 logger.warning("sync_index (hybrid): failed to re-index %r: %s", title, exc)
             checked += 1
             if progress_cb:
                 try:
-                    progress_cb(checked, len(stale), title)
+                    progress_cb(checked, len(stale), title, status)
                 except Exception:  # noqa: BLE001
                     pass
 

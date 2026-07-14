@@ -56,7 +56,7 @@ def main() -> None:
 
     processed = 0
 
-    def progress_cb(done: int, total: int, title: str) -> None:
+    def progress_cb(done: int, total: int, title: str, status: str = "changed") -> None:
         nonlocal processed
         processed = done
         pct = int(100 * done / max(total, 1))

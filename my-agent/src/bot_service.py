@@ -890,6 +890,7 @@ async def _run_rag_sync(job_id: str) -> None:
         listings = await asyncio.to_thread(confluence.list_pages, 500)
         job["total"] = len(listings)
         job["current_page"] = "Checking indexes…"
+        logger.info("RAG sync %s: %d Confluence pages listed — starting live-RAG pass", job_id, len(listings))
 
         # Shared page cache so both passes never double-fetch the same page.
         _fetched_pages: dict[str, object] = {}
@@ -904,10 +905,15 @@ async def _run_rag_sync(job_id: str) -> None:
                 return _fetched_pages[page_id]
             return _capturing_fetch(page_id)
 
-        def _rag_progress(done: int, total: int, title: str) -> None:
+        def _rag_progress(done: int, total: int, title: str, status: str = "changed") -> None:
             job["checked"] = done
             job["total_stale"] = total
             job["current_page"] = title
+            # Compact live log of pages seen this run — capped so a big org
+            # (500 pages) can't grow this without bound; UI only shows the last few.
+            pages = job.setdefault("pages", [])
+            pages.append({"title": title, "status": status})
+            del pages[:-50]
 
         # ── Pass 1: sync ConfluenceVectorIndex (in-meeting RAG) ───────────────────
         result = await asyncio.to_thread(
@@ -923,11 +929,14 @@ async def _run_rag_sync(job_id: str) -> None:
         # pages. It reuses _cached_fetch so pages already pulled above aren't
         # re-requested from Confluence.
         job["current_page"] = "Syncing proposal indexes…"
+        logger.info("RAG sync %s: live-RAG pass done (changed=%d failed=%d) — starting proposal-index pass",
+                    job_id, result["changed"], result["failed"])
         hybrid_result = await asyncio.to_thread(
             hybrid.sync_index,
             listings,
             _cached_fetch,
             force=force_full,
+            progress_cb=_rag_progress,
         )
 
         job.update({
@@ -1007,6 +1016,7 @@ async def start_rag_sync(claims: dict = Depends(require_kb_editor)) -> dict:
         "failed": 0,
         "deleted": 0,
         "current_page": "Starting…",
+        "pages": [],
         "error": None,
         "started_at": _utcnow(),
         "finished_at": None,
