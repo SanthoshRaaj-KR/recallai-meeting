@@ -9,7 +9,7 @@ description = "Simple voice AI assistant built with LiveKit Agents for Python"
 requires-python = ">=3.10, <3.15"
 
 dependencies = [
-    "livekit-agents[assemblyai,cerebras,deepgram,mcp,silero,turn-detector]~=1.5",
+    "livekit-agents[assemblyai,cartesia,cerebras,deepgram,mcp,silero,turn-detector]~=1.5",
     "python-dotenv",
     # Recall.ai bridge dependencies
     "fastapi>=0.111",

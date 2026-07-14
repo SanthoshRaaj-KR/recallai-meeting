@@ -1,3 +1,4 @@
+import inspect
 import logging
 import textwrap
 from unittest.mock import MagicMock, patch
@@ -7,6 +8,19 @@ from livekit.agents import AgentSession, inference, llm, mcp
 
 import agent as agent_module
 from agent import Assistant
+
+
+def test_tts_is_cartesia_not_cloud_inference() -> None:
+    """Regression guard: TTS must stay a portable plugin (works on self-hosted
+    LiveKit), not LiveKit Cloud's Inference gateway. Commit 79055d6 ("stt model
+    change") silently reverted a correct EdgeTTS swap back to
+    inference.TTS(deepgram/aura-2) without mentioning TTS in the message —
+    this test fails loudly if that regression recurs, cloud-locking the agent
+    again without anyone noticing until a self-host test goes silent.
+    """
+    source = inspect.getsource(agent_module)
+    assert "inference.TTS(" not in source
+    assert source.count('tts=cartesia.TTS(') == 2
 
 
 def test_tail_lines_to_char_budget_preserves_recent_tail() -> None:

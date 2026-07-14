@@ -20,14 +20,13 @@ from livekit.agents import (
     ModelSettings,
     StopResponse,
     cli,
-    inference,
     llm,
     mcp,
     room_io,
     stt as lk_stt,
 )
 from livekit import rtc
-from livekit.plugins import cerebras, deepgram, silero
+from livekit.plugins import cartesia, cerebras, deepgram, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from typing import AsyncIterable
 
@@ -785,7 +784,11 @@ async def my_agent(ctx: JobContext):
                 model="nova-3",
                 language="en",
             ),
-            tts=inference.TTS(model="deepgram/aura-2", voice="athena", language="en"),
+            tts=cartesia.TTS(
+                api_key=os.getenv("CARTESIA_API_KEY"),
+                model="sonic-3",
+                voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
+            ),
             turn_detection=turn_detector,
             vad=ctx.proc.userdata["vad"],
         )
@@ -822,7 +825,11 @@ async def my_agent(ctx: JobContext):
             language="en",
             keyterm=["Jarvis", "Hey Jarvis"],
         ),
-        tts=inference.TTS(model="deepgram/aura-2", voice="athena", language="en"),
+        tts=cartesia.TTS(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            model="sonic-3",
+            voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
+        ),
         turn_detection=turn_detector,
         vad=ctx.proc.userdata["vad"],
         # Disabled: on_user_turn_completed always rewrites or clears the message,
