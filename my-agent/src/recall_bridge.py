@@ -18,6 +18,7 @@ Required env vars (.env.local):
 """
 
 import asyncio
+import dataclasses
 import datetime
 import json
 import logging
@@ -143,6 +144,11 @@ def _save_changes(session_id: str, changes: list[dict]) -> None:
 
 
 def _save_summary(session_id: str, summary: dict, extracted_meeting: object, diagnostics: list) -> None:
+    # ExtractedMeeting (review_pipeline/models.py) is a dataclass, not JSON-
+    # serializable as-is — session_store.patch() sends this straight to
+    # Supabase's REST API as a JSON body, so it must be a plain dict first.
+    if dataclasses.is_dataclass(extracted_meeting) and not isinstance(extracted_meeting, type):
+        extracted_meeting = dataclasses.asdict(extracted_meeting)
     session_store.patch(session_id, {
         "summary": summary,
         "extracted_meeting": extracted_meeting,
