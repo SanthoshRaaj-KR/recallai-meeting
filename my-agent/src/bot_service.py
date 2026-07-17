@@ -909,8 +909,28 @@ async def _run_rag_sync(job_id: str) -> None:
             job["checked"] = done
             job["total_stale"] = total
             job["current_page"] = title
+            # "skipped" (fresh pages) is known as soon as the stale set is — recompute
+            # it here so the UI's "Unchanged" tile is live instead of stuck at 0 until
+            # the run finishes. Final job.update() below overwrites with the exact value.
+            job["skipped"] = max(job.get("total", 0) - total, 0)
+            if status == "changed":
+                job["changed"] = job.get("changed", 0) + 1
+            elif status == "failed":
+                job["failed"] = job.get("failed", 0) + 1
             # Compact live log of pages seen this run — capped so a big org
             # (500 pages) can't grow this without bound; UI only shows the last few.
+            pages = job.setdefault("pages", [])
+            pages.append({"title": title, "status": status})
+            del pages[:-50]
+
+        def _hybrid_progress(done: int, total: int, title: str, status: str = "changed") -> None:
+            # Proposal-index pass reuses the same activity indicator (current_page/
+            # checked/total_stale) but must NOT add to changed/skipped/failed — the
+            # final job state (below) reports live-RAG (pass 1) counts only, and
+            # double-counting here would make the live numbers overshoot them.
+            job["checked"] = done
+            job["total_stale"] = total
+            job["current_page"] = title
             pages = job.setdefault("pages", [])
             pages.append({"title": title, "status": status})
             del pages[:-50]
@@ -936,7 +956,7 @@ async def _run_rag_sync(job_id: str) -> None:
             listings,
             _cached_fetch,
             force=force_full,
-            progress_cb=_rag_progress,
+            progress_cb=_hybrid_progress,
         )
 
         job.update({
@@ -1028,6 +1048,25 @@ async def start_rag_sync(claims: dict = Depends(require_kb_editor)) -> dict:
     return {"job_id": job_id, "status": "running"}
 
 
+def _reconcile_orphaned(row: dict) -> dict:
+    """Detect a Supabase-persisted 'running' row whose job died without finishing.
+
+    _sync_jobs is in-memory and empty after every restart/deploy. If a process
+    crashes or is redeployed mid-sync, the "running" row it published stays in
+    Supabase forever — nothing else ever moves it to "done"/"error". Left alone,
+    every future page load reads that row, shows the spinner, and (per the
+    frontend's `disabled={isRunning}`) permanently disables the sync button —
+    so no new sync can ever be started to overwrite it either.
+
+    A "running" row with no matching live entry in _sync_jobs has no owner left
+    that could ever finish it, so treat it as interrupted and clear it.
+    """
+    if row and row.get("status") == "running" and row.get("job_id") not in _sync_jobs:
+        row = {**row, "status": "error", "error": "Sync was interrupted (service restarted before it finished)", "finished_at": _utcnow()}
+        rag_sync_store.save(row, _ORG_ID)
+    return row
+
+
 @app.get("/rag/sync/latest")
 async def get_latest_rag_sync() -> dict:
     """Return the org's latest sync — durable and shared across restarts.
@@ -1041,7 +1080,7 @@ async def get_latest_rag_sync() -> dict:
     if mem and (not db or mem.get("started_at", "") >= db.get("started_at", "")):
         return mem
     if db:
-        return db
+        return _reconcile_orphaned(db)
     raise HTTPException(status_code=404, detail="No sync job found")
 
 
@@ -1052,5 +1091,5 @@ async def get_rag_sync_status(job_id: str) -> dict:
         return _sync_jobs[job_id]
     db = rag_sync_store.get(job_id, _ORG_ID)
     if db:
-        return db
+        return _reconcile_orphaned(db)
     raise HTTPException(status_code=404, detail=f"Sync job {job_id!r} not found")
