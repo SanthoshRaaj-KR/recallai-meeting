@@ -61,10 +61,11 @@ class ConfluenceLiveRAG:
             or os.getenv("PINECONE_INDEX_NAME")
             or "confluence-review-rag-v2"
         ).strip()
+        _org_id = os.getenv("ORG_ID", "").strip()
         self.namespace = (
             os.getenv("MY_AGENT_RAG_NAMESPACE")
             or os.getenv("PINECONE_NAMESPACE")
-            or "confluence-review"
+            or (f"confluence-review-{_org_id}" if _org_id else "confluence-review")
         ).strip()
         self._pinecone_index: Any | None = None
         # (query_str, hits, timestamp) — bounded by _CACHE_MAX entries, evicted by TTL.

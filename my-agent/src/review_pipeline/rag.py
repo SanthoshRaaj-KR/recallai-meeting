@@ -137,10 +137,11 @@ class ConfluenceVectorIndex:
             or os.getenv("PINECONE_INDEX_NAME")
             or "confluence-review-rag-v2"
         ).strip()
+        _org_id = os.getenv("ORG_ID", "").strip()
         self.namespace = (
             os.getenv("MY_AGENT_RAG_NAMESPACE")
             or os.getenv("PINECONE_NAMESPACE")
-            or "confluence-review"
+            or (f"confluence-review-{_org_id}" if _org_id else "confluence-review")
         ).strip()
         # Larger chunks -> fewer chunks -> fewer per-chunk enrichment LLM calls
         # (input tokens are cheap, the generated summary output is the costly part).
