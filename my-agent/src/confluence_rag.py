@@ -12,6 +12,7 @@ Index field schema expected per chunk (set during review-pipeline upsert):
 
 from __future__ import annotations
 
+import html
 import logging
 import os
 import re
@@ -20,6 +21,27 @@ from collections import deque
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Residual markup stripping — Confluence storage can leave macro/markup noise in a
+# chunk's stored text (e.g. <ac:structured-macro …>, <time datetime=…>, CDATA
+# wrappers). For the live in-meeting path we want only the important content, so we
+# clean each retrieved chunk before it reaches the LLM. Table rows use newlines and
+# " | " separators, so line breaks are preserved and only intra-line runs collapse.
+_CDATA_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean_content(text: str) -> str:
+    """Strip residual HTML/Confluence-macro markup, keeping only readable content."""
+    if not text:
+        return ""
+    text = _CDATA_RE.sub(r"\1", text)  # unwrap CDATA, keep the inner text/code
+    text = _TAG_RE.sub(" ", text)      # drop any remaining <…> tags
+    text = html.unescape(text)
+    # Collapse whitespace within each line (incl. &nbsp; → \xa0) but preserve line
+    # breaks, which carry table-row structure.
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
 
 _TOP_K_DEFAULT = int(os.getenv("JARVIS_CONFLUENCE_RAG_TOP_K", "10"))
 _SCORE_THRESHOLD = float(os.getenv("JARVIS_CONFLUENCE_RAG_SCORE_THRESHOLD", "0.1"))
@@ -85,7 +107,7 @@ class ConfluenceLiveRAG:
         ``asyncio.to_thread(rag.search, query)`` from async code.
 
         Returns a list of dicts with keys:
-          page_id, title, space_key, heading, section_order, text, score
+          page_id, title, heading, breadcrumb, section_order, text, score
         Sorted by descending score. Chunks below JARVIS_CONFLUENCE_RAG_SCORE_THRESHOLD
         are filtered out.
         """
@@ -106,7 +128,7 @@ class ConfluenceLiveRAG:
             result = index.search(
                 namespace=self.namespace,
                 query={"top_k": max(1, top_k), "inputs": {"text": query.strip()}},
-                fields=["page_id", "title", "space_key", "heading", "section_order", "text"],
+                fields=["page_id", "title", "heading", "breadcrumb", "section_order", "text"],
             )
             raw_hits = result.result.hits if hasattr(result, "result") else []
             hits: list[dict[str, Any]] = []
@@ -120,10 +142,10 @@ class ConfluenceLiveRAG:
                     {
                         "page_id": str(fields.get("page_id") or ""),
                         "title": str(fields.get("title") or ""),
-                        "space_key": str(fields.get("space_key") or ""),
                         "heading": str(fields.get("heading") or ""),
+                        "breadcrumb": str(fields.get("breadcrumb") or ""),
                         "section_order": int(fields.get("section_order") or 0),
-                        "text": str(fields.get("text") or "")[:_MAX_CHUNK_CHARS],
+                        "text": _clean_content(str(fields.get("text") or ""))[:_MAX_CHUNK_CHARS],
                         "score": score,
                     }
                 )
@@ -143,7 +165,8 @@ class ConfluenceLiveRAG:
 
             if hits:
                 titles = ", ".join(
-                    f"{h['title']} › {h['heading']}" if h.get("heading") and h["heading"] != "Page intro"
+                    f"{h['title']} › {(h.get('breadcrumb') or h['heading']).replace(' > ', ' › ')}"
+                    if (h.get("breadcrumb") or h.get("heading")) and h.get("heading") != "Page intro"
                     else h["title"]
                     for h in hits[:3]
                 )
@@ -163,8 +186,8 @@ class ConfluenceLiveRAG:
     def format_context(self, hits: list[dict[str, Any]]) -> str:
         """Render search hits as a compact context block for the LLM prompt.
 
-        Each chunk is labelled with its page title, section heading, and space
-        key so the LLM can attribute its answer to a specific Confluence page.
+        Each chunk is labelled with its page title and section breadcrumb so the
+        LLM can attribute its answer to a specific Confluence page.
         Duplicate page breadcrumbs are suppressed after the first appearance.
         """
         if not hits:
@@ -181,14 +204,15 @@ class ConfluenceLiveRAG:
                 continue
             title = hit.get("title") or "Untitled"
             heading = (hit.get("heading") or "").strip()
-            space_key = hit.get("space_key") or ""
+            breadcrumb = (hit.get("breadcrumb") or "").strip()
+            # Prefer the full heading path ("SLA › Response times") over the bare
+            # leaf heading so the LLM can attribute the answer to its exact section.
+            crumb = (breadcrumb or heading).replace(" > ", " › ")
 
-            # Build a readable breadcrumb: "Page Title › Section Heading [SPACE]"
+            # Build a readable breadcrumb: "Page Title › Parent › Section"
             label = title
-            if heading and heading.lower() not in ("page intro", ""):
-                label = f"{title} › {heading}"
-            if space_key:
-                label = f"{label} [{space_key}]"
+            if crumb and crumb.lower() not in ("page intro", ""):
+                label = f"{title} › {crumb}"
             seen_pages.add(page_id)
 
             parts.append(f"[{label}]\n{text}")

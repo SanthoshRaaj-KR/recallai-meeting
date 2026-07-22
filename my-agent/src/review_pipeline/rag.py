@@ -25,6 +25,14 @@ _BM25_K1 = 1.2
 _BM25_B = 0.75
 _BM25_BLEND = float(os.getenv("MY_AGENT_BM25_BLEND", "0.25"))
 
+# Table chunking: a whole table is emitted as ONE structured chunk (every row as
+# "Header: value | ..." lines) so it survives the reader's per-page dedup as a single
+# unit instead of losing all-but-one row. Only tables that exceed these budgets are
+# split into consecutive row-groups (never mid-row), each kept safely under the 5000
+# metadata-char upsert cap so no row is truncated away.
+_TABLE_CHUNK_WORDS = int(os.getenv("MY_AGENT_RAG_TABLE_CHUNK_WORDS", "450"))
+_TABLE_CHUNK_CHARS = int(os.getenv("MY_AGENT_RAG_TABLE_CHUNK_CHARS", "3500"))
+
 
 def _tokenize_bm25(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
@@ -105,6 +113,9 @@ class PageChunk:
     chunk_order: int
     version: int | None
     text: str
+    # Hierarchical heading path built from the enclosing sections, e.g.
+    # "SLA > Response times". Empty for content before the first heading.
+    breadcrumb: str = ""
 
 
 @dataclass
@@ -218,6 +229,7 @@ class ConfluenceVectorIndex:
                     "title": chunk.title,
                     "space_key": chunk.space_key,
                     "heading": chunk.heading,
+                    "breadcrumb": chunk.breadcrumb or chunk.heading,
                     "section_order": chunk.section_order,
                     "chunk_order": chunk.chunk_order,
                     "version": chunk.version or 0,
@@ -482,8 +494,7 @@ class ConfluenceVectorIndex:
             "\n".join(
                 [
                     f"Title: {chunk.title}",
-                    f"Heading: {chunk.heading}",
-                    f"Space: {chunk.space_key}",
+                    f"Section: {chunk.breadcrumb or chunk.heading}",
                     chunk.text,
                 ]
             )
@@ -505,8 +516,7 @@ class ConfluenceVectorIndex:
         client = self._oai()
         prompt = (
             f"Document title: {chunk.title}\n"
-            f"Space: {chunk.space_key}\n"
-            f"Section heading: {chunk.heading}\n\n"
+            f"Section path: {chunk.breadcrumb or chunk.heading}\n\n"
             f"Section text (excerpt):\n{chunk.text[:800]}\n\n"
             "In 1-2 sentences, explain what this section covers in the context of the "
             "document. Be specific about the topics, entities, and values it contains. "
@@ -544,7 +554,7 @@ class ConfluenceVectorIndex:
         heading, space, text). Unchanged hash -> the indexed chunk is still valid,
         so it can be reused without re-enriching or re-embedding."""
         value = "\n".join(
-            [chunk.title or "", chunk.heading or "", chunk.space_key or "", chunk.text or ""]
+            [chunk.title or "", chunk.breadcrumb or chunk.heading or "", chunk.text or ""]
         )
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -685,10 +695,13 @@ class ConfluenceVectorIndex:
         deleted = 0
         try:
             orphan_ids: list[str] = []
-            for chunk_id in index.list(namespace=self.namespace):
-                pid = chunk_id.rsplit(":", 1)[0]
-                if pid not in live_page_ids:
-                    orphan_ids.append(chunk_id)
+            # index.list() paginates: each yielded item is a list[str] of chunk
+            # ids (not a single id). Normalise so a bare-string yield also works.
+            for page in index.list(namespace=self.namespace):
+                for chunk_id in ([page] if isinstance(page, str) else page):
+                    pid = chunk_id.rsplit(":", 1)[0]
+                    if pid not in live_page_ids:
+                        orphan_ids.append(chunk_id)
             if orphan_ids:
                 for batch_start in range(0, len(orphan_ids), 1000):
                     batch = orphan_ids[batch_start : batch_start + 1000]
@@ -753,18 +766,45 @@ def _extract_table_rows(section_html: str) -> list[str]:
             row_html = tr_match.group(1)
             th_cells = [_strip_cell(m.group(1)) for m in re.finditer(r"(?is)<th\b[^>]*>(.*?)</th>", row_html)]
             td_cells = [_strip_cell(m.group(1)) for m in re.finditer(r"(?is)<td\b[^>]*>(.*?)</td>", row_html)]
-            if th_cells:
+            # Pure header row (only <th>): record it as the column headers. A row that
+            # mixes <th> and <td> is a row-header table — keep the <th> as the leading
+            # data cell (it comes first in the markup) so its values are never dropped.
+            if th_cells and not td_cells:
                 headers = [c for c in th_cells if c]
                 continue
-            if not td_cells:
+            cells = [c for c in (th_cells + td_cells) if c]
+            if not cells:
                 continue
-            if headers and len(td_cells) == len(headers):
-                row_str = " | ".join(f"{h}: {v}" for h, v in zip(headers, td_cells) if v)
+            if headers and len(cells) == len(headers):
+                row_str = " | ".join(f"{h}: {v}" for h, v in zip(headers, cells) if v)
             else:
-                row_str = " | ".join(c for c in td_cells if c)
+                row_str = " | ".join(cells)
             if row_str:
                 rows.append(row_str)
     return rows
+
+
+def _group_table_rows(rows: list[str], *, max_words: int, max_chars: int) -> list[str]:
+    """Pack structured table rows into as few chunks as possible without ever
+    splitting a row, keeping each chunk under the word/char budget so nothing is
+    truncated at upsert time. A single row larger than the budget is kept whole in
+    its own chunk (better an oversized row than a dropped one)."""
+    groups: list[str] = []
+    current: list[str] = []
+    cur_words = 0
+    cur_chars = 0
+    for row in rows:
+        rw = len(row.split())
+        rc = len(row) + 1  # +1 for the newline join
+        if current and (cur_words + rw > max_words or cur_chars + rc > max_chars):
+            groups.append("\n".join(current))
+            current, cur_words, cur_chars = [], 0, 0
+        current.append(row)
+        cur_words += rw
+        cur_chars += rc
+    if current:
+        groups.append("\n".join(current))
+    return groups
 
 
 def chunk_page(page: PageCandidate, *, max_words: int = 500) -> list[PageChunk]:
@@ -781,8 +821,23 @@ def chunk_page(page: PageCandidate, *, max_words: int = 500) -> list[PageChunk]:
         sections = [{"heading": "", "level": "0", "text": text, "html": page.html}]
 
     chunks: list[PageChunk] = []
+    # Stack of (level, heading) for the currently-open ancestor sections. Confluence
+    # sections arrive in document order and extract_sections already splits at every
+    # heading level, so we can reconstruct each section's heading path by popping any
+    # sibling/deeper headings before recording the current one.
+    heading_stack: list[tuple[int, str]] = []
     for section_order, section in enumerate(sections):
         heading = normalize_ws(str(section.get("heading") or "Page intro"))
+        level_raw = str(section.get("level") or "0").strip()
+        level = int(level_raw) if level_raw.isdigit() else 0
+        if level > 0:
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            breadcrumb = " > ".join([h for _, h in heading_stack] + [heading])
+            heading_stack.append((level, heading))
+        else:
+            # Pre-heading intro content — no ancestors.
+            breadcrumb = heading
         section_html = str(section.get("html") or "")
         text = normalize_ws(str(section.get("text") or html_to_text(section_html)))
         if not text:
@@ -799,12 +854,20 @@ def chunk_page(page: PageCandidate, *, max_words: int = 500) -> list[PageChunk]:
                     chunk_order=len(chunks),
                     version=page.version,
                     text=part,
+                    breadcrumb=breadcrumb,
                 )
             )
-        # Table-aware chunks: emit one additional chunk per data row so column-header
-        # associations are preserved for numeric-value retrieval (SLAs, metrics, versions).
+        # Table-aware chunks: represent the table as structured "Header: value | ..."
+        # rows so column-header associations survive (critical for numeric lookups:
+        # SLAs, metrics, versions). The whole table is kept together as one chunk so
+        # the reader's per-page dedup can't drop all-but-one row; only tables past the
+        # budget are split into consecutive row-groups (never mid-row) — every row is
+        # therefore indexed, with nothing lost to metadata-char truncation.
         if "<table" in section_html.lower():
-            for row_text in _extract_table_rows(section_html):
+            table_rows = _extract_table_rows(section_html)
+            for group_text in _group_table_rows(
+                table_rows, max_words=_TABLE_CHUNK_WORDS, max_chars=_TABLE_CHUNK_CHARS
+            ):
                 chunks.append(
                     PageChunk(
                         id=f"{page.page_id}:{len(chunks)}",
@@ -815,7 +878,8 @@ def chunk_page(page: PageCandidate, *, max_words: int = 500) -> list[PageChunk]:
                         section_order=section_order,
                         chunk_order=len(chunks),
                         version=page.version,
-                        text=row_text,
+                        text=group_text,
+                        breadcrumb=breadcrumb,
                     )
                 )
     return chunks

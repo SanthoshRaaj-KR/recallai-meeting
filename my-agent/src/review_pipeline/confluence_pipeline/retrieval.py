@@ -72,15 +72,14 @@ _UPSERT_MAX_RETRIES = int(os.getenv("MY_AGENT_LDOC_UPSERT_RETRIES", "8"))
 
 _FIELDS = [
     "content", "source_path", "source_format", "section_heading",
-    "section_index", "doc_title", "page_id", "space_key",
+    "section_index", "doc_title",
 ]
 
 
 def _embedding_text(chunk: ChunkRecord) -> str:
     head = f"{chunk.doc_title} — {chunk.section_heading}".strip(" —")
-    space = f" [{chunk.space_key}]" if chunk.space_key else ""
     prefix = chunk.context_prefix.strip() + "\n" if chunk.context_prefix else ""
-    return (prefix + head + space + "\n" + chunk.content).strip()
+    return (prefix + head + "\n" + chunk.content).strip()
 
 
 class PineconeHybridIndex:
@@ -232,8 +231,6 @@ class PineconeHybridIndex:
                 "section_heading": c.section_heading,
                 "section_index": c.section_index,
                 "doc_title": c.doc_title,
-                "page_id": c.source_path,
-                "space_key": c.space_key or "",
                 "version": c.version or 0,
                 "content_hash": c.content_hash or "",
             })
@@ -454,11 +451,9 @@ class PineconeHybridIndex:
                 )
                 from .chunker import chunk_markdown_text
                 chunks = chunk_markdown_text(markdown, source_path=pid, source_format="confluence")
-                space_key = getattr(page, "space_key", "") or ""
                 for chunk in chunks:
                     chunk.version = getattr(page, "version", None)
                     chunk.content_hash = content_hash
-                    chunk.space_key = space_key
                     if _CONTEXTUAL_ENRICHMENT_LDOC and not chunk.context_prefix:
                         try:
                             chunk.context_prefix = self._generate_context_prefix(chunk)

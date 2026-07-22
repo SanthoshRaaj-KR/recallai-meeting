@@ -20,6 +20,10 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 # Sections larger than this many words are split into sub-chunks that share the
 # heading, so a single huge section never blows past Pinecone metadata limits.
 _MAX_SECTION_WORDS = int(os.getenv("MY_AGENT_LDOC_SECTION_WORDS", "1200"))
+# When a large section is split into sub-chunks, carry this many trailing words
+# of the previous piece into the next so context that straddles a split boundary
+# is not lost at retrieval time. Set to 0 to disable overlap.
+_CHUNK_OVERLAP_WORDS = int(os.getenv("MY_AGENT_LDOC_CHUNK_OVERLAP_WORDS", "100"))
 
 
 def _slug(path: str) -> str:
@@ -33,19 +37,28 @@ def _split_long(text: str, max_words: int) -> list[str]:
         return [text]
     # Split on blank-line paragraph boundaries, packing up to max_words each.
     paras = re.split(r"\n\s*\n", text)
-    out: list[str] = []
+    pieces: list[str] = []
     cur: list[str] = []
     cur_wc = 0
     for para in paras:
         pw = len(para.split())
         if cur and cur_wc + pw > max_words:
-            out.append("\n\n".join(cur))
+            pieces.append("\n\n".join(cur))
             cur, cur_wc = [], 0
         cur.append(para)
         cur_wc += pw
     if cur:
-        out.append("\n\n".join(cur))
-    return out or [text]
+        pieces.append("\n\n".join(cur))
+    if not pieces:
+        return [text]
+    if _CHUNK_OVERLAP_WORDS <= 0 or len(pieces) == 1:
+        return pieces
+    # Prepend the trailing _CHUNK_OVERLAP_WORDS words of each piece to the next.
+    out: list[str] = [pieces[0]]
+    for prev, piece in zip(pieces, pieces[1:]):
+        overlap = " ".join(prev.split()[-_CHUNK_OVERLAP_WORDS:])
+        out.append(f"{overlap}\n\n{piece}" if overlap else piece)
+    return out
 
 
 def chunk_markdown_text(text: str, source_path: str, source_format: str = "md") -> list[ChunkRecord]:

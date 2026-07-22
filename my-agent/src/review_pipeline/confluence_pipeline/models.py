@@ -59,7 +59,6 @@ class ChunkRecord(BaseModel):
     token_count: int = 0
     version: int | None = None  # Confluence page version at index time
     content_hash: str = ""     # SHA-256 of page content for freshness checks
-    space_key: str = ""        # Confluence space key (e.g. "ENG", "PROD")
 
 
 class RetrievalResult(BaseModel):
