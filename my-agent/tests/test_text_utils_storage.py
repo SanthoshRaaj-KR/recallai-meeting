@@ -176,3 +176,51 @@ def test_apply_section_edit_anchors_bare_value_inside_em_tags():
     assert "$8/device/year" not in new_html
     assert "*" not in new_html.split("Plan Comparison", 1)[-1]  # no markdown leaked into storage
     assert "&lt;" not in new_html
+
+
+# A value repeated across rows where only ONE changes: the bare anchor is identical
+# in both cells and the cell boundary boxes in the context, so occurrence rank — not
+# first-match — must decide which cell moves. Regression for the "wrong cell edited"
+# bug (intended cell kept its old value, an unrelated cell got the new one).
+DUP_VALUE_TABLE = (
+    "<h2>Device Pricing</h2><table><tbody>"
+    "<tr><th>Plan</th><th>Price</th></tr>"
+    "<tr><td>Standard</td><td>$8/device/year</td></tr>"
+    "<tr><td>Standard Plus</td><td>$8/device/year</td></tr>"
+    "<tr><td>Professional</td><td>$15/device/year</td></tr>"
+    "</tbody></table>"
+)
+
+
+def test_apply_section_edit_targets_correct_duplicate_row():
+    before = (
+        "| Plan | Price |\n| Standard | $8/device/year |\n"
+        "| Standard Plus | $8/device/year |\n| Professional | $15/device/year |"
+    )
+    after = (
+        "| Plan | Price |\n| Standard | $8/device/year |\n"
+        "| Standard Plus | $12/device/year |\n| Professional | $15/device/year |"
+    )
+    new_html, ok = apply_section_edit(DUP_VALUE_TABLE, before, after, "Device Pricing")
+    assert ok
+    # Only the second (Standard Plus) row moves; the identical Standard row is kept.
+    assert "<tr><td>Standard</td><td>$8/device/year</td></tr>" in new_html
+    assert "<tr><td>Standard Plus</td><td>$12/device/year</td></tr>" in new_html
+    assert "<tr><td>Professional</td><td>$15/device/year</td></tr>" in new_html
+
+
+def test_apply_section_edit_both_duplicate_rows_change_independently():
+    before = (
+        "| Plan | Price |\n| Standard | $8/device/year |\n"
+        "| Standard Plus | $8/device/year |\n| Professional | $15/device/year |"
+    )
+    after = (
+        "| Plan | Price |\n| Standard | $9/device/year |\n"
+        "| Standard Plus | $12/device/year |\n| Professional | $15/device/year |"
+    )
+    new_html, ok = apply_section_edit(DUP_VALUE_TABLE, before, after, "Device Pricing")
+    assert ok
+    # Each identical source cell gets its own distinct new value, in the right row.
+    assert "<tr><td>Standard</td><td>$9/device/year</td></tr>" in new_html
+    assert "<tr><td>Standard Plus</td><td>$12/device/year</td></tr>" in new_html
+    assert "$8/device/year" not in new_html

@@ -302,6 +302,15 @@ def replace_text_in_storage(storage_html: str, before: str, after: str) -> tuple
 # the located section's storage XHTML — so the wrapping tags are preserved and only
 # the changed values move. It only ever applies a replacement whose old text is
 # found verbatim, so a miss is a no-op (never corruption).
+#
+# When a changed value is IDENTICAL to another value in the same section (e.g. two
+# rows priced "$8/device/year", only one changing) and the table-cell boundary boxes
+# in the context anchor, the anchor collapses to the bare value. Replacing the first
+# match then edits the WRONG cell — the intended cell keeps its old value and an
+# unrelated cell gets the new one. To prevent that, each change carries the 0-based
+# occurrence rank of its anchor (how many identical values precede it in `before`);
+# the edit targets that same occurrence in the section, and all edits are resolved
+# against the ORIGINAL region and applied right-to-left so ranks never shift.
 
 _WORD_RE = re.compile(r"\S+")
 _MD_EDGE_TOKENS = {"#", "##", "###", "####", "#####", "######", "|", "-", "*", "**", "`", "```", ">", "+", "—", "–"}
@@ -322,9 +331,10 @@ def _is_structural(token: str) -> bool:
     return "|" in token or token in _MD_EDGE_TOKENS
 
 
-def _expand_within_cell(tokens: list[str], lo: int, hi: int, ctx: int) -> list[str]:
-    """Pad [lo:hi] with up to `ctx` neighbouring *word* tokens, stopping at any
-    structural token so the anchor stays inside one table cell / line segment."""
+def _expand_within_cell_bounds(tokens: list[str], lo: int, hi: int, ctx: int) -> tuple[int, int]:
+    """[lo, hi) padded with up to `ctx` neighbouring *word* tokens on each side,
+    stopping at any structural token so the anchor stays inside one table cell /
+    line segment. Returns the padded (left, right) token bounds."""
     left = lo
     taken = 0
     while left > 0 and taken < ctx and not _is_structural(tokens[left - 1]):
@@ -335,7 +345,21 @@ def _expand_within_cell(tokens: list[str], lo: int, hi: int, ctx: int) -> list[s
     while right < len(tokens) and taken < ctx and not _is_structural(tokens[right]):
         right += 1
         taken += 1
+    return left, right
+
+
+def _expand_within_cell(tokens: list[str], lo: int, hi: int, ctx: int) -> list[str]:
+    """Pad [lo:hi] with up to `ctx` neighbouring *word* tokens, stopping at any
+    structural token so the anchor stays inside one table cell / line segment."""
+    left, right = _expand_within_cell_bounds(tokens, lo, hi, ctx)
     return tokens[left:right]
+
+
+def _char_offset(tokens: list[str], token_idx: int) -> int:
+    """Char offset at which ``tokens[token_idx]`` begins within ``" ".join(tokens)``."""
+    if token_idx <= 0:
+        return 0
+    return len(" ".join(tokens[:token_idx])) + 1  # +1 for the joining space
 
 
 def _strip_inline_md(text: str) -> str:
@@ -345,38 +369,54 @@ def _strip_inline_md(text: str) -> str:
     return re.sub(r"[*`]+", "", text)
 
 
-def _change_anchors(before: str, after: str, ctx: int = 2) -> list[list[tuple[str, str]]]:
-    """For each change between before->after, an ordered list of (old, new) anchor
+def _change_anchors(before: str, after: str, ctx: int = 2) -> list[list[tuple[str, str, int]]]:
+    """For each change between before->after, an ordered list of (old, new, rank) anchor
     candidates, most specific first: (1) the contextual phrase — the changed words padded
     with `ctx` unchanged neighbours without crossing a table cell / markdown boundary;
     (2) the same phrase with markdown emphasis stripped; (3) the bare changed value alone,
     emphasis stripped. apply_section_edit tries them in order and applies the first found
     verbatim in the section. The context form is preferred (safest), but a value wrapped in
     tags (``<em>``) or split from its label by ``<br/>`` — where the contextual markdown
-    phrase has no literal counterpart in storage — still anchors on the bare value."""
+    phrase has no literal counterpart in storage — still anchors on the bare value.
+
+    ``rank`` is the 0-based occurrence index the anchor must target: how many identical
+    ``old`` values precede this change in ``before``. It disambiguates a bare value that
+    repeats across rows so the edit lands on the intended occurrence, not the first."""
     b = _WORD_RE.findall(before or "")
     a = _WORD_RE.findall(after or "")
+    before_canon = " ".join(b)
     sm = difflib.SequenceMatcher(a=b, b=a, autojunk=False)
-    changes: list[list[tuple[str, str]]] = []
+    changes: list[list[tuple[str, str, int]]] = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             continue
+        ctx_lo, ctx_hi = _expand_within_cell_bounds(b, i1, i2, ctx)
+        a_lo, a_hi = _expand_within_cell_bounds(a, j1, j2, ctx)
         forms = (
             (  # contextual phrase (padded within the cell)
-                " ".join(_trim_md_edges(_expand_within_cell(b, i1, i2, ctx))).strip(),
-                " ".join(_trim_md_edges(_expand_within_cell(a, j1, j2, ctx))).strip(),
+                " ".join(_trim_md_edges(b[ctx_lo:ctx_hi])).strip(),
+                " ".join(_trim_md_edges(a[a_lo:a_hi])).strip(),
+                ctx_lo,
             ),
             (  # bare changed tokens, no context
                 " ".join(_trim_md_edges(b[i1:i2])).strip(),
                 " ".join(_trim_md_edges(a[j1:j2])).strip(),
+                i1,
             ),
         )
-        candidates: list[tuple[str, str]] = []
-        for old, new in forms:
-            for pair in ((old, new), (_strip_inline_md(old), _strip_inline_md(new))):
-                o, n = pair
-                if o and o != n and pair not in candidates:
-                    candidates.append(pair)
+        candidates: list[tuple[str, str, int]] = []
+        seen: set[tuple[str, str]] = set()
+        for old, new, tok_lo in forms:
+            # Occurrences of the anchor that precede this change in `before`; the same
+            # count of matches precedes the intended occurrence in the storage section.
+            prefix = before_canon[: _char_offset(b, tok_lo)]
+            for o, n, pre in (
+                (old, new, prefix),
+                (_strip_inline_md(old), _strip_inline_md(new), _strip_inline_md(prefix)),
+            ):
+                if o and o != n and (o, n) not in seen:
+                    seen.add((o, n))
+                    candidates.append((o, n, pre.count(o)))
         if candidates:
             changes.append(candidates)
     return changes
@@ -401,6 +441,32 @@ def _locate_section_span(storage_html: str, section_heading: str) -> tuple[int, 
     return None
 
 
+def _spans_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    return a[0] < b[1] and b[0] < a[1]
+
+
+def _nth_occurrence_span(
+    region: str, needle: str, rank: int, used: list[tuple[int, int]]
+) -> tuple[int, int] | None:
+    """Char span of the ``rank``-th (0-based) non-overlapping occurrence of ``needle``
+    in ``region``, provided it doesn't overlap an already-claimed span in ``used``.
+    Returns None when there is no such occurrence — so a miss stays a safe no-op."""
+    if not needle:
+        return None
+    step = len(needle)
+    positions: list[int] = []
+    idx = region.find(needle)
+    while idx != -1:
+        positions.append(idx)
+        idx = region.find(needle, idx + step)
+    if rank >= len(positions):
+        return None
+    span = (positions[rank], positions[rank] + step)
+    if any(_spans_overlap(span, u) for u in used):
+        return None
+    return span
+
+
 def apply_section_edit(
     storage_html: str,
     before: str,
@@ -411,8 +477,10 @@ def apply_section_edit(
 
     Scopes to the named section when it can be found (so an ambiguous value isn't
     changed elsewhere on the page), then replaces the minimal changed phrases —
-    each anchored with neighbouring unchanged words — wherever they appear verbatim
-    in that section. Returns (new_html, replaced). A miss leaves the HTML untouched.
+    each anchored with neighbouring unchanged words and its occurrence rank — wherever
+    they appear verbatim in that section. All matches are resolved against the ORIGINAL
+    region and applied right-to-left so a duplicated value is changed on the intended
+    row. Returns (new_html, replaced). A miss leaves the HTML untouched.
     """
     value = storage_html or ""
     if not before or before == after:
@@ -425,24 +493,34 @@ def apply_section_edit(
             start, end = span
     region = value[start:end]
 
-    applied = False
+    # Resolve every change to a (span_start, span_end, new_text) edit on the ORIGINAL
+    # region. `used` prevents two changes from claiming the same span.
+    edits: list[tuple[int, int, str]] = []
+    used: list[tuple[int, int]] = []
     for anchor_ladder in _change_anchors(before, after):
         # Try candidates most-specific first; stop this change at the first that lands.
-        for old, new in anchor_ladder:
+        for old, new, rank in anchor_ladder:
             new_text = html.escape(new, quote=False)  # the inserted value is page text
+            located: tuple[int, int] | None = None
             # Storage may hold the old text raw or entity-escaped (&amp;/&lt;); try both.
-            hit = False
             for candidate in (old, html.escape(old, quote=False)):
-                if candidate and candidate != new_text and candidate in region:
-                    region = region.replace(candidate, new_text, 1)
-                    applied = True
-                    hit = True
+                if not candidate or candidate == new_text:
+                    continue
+                located = _nth_occurrence_span(region, candidate, rank, used)
+                if located is not None:
                     break
-            if hit:
+            if located is not None:
+                edits.append((located[0], located[1], new_text))
+                used.append(located)
                 break
-    if not applied:
+    if not edits:
         return value, False
-    return f"{value[:start]}{region}{value[end:]}", True
+
+    # Apply right-to-left so earlier offsets stay valid as the region grows/shrinks.
+    new_region = region
+    for span_start, span_end, new_text in sorted(edits, key=lambda e: e[0], reverse=True):
+        new_region = new_region[:span_start] + new_text + new_region[span_end:]
+    return f"{value[:start]}{new_region}{value[end:]}", True
 
 
 # ── Confluence storage XHTML → clean markdown ─────────────────────────────────
