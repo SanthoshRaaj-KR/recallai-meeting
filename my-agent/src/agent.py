@@ -106,6 +106,10 @@ _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 _GITHUB_DEFAULT_REPO = os.getenv("GITHUB_DEFAULT_REPO", "")
 _BRIDGE_INTERNAL_URL = os.getenv("BRIDGE_INTERNAL_URL", "http://127.0.0.1:8000").rstrip("/")
 _OPENING_GREETING_DELAY_S = float(os.getenv("JARVIS_OPENING_GREETING_DELAY_SECONDS", "0.5"))
+# Listen-only mode: how often the agent refreshes the flag from session_store so
+# a participant can mute/unmute Jarvis mid-meeting from the live status page.
+# Polling (rather than reading per turn) keeps the wake-word path latency-free.
+_LISTEN_ONLY_POLL_S = float(os.getenv("JARVIS_LISTEN_ONLY_POLL_SECONDS", "2.0"))
 
 # Silent backend prompt sent to the LLM pipeline after Jarvis joins and tools are
 # ready.  Meeting participants never hear this text — only Jarvis's generated reply
@@ -291,6 +295,11 @@ class Assistant(Agent):
         # Flipped to True just before the opening TTS call so the first audio
         # output is prefixed with silence to prime the WebRTC jitter buffer.
         self._should_prime_audio: bool = False
+        # Listen-only mode — when True, Jarvis keeps transcribing for meeting
+        # context but never speaks (no wake-word ack, no LLM reply). Toggled live
+        # from the meeting status page via a session_store flag polled below.
+        self._listen_only: bool = False
+        self._listen_only_task: asyncio.Task | None = None
 
     async def on_enter(self) -> None:
         # Do NOT call session.generate_reply() here directly.
@@ -304,12 +313,51 @@ class Assistant(Agent):
         # 2. Once tools are ready, send the pre-determined silent prompt
         #    ("Hello Jarvis, please introduce yourself") through the LLM pipeline
         #    so Jarvis's opening words are LLM-generated, not pre-canned.
+        # Start polling the listen-only flag so the mute toggle on the meeting
+        # status page takes effect live, without restarting the agent.
+        if self._listen_only_task is None and self._session_id:
+            self._listen_only_task = asyncio.create_task(
+                self._poll_listen_only(),
+                name="listen_only_poll",
+            )
+
         if not self._greeted:
             self._greeted = True
             self._opening_greeting_task = asyncio.create_task(
                 self._warmup_and_intro(),
                 name="opening_greeting",
             )
+
+    async def _poll_listen_only(self) -> None:
+        """Refresh ``self._listen_only`` from bot_service on a fixed interval.
+
+        Listen-only is a per-meeting mute controlled from the live status page.
+        bot_service holds it in memory (no DB); the agent polls its GET over the
+        same internal URL it already posts transcripts to. The request runs off
+        the event loop so it never stalls audio; on any error the current value
+        is kept so a transient blip doesn't unexpectedly un-mute Jarvis.
+        """
+        url = f"{_BRIDGE_INTERNAL_URL}/sessions/{self._session_id}/bot/listen-only"
+
+        def _fetch() -> bool | None:
+            try:
+                resp = requests.get(url, timeout=2)
+                if resp.ok:
+                    return bool(resp.json().get("listen_only", False))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("listen_only poll failed: %s", exc)
+            return None
+
+        while True:
+            enabled = await asyncio.to_thread(_fetch)
+            if enabled is not None and enabled != self._listen_only:
+                logger.info(
+                    "Listen-only mode %s",
+                    "ENABLED — Jarvis will stay silent" if enabled
+                    else "disabled — Jarvis will respond again",
+                )
+                self._listen_only = enabled
+            await asyncio.sleep(_LISTEN_ONLY_POLL_S)
 
     async def _warmup_and_intro(self) -> None:
         """Warm up tools then send the silent intro prompt through the LLM pipeline.
@@ -338,6 +386,12 @@ class Assistant(Agent):
 
         # Step 1: warm up all tools in parallel.
         await asyncio.gather(_warmup_mcp(), _warmup_rag())
+
+        # If the meeting is already in listen-only mode, warm up silently — skip
+        # the spoken introduction so Jarvis stays muted from the very start.
+        if self._listen_only:
+            logger.info("Listen-only mode active at startup — skipping spoken intro")
+            return
 
         # Step 2: send the silent backend prompt to the LLM pipeline.
         # generate_reply(user_input=...) bypasses the wake-word gate and goes
@@ -378,6 +432,7 @@ class Assistant(Agent):
         async for event in Agent.default.stt_node(self, audio, model_settings):
             if (
                 not self._partial_wake_fired
+                and not self._listen_only  # muted: never acknowledge the wake word
                 and isinstance(event, lk_stt.SpeechEvent)
                 and event.type == lk_stt.SpeechEventType.INTERIM_TRANSCRIPT
             ):
@@ -417,6 +472,13 @@ class Assistant(Agent):
                 self._run_in_compactor(self._transcript_memory.observe_utterance, raw.strip())
             )
             self._post_transcript(raw.strip())
+
+        # ── Listen-only mode — keep transcribing, but never respond ──────────
+        # Muted from the meeting status page. Suppress everything here (before
+        # the wake-word gate) so even "Hey Jarvis, …" draws no ack and no reply.
+        if self._listen_only:
+            logger.debug("Listen-only mode — suppressing response: %.60r", raw)
+            raise StopResponse()
 
         query = _extract_query(raw)
 

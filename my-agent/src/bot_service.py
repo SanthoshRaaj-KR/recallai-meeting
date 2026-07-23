@@ -102,6 +102,13 @@ _RECALL_STATUS_MAP = {
     "fatal": "error",
 }
 
+# Live "mute Jarvis" flags, in-memory only, keyed by session_id. Ephemeral by
+# design: the frontend POSTs here and the agent process polls the GET below, so
+# it never touches the DB and resets to un-muted if bot_service restarts.
+# NOTE: assumes a single bot_service worker — multiple replicas would each hold
+# their own copy and need a shared channel instead.
+_LISTEN_ONLY: dict[str, bool] = {}
+
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Jarvis Bot Service", version="2.0")
 app.add_middleware(
@@ -508,6 +515,7 @@ async def session_bot_status(session_id: str) -> dict:
         "ended_at": s.get("ended_at"),
         "end_reason": None,
         "recall_status_code": None,
+        "listen_only": _LISTEN_ONLY.get(session_id, False),
     }
 
 
@@ -517,7 +525,33 @@ async def bot_status_no_session() -> dict:
         "status": "idle", "session_id": None, "bot_id": None,
         "meeting_url": None, "change_count": 0, "error": None,
         "started_at": None, "ended_at": None, "end_reason": None, "recall_status_code": None,
+        "listen_only": False,
     }
+
+
+# ── Endpoints: listen-only (mute Jarvis mid-meeting) ───────────────────────────
+# Backed by the in-memory `_LISTEN_ONLY` map declared above. The frontend POSTs
+# here; the agent process polls the GET over its internal bot_service URL.
+class ListenOnlyRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/sessions/{session_id}/bot/listen-only")
+async def set_listen_only(session_id: str, body: ListenOnlyRequest) -> dict:
+    """Mute/unmute Jarvis for a live session (in-memory).
+
+    When enabled, the agent keeps transcribing for meeting context but never
+    speaks — not even to acknowledge the wake word. The running agent polls the
+    GET below, so the change takes effect live within a couple of seconds.
+    """
+    _LISTEN_ONLY[session_id] = bool(body.enabled)
+    return {"session_id": session_id, "listen_only": bool(body.enabled)}
+
+
+@app.get("/sessions/{session_id}/bot/listen-only")
+async def get_listen_only(session_id: str) -> dict:
+    """Current mute state — polled by the agent process over the internal URL."""
+    return {"session_id": session_id, "listen_only": _LISTEN_ONLY.get(session_id, False)}
 
 
 # ── Endpoints: stop bot ────────────────────────────────────────────────────────
@@ -540,6 +574,7 @@ async def stop_bot(session_id: str) -> dict:
         except Exception as exc:
             logger.warning("Failed to remove Recall bot: %s", exc)
 
+    _LISTEN_ONLY.pop(session_id, None)  # ephemeral mute state — drop on stop
     session_store.patch(session_id, {"status": "ended", "ended_at": _utcnow()})
     s = session_store.get(session_id) or s
     # Authoritative participant list before crediting attendance.
