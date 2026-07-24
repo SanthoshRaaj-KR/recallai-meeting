@@ -300,6 +300,22 @@ class Assistant(Agent):
         # from the meeting status page via a session_store flag polled below.
         self._listen_only: bool = False
         self._listen_only_task: asyncio.Task | None = None
+        # No-interrupt mode — when True, Jarvis holds the floor: its replies play
+        # to completion and barge-in (talking over it) is ignored. Applied by
+        # flipping the Agent's allow_interruptions, which the runtime reads per
+        # reply. Toggled live from the meeting status page.
+        self._no_interrupt: bool = False
+        self._no_interrupt_task: asyncio.Task | None = None
+
+    def _apply_no_interrupt(self, enabled: bool) -> None:
+        """Map the no-interrupt flag onto the Agent's interruption setting.
+
+        ``allow_interruptions`` is read by the runtime each time a reply starts,
+        so this takes effect on the next thing Jarvis says: False = hold the
+        floor (ignore barge-in), True = normal interruptible speech.
+        """
+        self._no_interrupt = enabled
+        self._allow_interruptions = not enabled
 
     async def on_enter(self) -> None:
         # Do NOT call session.generate_reply() here directly.
@@ -319,6 +335,12 @@ class Assistant(Agent):
             self._listen_only_task = asyncio.create_task(
                 self._poll_listen_only(),
                 name="listen_only_poll",
+            )
+        # Same for the no-interrupt (hold-the-floor) toggle.
+        if self._no_interrupt_task is None and self._session_id:
+            self._no_interrupt_task = asyncio.create_task(
+                self._poll_no_interrupt(),
+                name="no_interrupt_poll",
             )
 
         if not self._greeted:
@@ -357,6 +379,35 @@ class Assistant(Agent):
                     else "disabled — Jarvis will respond again",
                 )
                 self._listen_only = enabled
+            await asyncio.sleep(_LISTEN_ONLY_POLL_S)
+
+    async def _poll_no_interrupt(self) -> None:
+        """Refresh the no-interrupt (hold-the-floor) flag from bot_service.
+
+        Same transport as the mute poll: an in-memory flag on bot_service, read
+        over the internal URL off the event loop. On change it flips the Agent's
+        allow_interruptions so the next reply either ignores barge-in or not.
+        """
+        url = f"{_BRIDGE_INTERNAL_URL}/sessions/{self._session_id}/bot/no-interrupt"
+
+        def _fetch() -> bool | None:
+            try:
+                resp = requests.get(url, timeout=2)
+                if resp.ok:
+                    return bool(resp.json().get("no_interrupt", False))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("no_interrupt poll failed: %s", exc)
+            return None
+
+        while True:
+            enabled = await asyncio.to_thread(_fetch)
+            if enabled is not None and enabled != self._no_interrupt:
+                logger.info(
+                    "No-interrupt mode %s",
+                    "ENABLED — Jarvis will finish uninterrupted" if enabled
+                    else "disabled — barge-in re-enabled",
+                )
+                self._apply_no_interrupt(enabled)
             await asyncio.sleep(_LISTEN_ONLY_POLL_S)
 
     async def _warmup_and_intro(self) -> None:

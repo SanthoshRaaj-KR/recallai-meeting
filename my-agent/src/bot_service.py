@@ -108,6 +108,9 @@ _RECALL_STATUS_MAP = {
 # NOTE: assumes a single bot_service worker — multiple replicas would each hold
 # their own copy and need a shared channel instead.
 _LISTEN_ONLY: dict[str, bool] = {}
+# Live "hold the floor" flags, same in-memory design: when set, Jarvis finishes
+# its reply and ignores barge-in (talking over it) until it's done.
+_NO_INTERRUPT: dict[str, bool] = {}
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Jarvis Bot Service", version="2.0")
@@ -516,6 +519,7 @@ async def session_bot_status(session_id: str) -> dict:
         "end_reason": None,
         "recall_status_code": None,
         "listen_only": _LISTEN_ONLY.get(session_id, False),
+        "no_interrupt": _NO_INTERRUPT.get(session_id, False),
     }
 
 
@@ -525,7 +529,7 @@ async def bot_status_no_session() -> dict:
         "status": "idle", "session_id": None, "bot_id": None,
         "meeting_url": None, "change_count": 0, "error": None,
         "started_at": None, "ended_at": None, "end_reason": None, "recall_status_code": None,
-        "listen_only": False,
+        "listen_only": False, "no_interrupt": False,
     }
 
 
@@ -554,6 +558,24 @@ async def get_listen_only(session_id: str) -> dict:
     return {"session_id": session_id, "listen_only": _LISTEN_ONLY.get(session_id, False)}
 
 
+@app.post("/sessions/{session_id}/bot/no-interrupt")
+async def set_no_interrupt(session_id: str, body: ListenOnlyRequest) -> dict:
+    """Hold-the-floor toggle (in-memory).
+
+    When enabled, Jarvis's replies play to completion and barge-in is ignored;
+    the running agent polls the GET below and flips its interruption setting, so
+    it takes effect on the next thing Jarvis says.
+    """
+    _NO_INTERRUPT[session_id] = bool(body.enabled)
+    return {"session_id": session_id, "no_interrupt": bool(body.enabled)}
+
+
+@app.get("/sessions/{session_id}/bot/no-interrupt")
+async def get_no_interrupt(session_id: str) -> dict:
+    """Current hold-the-floor state — polled by the agent process."""
+    return {"session_id": session_id, "no_interrupt": _NO_INTERRUPT.get(session_id, False)}
+
+
 # ── Endpoints: stop bot ────────────────────────────────────────────────────────
 @app.post("/sessions/{session_id}/bot/stop")
 async def stop_bot(session_id: str) -> dict:
@@ -575,6 +597,7 @@ async def stop_bot(session_id: str) -> dict:
             logger.warning("Failed to remove Recall bot: %s", exc)
 
     _LISTEN_ONLY.pop(session_id, None)  # ephemeral mute state — drop on stop
+    _NO_INTERRUPT.pop(session_id, None)  # ephemeral hold-the-floor state
     session_store.patch(session_id, {"status": "ended", "ended_at": _utcnow()})
     s = session_store.get(session_id) or s
     # Authoritative participant list before crediting attendance.
