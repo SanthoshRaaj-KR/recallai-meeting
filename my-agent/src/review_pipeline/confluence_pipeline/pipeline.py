@@ -29,7 +29,7 @@ from .evaluation import EvaluationAgent
 from .intent_extraction import IntentExtractionAgent
 from .models import ChunkRecord, ConfluenceIntent, ConfluenceProposal
 from .retrieval import PineconeHybridIndex
-from .structural import classify_kind, is_cross_cutting
+from .structural import classify_kind, is_cross_cutting, is_reaffirmation_phrasing
 from .verifier import VerifierAgent
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,30 @@ class PipelineConfig(BaseModel):
     min_fulfillment: float = 0.6
     # Drop cards whose draft fails verification on factual consistency.
     min_factual: float = 0.6
+    # Subject-attribution guardrail. A meeting quotes other parties' numbers all the
+    # time (a competitor's fee, a peer firm's terms, an industry benchmark); those
+    # retrieve the document owner's OWN equivalent row — same topic, same table, same
+    # units — and every other gate waves them through, because the resulting edit is
+    # genuinely well-formed. So a value attributed to a third party may only land on a
+    # section that is itself about that party. Enforced twice: at evaluation (cheap,
+    # before drafting) and again at verification (catches an attribution the extractor
+    # never recorded). Set LDOC_ATTRIBUTION_GUARD=0 to disable for A/B comparison.
+    attribution_guard: bool = os.getenv("LDOC_ATTRIBUTION_GUARD", "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    min_attribution: float = 0.5
+    # Reaffirmation guard. "Deciding not to change something" is not a change, but in
+    # the contrastive form that dominates real meetings — "they charge X; ours stays at
+    # Y" — the "ours" clause reads as an affirmative statement of a value, and the
+    # extractor emits it as an intent. Its new_value is what the document ALREADY says,
+    # so the no-op filter should catch it — except the editor, told to make the section
+    # satisfy the intent, instead edits a neighbouring row or rewrites a sentence to
+    # manufacture a difference. Cheapest to drop these before retrieval: they cost
+    # nothing to detect and every stage after this point can only do damage with them.
+    # Set LDOC_REAFFIRMATION_GUARD=0 to disable for A/B comparison.
+    reaffirmation_guard: bool = os.getenv("LDOC_REAFFIRMATION_GUARD", "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 # ── Deterministic recall helpers (ported verbatim) ────────────────────────────
@@ -140,6 +164,52 @@ def _phrase_overlap_match(intent: ConfluenceIntent, chunk: ChunkRecord) -> bool:
 
 def _has_concrete_value(i: ConfluenceIntent) -> bool:
     return (i.new_value or "").strip().lower() not in _PLACEHOLDER_VALUES
+
+
+# Words that appear in essentially every section: requiring one as a name token would
+# match the whole corpus and silently disable the floor. Always dropped.
+_ENTITY_STOPWORDS = {"the", "and", "for"}
+# Generic corporate words carry no identity — "Fund", "Ventures", "Ltd" are shared by
+# every party in the corpus, so they must never be what makes a name "match". Dropped
+# only when something distinctive survives, so an all-generic name still has a token.
+_ENTITY_GENERIC_TOKENS = {
+    "fund", "funds", "capital", "ventures", "venture", "partners", "partner",
+    "company", "companies", "corp", "corporation", "inc", "incorporated",
+    "ltd", "limited", "llp", "llc", "plc", "pvt", "private", "group", "holdings",
+    "technologies", "technology", "labs", "systems", "solutions", "services",
+    "firm", "team", "their", "them", "our", "market", "industry", "average",
+}
+
+
+def _entity_tokens(entity: str) -> list[str]:
+    """The distinctive tokens of a party's name, generic corporate words removed."""
+    toks = [
+        t for t in re.findall(r"[a-z0-9]+", (entity or "").lower())
+        if len(t) >= 3 and t not in _ENTITY_STOPWORDS
+    ]
+    sig = [t for t in toks if t not in _ENTITY_GENERIC_TOKENS]
+    return sig or toks
+
+
+def _entity_named_in_chunk(intent: ConfluenceIntent, chunk: ChunkRecord) -> bool:
+    """True when the intent's third-party subject is actually NAMED in this section.
+
+    A necessary condition for another party's value to belong here: a section can only
+    be *about* a party that it names somewhere. This is the deterministic floor under
+    the model's attribution judgement, and it exists because that judgement is weakest
+    exactly where the damage is done — a bare table row like "| Reserve ratio | 1.4x |"
+    carries no visible owner, so the model reads it as subject-less and lets a rival's
+    figure in. It is also stable run to run, which the model's verdict is not.
+
+    EVERY distinctive token must appear, so "Meridian Bharat Fund" cannot match the
+    owner's own "Bharat Breakthrough Fund-I" on the shared word "bharat". A third-party
+    value with no nameable subject at all matches nothing, which is the safe answer.
+    """
+    tokens = _entity_tokens(intent.subject_entity or "")
+    if not tokens:
+        return False
+    haystack = f"{chunk.doc_title}\n{chunk.section_heading}\n{chunk.content}".lower()
+    return all(t in haystack for t in tokens)
 
 
 def _meaningful_change(before: str, after: str) -> bool:
@@ -252,6 +322,24 @@ async def propose(
         i for i in intents
         if classify_kind(i) == "edit" and _has_concrete_value(i)
     ]
+    if cfg.reaffirmation_guard:
+        kept: list[ConfluenceIntent] = []
+        for i in edit_intents:
+            # Either signal is enough to reject: the model's own label, or the
+            # speaker's quoted words. They fail independently — the label slips on the
+            # contrastive form, the lexical markers are absent when the speaker
+            # reaffirms implicitly — so neither alone closes the gap.
+            by_label = i.change_polarity == "reaffirmation"
+            by_words = is_reaffirmation_phrasing(i)
+            if by_label or by_words:
+                logger.info(
+                    "confluence_pipeline: reaffirmation guard — %r (%s) restates an "
+                    "existing value, not a change (label=%s, quoted_words=%s); dropped",
+                    i.affected_topic, i.new_value, by_label, by_words,
+                )
+                continue
+            kept.append(i)
+        edit_intents = kept
     logger.info("confluence_pipeline.propose: %d intents (%d editable)", len(intents), len(edit_intents))
     if not edit_intents:
         return intents, []
@@ -289,10 +377,35 @@ async def propose(
                 survivors_idx.add(i)
         survivors = [chunks[i] for i in sorted(survivors_idx)]
         # Stage 2: the strong model re-scores only the shortlist (the precision gate).
-        fine = await asyncio.gather(*[eval_fine.score(intent, c) for c in survivors])
+        # Only the STRONG model's attribution verdict is enforced — stage 1 stays a
+        # pure cheap ranker, as designed.
+        fine = await asyncio.gather(*[eval_fine.score_detail(intent, c) for c in survivors])
         scores: list[float] = []
         rescue_floor = cfg.relevance_threshold - cfg.floor_rescue_margin
-        for c, s in zip(survivors, fine):
+        gate_attribution = cfg.attribution_guard and intent.subject_scope == "third_party"
+        for c, verdict in zip(survivors, fine):
+            s = verdict.relevance_score
+            # Subject-attribution guardrail: this value was stated about someone else,
+            # so it may only land on a section that is about that party. Both checks
+            # must agree, because either alone leaks — the deterministic name check
+            # holds the line on subject-less table rows (where the model's judgement is
+            # weakest), while the model's verdict distinguishes "names the party" from
+            # "is about the party" (a passing mention is not a case file). Zeroing,
+            # rather than merely lowering, also denies a rejected candidate the
+            # deterministic rescue below: a competitor's figure reliably trips the
+            # field-label and phrase-overlap floors precisely because it IS the same
+            # kind of value.
+            named_here = _entity_named_in_chunk(intent, c)
+            if gate_attribution and not (verdict.subject_match and named_here):
+                logger.info(
+                    "confluence_pipeline: attribution gate — %r (%s) is about %r, "
+                    "section %r is about %r (named_here=%s, model_match=%s); rejected",
+                    intent.affected_topic, intent.new_value, intent.subject_entity,
+                    c.section_heading, verdict.section_subject,
+                    named_here, verdict.subject_match,
+                )
+                scores.append(0.0)
+                continue
             # Confirm a NEAR-MISS only: the model scored it just under the gate AND a
             # deterministic match backs it up → tip it over. A clearly-low score
             # (< rescue_floor) is a confident rejection and is left to fail, even with
@@ -333,8 +446,17 @@ async def propose(
     await _emit("verification")
     verifier = VerifierAgent()
     verifications = await asyncio.gather(*[
-        verifier.verify(d.before_content, d.after_content, f"{i.intent_type}: {i.new_value}")
-        for (i, _c), d in zip(qualified, drafts)
+        verifier.verify(
+            d.before_content,
+            d.after_content,
+            f"{i.intent_type}: {i.new_value}",
+            spoken_context=" ".join(i.verbatim_snippets or []),
+            subject_entity=i.subject_entity,
+            subject_scope=i.subject_scope,
+            doc_title=c.doc_title,
+            section_heading=c.section_heading,
+        )
+        for (i, c), d in zip(qualified, drafts)
     ])
 
     # ── Stage 8: assemble, suppress no-ops + unfulfilled ─────────────────────
@@ -354,6 +476,16 @@ async def propose(
         if ver.factual_consistency < cfg.min_factual:
             logger.info("confluence_pipeline.propose: dropping factually-weak edit on %r (%.2f)",
                         chunk.section_heading, ver.factual_consistency)
+            continue
+        # Attribution backstop. Runs on EVERY draft, not just third_party intents:
+        # its job is to catch the value whose attribution the extractor never
+        # recorded, which the evaluation-stage gate therefore never examined.
+        if cfg.attribution_guard and ver.attribution_fit < cfg.min_attribution:
+            logger.info(
+                "confluence_pipeline.propose: dropping mis-attributed edit on %r "
+                "(attribution %.2f) — %r is not said about this section's subject",
+                chunk.section_heading, ver.attribution_fit, intent.new_value,
+            )
             continue
         edit_type = draft.edit_type if draft.edit_type in ("replace", "append", "delete_section") else "replace"
         prop = ConfluenceProposal.create(cfg.session_id, intent, chunk)

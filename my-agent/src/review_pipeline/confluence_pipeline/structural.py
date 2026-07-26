@@ -96,6 +96,41 @@ def has_explicit_removal_verb(intent: ConfluenceIntent) -> bool:
     return bool(_REMOVAL_RE.search(" ".join(intent.verbatim_snippets or [])))
 
 
+# Phrases with which a speaker confirms a value is STAYING as it is. Deliberately
+# high-precision: each one is an explicit "not moving" marker, not merely a mention of
+# the current state, because a false positive here silently drops a real change.
+_REAFFIRM_RE = re.compile(
+    r"\b("
+    r"stays? (?:at|the same|as (?:is|it is)|put)|"
+    r"staying (?:at|the same|as is)|"
+    r"remains? (?:at|the same|unchanged|as is)|"
+    r"remaining (?:at|the same|unchanged)|"
+    r"unchanged|"
+    r"(?:are|is|'re|were) not changing|not changing (?:it|that|this|those)|"
+    r"(?:no|isn't|is not|won't be|will not be) chang(?:e|es|ing)(?: there| to (?:it|that|this))?|"
+    r"keep(?:ing)? (?:it|that|this|them) (?:that way|the same|as is|as it is|where it is)|"
+    r"leav(?:e|ing) (?:it|that|this|them) (?:as is|as it is|alone|where it is|the same)|"
+    r"stick(?:ing)? with|"
+    r"comfortable (?:with )?where (?:it|they|we) (?:is|are|sit|sits)|"
+    r"happy with (?:it|that|the way)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_reaffirmation_phrasing(intent: ConfluenceIntent) -> bool:
+    """True when the speaker's QUOTED words confirm a value is staying as it is.
+
+    The deterministic half of the reaffirmation guard, and the analogue of
+    :func:`has_explicit_removal_verb`: it reads only ``verbatim_snippets``, never the
+    extractor's own paraphrase, so a model that mislabels a "we're keeping it" clause
+    as a change is still caught. The contrastive form — "they charge X; ours stays at
+    Y" — is exactly where the model's label is unreliable, and exactly where these
+    markers are present.
+    """
+    return bool(_REAFFIRM_RE.search(" ".join(intent.verbatim_snippets or [])))
+
+
 def classify_kind(intent: ConfluenceIntent) -> str:
     """Return "rename", "removal", or "edit" for a single intent.
 
