@@ -247,10 +247,21 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     except DBError as e:
         raise HTTPException(500, str(e))
 
+    # Delivery outcome is reported to the caller rather than swallowed. The invite
+    # stays valid either way — the code works whether or not the mail arrives —
+    # but telling an admin "invite sent" when nothing was sent left them waiting
+    # on an email that was never going to come.
+    email_sent = False
+    email_error: str | None = None
     try:
-        from ..email import send_invite_email
-        send_invite_email(email, team["name"], inviter_name, code, body.role)
+        from ..email import send_invite_email, sender_domain_warning
+        email_sent = send_invite_email(email, team["name"], inviter_name, code, body.role)
+        if not email_sent:
+            email_error = "Email sending is not configured on the server."
+        else:
+            email_error = sender_domain_warning()  # delivered to the relay, may still bounce
     except Exception as exc:
+        email_error = str(exc)
         logger.warning("[invite] Email delivery failed (invite code still valid): %s", exc)
 
     # Case-insensitive, like every other org_users email lookup. An exact eq.
@@ -270,6 +281,8 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
         expires_at=expires_at,
         team_name=team["name"],
         user_exists=existing is not None,
+        email_sent=email_sent,
+        email_error=email_error,
     )
 
 

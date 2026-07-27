@@ -187,6 +187,12 @@ class TeamInviteOut(BaseModel):
     expires_at: str
     team_name: Optional[str] = None
     user_exists: bool = False
+    # Whether the invite email actually reached the mail relay, and why not (or
+    # what may still go wrong) if applicable. The invite is valid regardless —
+    # the code works either way — so this drives what the UI tells the inviter
+    # rather than whether the request succeeded.
+    email_sent: bool = False
+    email_error: Optional[str] = None
 
 
 class AcceptInviteRequest(BaseModel):

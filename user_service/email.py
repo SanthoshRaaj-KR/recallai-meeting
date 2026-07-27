@@ -25,10 +25,42 @@ FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER) or "noreply@jarvis.app"
 APP_URL = os.getenv("APP_URL", "http://localhost:3000").rstrip("/")
 
 
-def _send(to_email: str, subject: str, plain: str, html: str) -> None:
+# Free-webmail domains cannot be used as a relay From address and have mail
+# actually delivered: the relay can neither sign DKIM for the domain nor appear
+# in its SPF record, so DMARC alignment fails and receivers reject or spam-folder
+# the message. Sending must use an address on a domain verified with the relay.
+_FREE_WEBMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "outlook.com",
+    "hotmail.com", "live.com", "aol.com", "icloud.com", "proton.me",
+}
+
+
+def sender_domain_warning() -> str | None:
+    """Return a warning when FROM_EMAIL can't pass DMARC through this relay."""
+    domain = FROM_EMAIL.rsplit("@", 1)[-1].strip().lower()
+    if domain in _FREE_WEBMAIL_DOMAINS:
+        return (
+            f"FROM_EMAIL is {FROM_EMAIL}. Mail sent through an SMTP relay as a "
+            f"{domain} address fails SPF/DKIM alignment and is rejected or "
+            f"spam-filtered by most providers. Use an address on a domain "
+            f"verified with your mail provider."
+        )
+    return None
+
+
+def _send(to_email: str, subject: str, plain: str, html: str) -> bool:
+    """Deliver one message.
+
+    Returns True when it was actually handed to the relay, False when sending is
+    switched off (no SMTP credentials). Raises RuntimeError when delivery was
+    attempted and failed — callers must not treat that as success.
+    """
     if not SMTP_USER or not SMTP_PASS:
         logger.warning("[email] SMTP not configured — would send to <%s>: %s", to_email, subject)
-        return
+        return False
+    warning = sender_domain_warning()
+    if warning:
+        logger.warning("[email] %s", warning)
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f"Jarvis <{FROM_EMAIL}>"
@@ -42,6 +74,7 @@ def _send(to_email: str, subject: str, plain: str, html: str) -> None:
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
         logger.info("[email] Sent '%s' to %s", subject, to_email)
+        return True
     except Exception as exc:
         logger.error("[email] Delivery failed for %s: %s", to_email, exc)
         raise RuntimeError(f"Email delivery failed: {exc}") from exc
@@ -82,14 +115,20 @@ def send_welcome_email(to_email: str, name: str) -> None:
     _send(to_email, "Welcome to Jarvis", plain, html)
 
 
-def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: str, role: str) -> None:
-    """Send a team invite email. Logs the code to console if SMTP is not configured."""
+def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: str, role: str) -> bool:
+    """Send a team invite email.
+
+    Returns True if it was handed to the relay, False if sending is switched off
+    (the code is logged instead). Raises RuntimeError if delivery was attempted
+    and failed — the caller surfaces that so nobody is told "invite sent" when
+    no mail left the building.
+    """
     if not SMTP_USER or not SMTP_PASS:
         logger.warning(
             "[invite] SMTP not configured — invite code for <%s>: %s  accept at: %s/invite/%s",
             to_email, code, APP_URL, code,
         )
-        return
+        return False
 
     plain = (
         f"Hi,\n\n"
@@ -128,7 +167,7 @@ def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: st
 </body>
 </html>"""
 
-    _send(to_email, f"You're invited to join {team_name} on Jarvis", plain, html)
+    return _send(to_email, f"You're invited to join {team_name} on Jarvis", plain, html)
 
 
 def send_mom_email(to_email: str, summary: dict) -> None:
