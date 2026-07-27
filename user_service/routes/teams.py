@@ -180,9 +180,7 @@ def remove_member(team_id: str, user_id: str, claims: dict = Depends(get_current
     if not can_manage_team(claims, team_id):
         raise HTTPException(403, "Only team manager, ADMIN, or CEO can remove members")
     delete("org_team_members", {"team_id": f"eq.{team_id}", "user_id": f"eq.{user_id}"})
-    # Remove from hierarchy
-    delete("org_reporting_hierarchy", {"descendant_id": f"eq.{user_id}"})
-    delete("org_reporting_hierarchy", {"ancestor_id": f"eq.{user_id}", "depth": "gt.0"})
+    _unwire_hierarchy(user_id)
 
 
 @router.post("/{team_id}/invite", response_model=TeamInviteOut, status_code=status.HTTP_201_CREATED)
@@ -247,6 +245,38 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
         team_name=team["name"],
         user_exists=existing is not None,
     )
+
+
+def _unwire_hierarchy(user_id: str) -> None:
+    """Detach a user from the reporting tree after a team removal.
+
+    Only drops the edges that the removal actually invalidated:
+
+    - reporting edges ABOVE them (depth > 0) — they no longer report to that
+      team's manager. Their depth-0 self-loop is preserved, because deleting it
+      erases the person from the org chart entirely rather than just detaching
+      them, and it is what every hierarchy query anchors on.
+    - reporting edges BELOW them (depth > 0) — they no longer manage anyone.
+
+    If the user is still on ANOTHER team, they are re-wired underneath that
+    team's manager instead of being left dangling. The old code deleted every
+    edge unconditionally, so removing someone from one of two teams erased their
+    position in the org chart completely.
+    """
+    remaining = [
+        m for m in select("org_team_members", {"user_id": f"eq.{user_id}"})
+        if m.get("team_id")
+    ]
+
+    # Ancestors above them, and reports below them — but never the self-loop.
+    delete("org_reporting_hierarchy", {"descendant_id": f"eq.{user_id}", "depth": "gt.0"})
+    delete("org_reporting_hierarchy", {"ancestor_id": f"eq.{user_id}", "depth": "gt.0"})
+
+    # Still on another team → re-attach under that team's manager so they keep a
+    # place in the chart.
+    for m in remaining:
+        _wire_hierarchy(m["team_id"], user_id, m.get("role") or TeamRole.MEMBER)
+        break
 
 
 def _team_manager_id(team_id: str) -> str | None:
