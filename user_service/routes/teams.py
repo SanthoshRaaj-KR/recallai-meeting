@@ -203,7 +203,10 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     except Exception:
         pass
 
-    code = secrets.token_hex(3).upper()  # 6-char hex e.g. "A3F0C2"
+    # 16 hex chars = 64 bits. The previous 6-char code was 24 bits (~16.7M),
+    # which is brute-forceable against a public, unauthenticated lookup. The code
+    # travels in a link, so its length costs the user nothing.
+    code = secrets.token_hex(8).upper()
     expires_at = (
         datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     ).isoformat()

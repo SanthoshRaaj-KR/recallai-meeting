@@ -115,7 +115,7 @@ def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: st
     </p>
     <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:24px;text-align:center;margin-bottom:24px">
       <p style="margin:0 0 8px;color:#6b7280;font-size:13px">Your invite code</p>
-      <p style="margin:0;font-size:36px;font-weight:700;letter-spacing:10px;font-family:monospace;color:#111">{code}</p>
+      <p style="margin:0;font-size:17px;font-weight:700;letter-spacing:2px;font-family:monospace;color:#111;word-break:break-all">{code}</p>
     </div>
     <a href="{APP_URL}/invite/{code}"
        style="display:block;text-align:center;background:#6366f1;color:#fff;padding:14px 24px;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px">
