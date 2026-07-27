@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from user_service.main import app
+from user_service import auth as auth_module
 from user_service.routes import auth as auth_routes
 from user_service import database as db
 
@@ -70,8 +71,10 @@ def _patch(monkeypatch):
 
 
 def _set_google_email(monkeypatch, email: str):
+    # The Supabase call lives in user_service.auth.verify_supabase_token, shared
+    # by google-exchange and invite-accept.
     monkeypatch.setattr(
-        auth_routes._requests, "get",
+        auth_module._requests, "get",
         lambda *a, **k: _FakeResp({"id": "sb-uid", "email": email}),
     )
 

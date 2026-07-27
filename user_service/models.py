@@ -190,8 +190,20 @@ class TeamInviteOut(BaseModel):
 
 
 class AcceptInviteRequest(BaseModel):
+    """Accepting an invite requires proving control of the invited address.
+
+    `supabase_token` is the caller's Google/Supabase access token; the server
+    verifies it and requires the resulting email to match the invite. Without
+    that, possession of the 6-character code alone was enough to create an
+    account under someone else's email address.
+
+    `name` is only a fallback for the display name when Google doesn't supply one.
+    There is deliberately no password field: invited users authenticate through
+    Google, and a password set by whoever opened the link would reintroduce the
+    same takeover.
+    """
+    supabase_token: str
     name: Optional[str] = None
-    password: Optional[str] = None
 
 
 # ── Hierarchy models ───────────────────────────────────────────────────────────

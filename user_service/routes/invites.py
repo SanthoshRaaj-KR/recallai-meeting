@@ -5,7 +5,7 @@ import datetime as dt
 
 from fastapi import APIRouter, HTTPException
 
-from ..auth import create_access_token, hash_password
+from ..auth import create_access_token, verify_supabase_token
 from ..database import DBError, delete, insert, select_one, update, find_by_text_ci
 from ..models import AcceptInviteRequest, OrgRole, TeamInviteOut
 from .teams import _wire_hierarchy
@@ -59,6 +59,19 @@ def accept_invite(code: str, body: AcceptInviteRequest):
     if not team:
         raise HTTPException(404, "Team no longer exists")
 
+    # The invite code alone proves nothing about who is holding it. Require a
+    # verified Google identity and bind it to the address the invite was sent to,
+    # otherwise anyone with (or guessing) a code could create an account under
+    # someone else's email and receive a valid session for it.
+    identity = verify_supabase_token(body.supabase_token)
+    if identity["email"].strip().lower() != (invite["email"] or "").strip().lower():
+        raise HTTPException(
+            403,
+            f"This invite was sent to {invite['email']}. "
+            f"You are signed in as {identity['email']} — sign in with the invited "
+            f"account to accept.",
+        )
+
     existing_user = find_by_text_ci("org_users", "email", invite["email"])
 
     if existing_user:
@@ -71,18 +84,22 @@ def accept_invite(code: str, body: AcceptInviteRequest):
             except DBError:
                 pass
     else:
-        if not body.name:
+        # Prefer the name Google gives us; body.name is only a fallback.
+        display_name = (identity.get("full_name") or body.name or "").strip()
+        if not display_name:
             raise HTTPException(400, "name is required to create a new account")
-        # password_hash is nullable — Google-auth users authenticate via /auth/google-exchange
-        pw_hash = hash_password(body.password) if body.password else None
         try:
             new_user = insert("org_users", {
-                "email": invite["email"],
-                "name": body.name,
-                "password_hash": pw_hash,
+                # Store the VERIFIED email, not the invited string, so casing
+                # matches what google-exchange will look up later.
+                "email": identity["email"],
+                "name": display_name,
+                # No password: invited users authenticate through Google.
+                "password_hash": None,
                 "role": OrgRole.MEMBER,
                 "org_id": team["org_id"],
                 "is_active": True,
+                "supabase_user_id": identity.get("supabase_uid"),
             })
             user_id = new_user["id"]
         except DBError as e:

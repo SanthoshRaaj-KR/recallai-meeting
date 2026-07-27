@@ -1,15 +1,13 @@
 """Auth routes: register, login, google-exchange, refresh, logout."""
 
 import logging
-import os
 
-import requests as _requests
 from fastapi import APIRouter, HTTPException, status, Depends
 
 from ..auth import (
     hash_password, verify_password,
     create_access_token, decode_token,
-    get_current_user,
+    get_current_user, verify_supabase_token,
 )
 from ..database import select_one, insert, update, DBError, find_by_text_ci
 from ..models import RegisterRequest, LoginRequest, GoogleExchangeRequest, TokenResponse, OrgRole
@@ -134,33 +132,9 @@ def google_exchange(body: GoogleExchangeRequest):
     email in org_users and returns an org-scoped JWT. Returns 404 with
     detail='not_in_org' if the user is not part of any organization.
     """
-    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
-    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-
-    if not supabase_url or not service_key:
-        raise HTTPException(500, "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured")
-
-    try:
-        resp = _requests.get(
-            f"{supabase_url}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {body.supabase_token}",
-                "apikey": service_key,
-            },
-            timeout=6,
-        )
-    except Exception as exc:
-        raise HTTPException(503, f"Could not reach Supabase Auth: {exc}")
-
-    if resp.status_code in (401, 403) or not resp.ok:
-        raise HTTPException(401, "Invalid or expired Supabase token")
-
-    data = resp.json()
-    email: str | None = data.get("email")
-    supabase_uid: str | None = data.get("id")
-
-    if not email:
-        raise HTTPException(401, "Supabase token has no email claim")
+    identity = verify_supabase_token(body.supabase_token)
+    email: str = identity["email"]
+    supabase_uid: str | None = identity["supabase_uid"]
 
     # Case-insensitive match: Google/Supabase may return the email in a different
     # case than it was stored (invite/manual-add), which previously mis-reported an
