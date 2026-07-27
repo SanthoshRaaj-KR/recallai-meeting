@@ -57,10 +57,22 @@ API surface:
     GET    /health
 """
 
+import logging
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Uvicorn configures only its OWN loggers, leaving the root logger at WARNING —
+# so every application logger.info() was silently discarded. That hid the
+# "[email] Sent ... to ..." confirmations while letting the warnings through,
+# which made a delivery problem impossible to diagnose from the logs: you could
+# see neither that a mail had been sent nor that it hadn't. bot_service has
+# always done this; org-service was the odd one out.
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+)
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware

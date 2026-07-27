@@ -34,18 +34,42 @@ _FREE_WEBMAIL_DOMAINS = {
     "hotmail.com", "live.com", "aol.com", "icloud.com", "proton.me",
 }
 
+# Set once the sender misconfiguration has been logged, to keep it out of every
+# subsequent send.
+_sender_warning_logged = False
+
 
 def sender_domain_warning() -> str | None:
     """Return a warning when FROM_EMAIL can't pass DMARC through this relay."""
     domain = FROM_EMAIL.rsplit("@", 1)[-1].strip().lower()
     if domain in _FREE_WEBMAIL_DOMAINS:
         return (
-            f"FROM_EMAIL is {FROM_EMAIL}. Mail sent through an SMTP relay as a "
-            f"{domain} address fails SPF/DKIM alignment and is rejected or "
-            f"spam-filtered by most providers. Use an address on a domain "
+            f"FROM_EMAIL is {FROM_EMAIL}. Mail relayed as a {domain} address "
+            f"cannot be DKIM-signed for that domain and is not in its SPF "
+            f"record, so it fails DMARC alignment and is usually spam-filtered "
+            f"even when the relay accepts it. Use an address on a domain "
             f"verified with your mail provider."
         )
     return None
+
+
+class _RecordingSMTP(smtplib.SMTP):
+    """SMTP client that keeps the server's reply to DATA.
+
+    Relays return their queue id there (Brevo: "250 ... queued as <id>"), which
+    is the only handle for finding a specific message in the provider's own
+    delivery log. Without it, a message the relay accepted and then dropped is
+    untraceable from our side.
+    """
+
+    last_data_response: str = ""
+
+    def data(self, msg):  # type: ignore[override]
+        code, resp = super().data(msg)
+        self.last_data_response = (
+            resp.decode(errors="replace") if isinstance(resp, bytes) else str(resp)
+        )
+        return code, resp
 
 
 def _send(to_email: str, subject: str, plain: str, html: str) -> bool:
@@ -58,9 +82,14 @@ def _send(to_email: str, subject: str, plain: str, html: str) -> bool:
     if not SMTP_USER or not SMTP_PASS:
         logger.warning("[email] SMTP not configured — would send to <%s>: %s", to_email, subject)
         return False
+    # Static misconfiguration — warn once per process rather than on every send.
+    # It is also returned to the caller via sender_domain_warning(), so quieting
+    # the log here doesn't hide it.
+    global _sender_warning_logged
     warning = sender_domain_warning()
-    if warning:
+    if warning and not _sender_warning_logged:
         logger.warning("[email] %s", warning)
+        _sender_warning_logged = True
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f"Jarvis <{FROM_EMAIL}>"
@@ -68,12 +97,22 @@ def _send(to_email: str, subject: str, plain: str, html: str) -> bool:
     msg.attach(MIMEText(plain, "plain"))
     msg.attach(MIMEText(html, "html"))
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+        with _RecordingSMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
             server.ehlo()
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        logger.info("[email] Sent '%s' to %s", subject, to_email)
+            refused = server.send_message(msg)
+            queued = server.last_data_response
+        if refused:
+            # Partial acceptance: some recipients were rejected outright.
+            logger.error("[email] Recipients refused for '%s': %s", subject, refused)
+            raise RuntimeError(f"Recipients refused: {refused}")
+        # Log the relay's queue id — the handle for looking this exact message up
+        # in the provider's delivery log when it is accepted here but never lands.
+        logger.info(
+            "[email] Accepted by relay: to=%s from=%s subject=%r relay_response=%r",
+            to_email, FROM_EMAIL, subject, queued,
+        )
         return True
     except Exception as exc:
         logger.error("[email] Delivery failed for %s: %s", to_email, exc)

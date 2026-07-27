@@ -121,7 +121,8 @@ def test_free_webmail_senders_are_flagged(monkeypatch, addr):
     monkeypatch.setattr(email_mod, "FROM_EMAIL", addr)
     warning = email_mod.sender_domain_warning()
     assert warning is not None
-    assert "SPF/DKIM" in warning
+    assert addr in warning          # names the offending address
+    assert "DMARC" in warning       # and says why it matters
 
 
 @pytest.mark.parametrize("addr", ["noreply@genreal.ai", "invites@company.co.uk"])
