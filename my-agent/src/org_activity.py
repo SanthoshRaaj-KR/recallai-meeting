@@ -161,13 +161,56 @@ def _team_roster(team_id: str) -> tuple[list[dict], str | None]:
 
 
 def _participant_duration_mins(entry: dict, session: dict) -> float | None:
-    """Per-person minutes from join/leave. Missing leave → stayed until meeting end;
-    missing join → present from meeting start."""
-    joined = _parse_dt(entry.get("joined_at")) or _parse_dt(session.get("started_at"))
-    left = _parse_dt(entry.get("left_at")) or _parse_dt(session.get("ended_at"))
+    """Per-person minutes actually spent in the call.
+
+    Presence records a list of `intervals` [{joined_at, left_at}] — one per stay —
+    so someone who drops and rejoins is credited only for the time they were
+    present, not for the gap in between. Each interval is closed with the meeting
+    boundaries when an endpoint is missing (joined before we started watching /
+    still in the call when it ended).
+
+    Falls back to the flat joined_at/left_at pair for sessions recorded before
+    intervals existed.
+    """
+    started = _parse_dt(session.get("started_at"))
+    ended = _parse_dt(session.get("ended_at"))
+
+    intervals = entry.get("intervals") or []
+    if intervals:
+        total = 0.0
+        counted = False
+        for iv in intervals:
+            joined = _parse_dt(iv.get("joined_at")) or started
+            left = _parse_dt(iv.get("left_at")) or ended
+            if joined and left:
+                total += max(0.0, (left - joined).total_seconds() / 60)
+                counted = True
+        return round(total, 1) if counted else None
+
+    joined = _parse_dt(entry.get("joined_at")) or started
+    left = _parse_dt(entry.get("left_at")) or ended
     if joined and left:
         return round(max(0.0, (left - joined).total_seconds() / 60), 1)
     return None
+
+
+# Display names that are the bot itself, never a human attendee. Matched on the
+# normalised name so casing/punctuation variants collapse.
+_BOT_NAMES = {"jarvis", "meeting", "meeting assistant"}
+
+
+def _is_bot_participant(name: str | None) -> bool:
+    """True when this presence entry is our own bot rather than a person.
+
+    record_participants used to credit the bot as an attendee (the transcript
+    backfill path already filtered it), which put a phantom guest on every
+    meeting's attendee list.
+    """
+    key = _normalize_name(name)
+    if not key:
+        return False
+    configured = _normalize_name(os.getenv("BOT_NAME", ""))
+    return key in _BOT_NAMES or (bool(configured) and key == configured)
 
 
 def record_participants(session: dict) -> None:
@@ -189,7 +232,12 @@ def record_participants(session: dict) -> None:
         rows = []
         for pid, entry in presence.items():
             rec_name = entry.get("name")
-            # 1) Email is authoritative (work Google login) — match org-wide, exact.
+            if _is_bot_participant(rec_name):
+                continue  # our own bot is not an attendee
+            # 1) Email is authoritative when present — match org-wide, exact.
+            #    NOTE: Recall only populates participant.email for bots created via
+            #    its Calendar Integration (feature-flagged). Bots started from a
+            #    meeting_url get null, so in practice this falls through to (2).
             uid = _resolve_by_email(entry.get("email"), org_id)
             confidence = "high" if uid else "none"
             # 2) No email (or not an org member) → fall back to name matching; still
