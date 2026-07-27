@@ -7,7 +7,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..auth import get_current_user
-from ..database import select, select_one, insert, update, delete, DBError
+from ..database import select, select_one, insert, update, delete, DBError, find_by_text_ci
 from ..models import (
     TeamCreate, TeamOut, TeamUpdate,
     AddMemberRequest, MemberOut, UserOut,
@@ -22,6 +22,11 @@ from ..rbac import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/teams", tags=["teams"])
+
+# How long a team invite stays valid. Single source of truth: the code always
+# sets expires_at explicitly, and migration 014 realigns the column default to
+# match so reading the schema doesn't suggest a different (48h) lifetime.
+INVITE_TTL = datetime.timedelta(hours=1)
 
 
 def _enrich_team(row: dict, claims: dict) -> TeamOut:
@@ -194,6 +199,10 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     if body.role not in (TeamRole.MANAGER, TeamRole.MEMBER, TeamRole.ASSOCIATE):
         raise HTTPException(400, f"Invalid team role: {body.role}")
 
+    email = (body.email or "").strip()
+    if not email:
+        raise HTTPException(400, "email is required")
+
     # Lazy GC (no scheduler in this stack): drop expired pending invites first.
     try:
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -201,12 +210,25 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     except Exception:
         pass
 
+    # Supersede any live invite for this address+team. Without this, re-inviting
+    # somebody (because the first mail was missed, or the hour lapsed while they
+    # were away) left several codes valid at once — each an independent way into
+    # the org, and each expiring at a different time.
+    try:
+        for stale in select("org_team_invitations", {
+            "team_id": f"eq.{team_id}", "status": "eq.pending",
+        }):
+            if (stale.get("email") or "").strip().lower() == email.lower():
+                delete("org_team_invitations", {"code": f"eq.{stale['code']}"})
+    except Exception as exc:
+        logger.warning("[invite] could not supersede previous invites: %s", exc)
+
     # 16 hex chars = 64 bits. The previous 6-char code was 24 bits (~16.7M),
     # which is brute-forceable against a public, unauthenticated lookup. The code
     # travels in a link, so its length costs the user nothing.
     code = secrets.token_hex(8).upper()
     expires_at = (
-        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+        datetime.datetime.now(datetime.timezone.utc) + INVITE_TTL
     ).isoformat()
 
     inviter = select_one("org_users", {"id": f"eq.{claims['sub']}"})
@@ -215,7 +237,7 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     try:
         row = insert("org_team_invitations", {
             "team_id": team_id,
-            "email": body.email,
+            "email": email,
             "role": body.role,
             "code": code,
             "status": "pending",
@@ -227,15 +249,19 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
 
     try:
         from ..email import send_invite_email
-        send_invite_email(body.email, team["name"], inviter_name, code, body.role)
+        send_invite_email(email, team["name"], inviter_name, code, body.role)
     except Exception as exc:
         logger.warning("[invite] Email delivery failed (invite code still valid): %s", exc)
 
-    existing = select_one("org_users", {"email": f"eq.{body.email}"})
+    # Case-insensitive, like every other org_users email lookup. An exact eq.
+    # match reported an existing member as a new user whenever the invite was
+    # typed in different casing than the stored address, which made the accept
+    # page ask them for a name they already had.
+    existing = find_by_text_ci("org_users", "email", email)
     return TeamInviteOut(
         id=row["id"],
         team_id=team_id,
-        email=body.email,
+        email=email,
         role=body.role,
         code=code,
         status="pending",
