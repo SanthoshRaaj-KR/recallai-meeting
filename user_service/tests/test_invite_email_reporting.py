@@ -129,3 +129,35 @@ def test_free_webmail_senders_are_flagged(monkeypatch, addr):
 def test_owned_domain_senders_are_not_flagged(monkeypatch, addr):
     monkeypatch.setattr(email_mod, "FROM_EMAIL", addr)
     assert email_mod.sender_domain_warning() is None
+
+
+def test_gmail_sent_via_brevo_is_still_flagged(monkeypatch):
+    # The scenario that started this: relaying a gmail.com From through a
+    # third party that doesn't own gmail.com.
+    monkeypatch.setattr(email_mod, "FROM_EMAIL", "santhoshraajkr.17@gmail.com")
+    monkeypatch.setattr(email_mod, "SMTP_HOST", "smtp-relay.brevo.com")
+    warning = email_mod.sender_domain_warning()
+    assert warning is not None
+    assert "smtp-relay.brevo.com" in warning
+
+
+def test_gmail_sent_via_gmail_own_smtp_is_not_flagged(monkeypatch):
+    # Authenticated directly to Google as that exact account: Google is
+    # delivering its own domain's mail, so alignment holds.
+    monkeypatch.setattr(email_mod, "FROM_EMAIL", "santhoshraajkr.17@gmail.com")
+    monkeypatch.setattr(email_mod, "SMTP_HOST", "smtp.gmail.com")
+    assert email_mod.sender_domain_warning() is None
+
+
+def test_gmail_host_does_not_launder_an_unrelated_free_webmail_domain(monkeypatch):
+    # Authenticating to smtp.gmail.com does not make a yahoo.com From aligned —
+    # only gmail.com/googlemail.com are Google's own domains.
+    monkeypatch.setattr(email_mod, "FROM_EMAIL", "someone@yahoo.com")
+    monkeypatch.setattr(email_mod, "SMTP_HOST", "smtp.gmail.com")
+    assert email_mod.sender_domain_warning() is not None
+
+
+def test_smtp_host_match_is_case_insensitive(monkeypatch):
+    monkeypatch.setattr(email_mod, "FROM_EMAIL", "someone@gmail.com")
+    monkeypatch.setattr(email_mod, "SMTP_HOST", "SMTP.GMAIL.COM")
+    assert email_mod.sender_domain_warning() is None

@@ -6,6 +6,18 @@ Provider-agnostic SMTP. Configured for Brevo by default (free 300/day, commercia
     FROM_EMAIL=<a verified sender on your domain>   APP_URL=https://app.your-domain.com
 Any other SMTP provider (MailerSend, Resend, Amazon SES, Gmail) works by overriding
 these env vars. If SMTP_USER/PASS are unset, sends are logged (no-op) instead.
+
+To send AS a Gmail address instead of relaying through a third party (no domain
+of your own to verify with a relay):
+    SMTP_HOST=smtp.gmail.com   SMTP_PORT=587
+    SMTP_USER=<the gmail address>   SMTP_PASS=<a Google App Password, NOT the account password>
+    FROM_EMAIL=<the same gmail address>
+This is a genuinely different situation from relaying a gmail.com From address
+through Brevo/SES/etc: Google is authenticating and delivering its own domain's
+mail here, so SPF/DKIM alignment holds (see sender_domain_warning below). An App
+Password requires 2-Step Verification enabled on the Google account, and Gmail
+caps outbound mail around 500 recipients/day for a personal account — both are
+outside this module's control.
 """
 from __future__ import annotations
 
@@ -26,12 +38,23 @@ APP_URL = os.getenv("APP_URL", "http://localhost:3000").rstrip("/")
 
 
 # Free-webmail domains cannot be used as a relay From address and have mail
-# actually delivered: the relay can neither sign DKIM for the domain nor appear
-# in its SPF record, so DMARC alignment fails and receivers reject or spam-folder
-# the message. Sending must use an address on a domain verified with the relay.
+# actually delivered: a THIRD-PARTY relay can neither sign DKIM for the domain
+# nor appear in its SPF record, so DMARC alignment fails and receivers reject or
+# spam-folder the message. This does NOT apply when the "relay" is the mailbox
+# provider's own server authenticating as that exact account (see
+# _OWN_DOMAIN_SMTP_HOSTS below) — there the sender and the server are the same
+# party, so alignment holds.
 _FREE_WEBMAIL_DOMAINS = {
     "gmail.com", "googlemail.com", "yahoo.com", "outlook.com",
     "hotmail.com", "live.com", "aol.com", "icloud.com", "proton.me",
+}
+
+# Maps a mailbox provider's own SMTP host to the From domain(s) it can actually
+# send aligned mail for. Sending FROM_EMAIL=x@gmail.com THROUGH smtp.gmail.com
+# is Google delivering its own domain's mail; sending the same address through
+# Brevo/SES/anything else is a third party impersonating gmail.com.
+_OWN_DOMAIN_SMTP_HOSTS: dict[str, set[str]] = {
+    "smtp.gmail.com": {"gmail.com", "googlemail.com"},
 }
 
 # Set once the sender misconfiguration has been logged, to keep it out of every
@@ -40,17 +63,20 @@ _sender_warning_logged = False
 
 
 def sender_domain_warning() -> str | None:
-    """Return a warning when FROM_EMAIL can't pass DMARC through this relay."""
+    """Return a warning when FROM_EMAIL can't pass DMARC through SMTP_HOST."""
     domain = FROM_EMAIL.rsplit("@", 1)[-1].strip().lower()
-    if domain in _FREE_WEBMAIL_DOMAINS:
-        return (
-            f"FROM_EMAIL is {FROM_EMAIL}. Mail relayed as a {domain} address "
-            f"cannot be DKIM-signed for that domain and is not in its SPF "
-            f"record, so it fails DMARC alignment and is usually spam-filtered "
-            f"even when the relay accepts it. Use an address on a domain "
-            f"verified with your mail provider."
-        )
-    return None
+    if domain not in _FREE_WEBMAIL_DOMAINS:
+        return None
+    if domain in _OWN_DOMAIN_SMTP_HOSTS.get(SMTP_HOST.strip().lower(), set()):
+        return None  # authenticated directly to the provider that owns this domain
+    return (
+        f"FROM_EMAIL is {FROM_EMAIL}, sent via {SMTP_HOST}. A third-party relay "
+        f"cannot be DKIM-signed for {domain} and is not in its SPF record, so it "
+        f"fails DMARC alignment and is usually spam-filtered even when the relay "
+        f"accepts it. Either use an address on a domain verified with this relay, "
+        f"or send through {domain}'s own SMTP server authenticated as that exact "
+        f"account (see the module docstring for the Gmail case)."
+    )
 
 
 class _RecordingSMTP(smtplib.SMTP):
