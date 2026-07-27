@@ -141,9 +141,15 @@ def google_exchange(body: GoogleExchangeRequest):
     # existing member — even a manager — as "not_in_org" and stranded them at login.
     user = find_by_text_ci("org_users", "email", email)
     if not user:
+        # uvicorn's access log records the 404 with neither the email nor a
+        # reason, which made a real "wrong account" bug indistinguishable from
+        # a not-yet-a-member browser retrying in the background — this line is
+        # what makes that diagnosable from the logs.
+        logger.info("[google-exchange] not_in_org for %s", email)
         raise HTTPException(404, "not_in_org")
 
     if not user.get("is_active"):
+        logger.warning("[google-exchange] inactive account attempted sign-in: %s", email)
         raise HTTPException(403, "Account is inactive. Contact your organization admin.")
 
     # Link supabase_user_id on first exchange so future lookups can use it

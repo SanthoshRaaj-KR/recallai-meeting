@@ -118,6 +118,11 @@ def test_sent_but_undeliverable_sender_carries_a_warning(monkeypatch):
     "genreal.ai@gmail.com", "team@yahoo.com", "x@outlook.com", "y@GMAIL.COM",
 ])
 def test_free_webmail_senders_are_flagged(monkeypatch, addr):
+    # Pinned explicitly: SMTP_HOST is loaded from the real environment via
+    # main.py's load_dotenv(), so it must not be left to whatever this
+    # deployment currently has configured (this test's whole point is the
+    # THIRD-PARTY-RELAY case; the "own domain" exception is covered below).
+    monkeypatch.setattr(email_mod, "SMTP_HOST", "smtp-relay.brevo.com")
     monkeypatch.setattr(email_mod, "FROM_EMAIL", addr)
     warning = email_mod.sender_domain_warning()
     assert warning is not None
@@ -127,6 +132,7 @@ def test_free_webmail_senders_are_flagged(monkeypatch, addr):
 
 @pytest.mark.parametrize("addr", ["noreply@genreal.ai", "invites@company.co.uk"])
 def test_owned_domain_senders_are_not_flagged(monkeypatch, addr):
+    monkeypatch.setattr(email_mod, "SMTP_HOST", "smtp-relay.brevo.com")
     monkeypatch.setattr(email_mod, "FROM_EMAIL", addr)
     assert email_mod.sender_domain_warning() is None
 
