@@ -22,10 +22,29 @@ prometheus.exporter.unix "host" {
 	rootfs_path = "/host/root"
 }
 
+// prometheus.exporter.unix ships its targets with a baked-in job label of
+// "integrations/unix". An explicit target label always beats prometheus.scrape's
+// job_name argument, so setting job_name = "host" here silently did nothing —
+// the series landed under job="integrations/unix". Relabel the targets instead,
+// which is the only thing the scrape honours.
+discovery.relabel "host" {
+	targets = prometheus.exporter.unix.host.targets
+
+	rule {
+		target_label = "job"
+		replacement  = "host"
+	}
+}
+
+// scrape_interval is set explicitly on every scrape below. Alloy's default is
+// 60s — the `scrape_interval: 15s` in prometheus/prometheus.yml does NOT apply,
+// because Prometheus scrapes nothing here (all ingestion is remote_write from
+// Alloy). Without this, a request you just made can take a full minute to show
+// up on a dashboard, which makes local debugging feel broken when it isn't.
 prometheus.scrape "host_metrics" {
-	targets    = prometheus.exporter.unix.host.targets
-	forward_to = [prometheus.remote_write.local.receiver]
-	job_name   = "host"
+	targets         = discovery.relabel.host.output
+	forward_to      = [prometheus.remote_write.local.receiver]
+	scrape_interval = "15s"
 }
 
 // Application services. Each FastAPI service must expose GET /metrics
@@ -36,9 +55,12 @@ prometheus.scrape "app_services" {
 		{"__address__" = "confluence-service:8001", "job" = "confluence-service", "service" = "confluence-service"},
 		{"__address__" = "org-service:8003", "job" = "org-service", "service" = "org-service"},
 	]
-	metrics_path = "/metrics"
-	forward_to   = [prometheus.remote_write.local.receiver]
-	job_name     = "app-services"
+	metrics_path    = "/metrics"
+	forward_to      = [prometheus.remote_write.local.receiver]
+	scrape_interval = "15s"
+	// No job_name here: each target above carries its own "job" label, which
+	// takes precedence anyway. Setting job_name = "app-services" was misleading —
+	// it never appeared on a single series.
 }
 
 // Alloy's own metrics (self-monitoring).
@@ -46,8 +68,8 @@ prometheus.scrape "alloy_self" {
 	targets = [
 		{"__address__" = "127.0.0.1:12345", "job" = "alloy"},
 	]
-	forward_to = [prometheus.remote_write.local.receiver]
-	job_name   = "alloy"
+	forward_to      = [prometheus.remote_write.local.receiver]
+	scrape_interval = "15s"
 }
 
 prometheus.remote_write "local" {

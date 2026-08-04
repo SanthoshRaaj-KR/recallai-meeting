@@ -57,6 +57,9 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Dashboard JSON, loaded by the `confluence` provider in
+      # provisioning/dashboards/dashboards.yml (which points at this path).
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     ports:
       - "3000:3000"

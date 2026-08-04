@@ -1,8 +1,22 @@
 apiVersion: 1
 
+# Grafana matches an existing datasource by uid when one is given. A stack that
+# first booted WITHOUT a pinned uid has a Prometheus row in grafana_data with a
+# random uid, and provisioning then fails the whole startup with
+# "Datasource provisioning error: data source not found" — Grafana crash-loops.
+# Dropping the row by name first makes this file safe to apply to both a fresh
+# volume and an already-provisioned one.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
 datasources:
+  # uid is pinned so provisioned dashboards can reference the datasource by a
+  # stable id. Without it Grafana generates a random uid on first boot and every
+  # dashboard panel points at a datasource that doesn't exist.
   - name: Prometheus
     type: prometheus
+    uid: prometheus
     access: proxy
     url: http://prometheus:9090
     isDefault: true
