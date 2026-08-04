@@ -41,7 +41,10 @@ cd Confluence
 docker compose -f docker-compose.local.yml -f docker-compose.observability.yml up -d
 ```
 
-- Grafana: http://localhost:3000 (default admin/admin, change on first login)
+- Grafana: http://localhost:3300 (default admin/admin, change on first login).
+  Deliberately not the Grafana default of :3000 — the Vite frontend owns that
+  port locally and its Supabase OAuth redirect URLs are pinned to it
+  (see `LOCAL_DEV.md`), so Grafana moved instead.
 - Prometheus: http://localhost:9090
 - Alloy UI (component graph + live debugging): http://localhost:12345
 

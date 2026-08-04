@@ -3,7 +3,8 @@
 # (bot-service, confluence-service, org-service) on the same compose network:
 #
 #   docker compose -f docker-compose.local.yml -f docker-compose.observability.yml up -d
-#   open http://localhost:3000        # Grafana (admin/admin on first login)
+#   open http://localhost:3300        # Grafana (admin/admin on first login)
+#                                     # 3300, not 3000 — the frontend owns :3000
 #   open http://localhost:9090        # Prometheus
 #   open http://localhost:12345       # Alloy UI (component graph, live debug)
 #
@@ -55,6 +56,15 @@ services:
     image: grafana/grafana:latest # pin an exact version before deploying to prod
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # Grafana runs on 3300, NOT the default 3000 — the Vite frontend owns
+      # :3000 locally and its Supabase OAuth redirect URLs are pinned to it
+      # (see LOCAL_DEV.md), so the frontend can't move and this must.
+      # Deliberately not 3001 (Vite/Next auto-increment to it when 3000 is busy)
+      # and not 3100/3200 (reserved below for Loki and Tempo in Phase 2/3).
+      # Setting the internal port too — rather than only remapping the host
+      # port — keeps Grafana's self-generated links (shares, alert URLs) correct,
+      # since root_url is derived from http_port.
+      GF_SERVER_HTTP_PORT: "3300"
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       # Dashboard JSON, loaded by the `confluence` provider in
@@ -62,7 +72,7 @@ services:
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "3300:3300"
     depends_on:
       - prometheus
     restart: unless-stopped
