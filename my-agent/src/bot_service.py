@@ -36,6 +36,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from livekit import api as livekit_api
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 try:
@@ -121,6 +122,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 # ── In-process caches ────────────────────────────────────────────────────────
 # TranscriptCompactor is not serialisable so it lives only in this process;

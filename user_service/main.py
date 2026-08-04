@@ -77,6 +77,7 @@ logging.basicConfig(
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from .database import DBError, delete_all
 
 from .routes.auth import router as auth_router
@@ -106,6 +107,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 @app.exception_handler(DBError)
 async def db_error_handler(request: Request, exc: DBError):

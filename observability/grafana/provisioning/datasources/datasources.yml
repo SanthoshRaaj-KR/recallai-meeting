@@ -1,0 +1,29 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+
+  # Phase 2: uncomment once loki is running (docker-compose.observability.yml)
+  # - name: Loki
+  #   type: loki
+  #   access: proxy
+  #   url: http://loki:3100
+  #   editable: true
+
+  # Phase 3: uncomment once tempo is running; the tracesToLogsV2/serviceMap
+  # jsonData wires up trace<->log<->metric correlation in the Grafana UI.
+  # - name: Tempo
+  #   type: tempo
+  #   access: proxy
+  #   url: http://tempo:3200
+  #   editable: true
+  #   jsonData:
+  #     tracesToLogsV2:
+  #       datasourceUid: loki
+  #     serviceMap:
+  #       datasourceUid: prometheus

@@ -1,0 +1,115 @@
+// Grafana Alloy — local dev collector config.
+// Run alongside docker-compose.local.yml via docker-compose.observability.yml.
+//
+// Phase 1 (active): host metrics + app /metrics scraping -> Prometheus remote_write.
+// Phase 2/3 blocks below are inactive (commented) until logs/traces phases start —
+// see Confluence/OBSERVABILITY_PLAN.md.
+
+logging {
+	level  = "info"
+	format = "logfmt"
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: METRICS
+// ---------------------------------------------------------------------------
+
+// Host metrics. Requires /proc, /sys, / mounted read-only into the alloy
+// container (see docker-compose.observability.yml) with matching *_path args.
+prometheus.exporter.unix "host" {
+	procfs_path = "/host/proc"
+	sysfs_path  = "/host/sys"
+	rootfs_path = "/host/root"
+}
+
+prometheus.scrape "host_metrics" {
+	targets    = prometheus.exporter.unix.host.targets
+	forward_to = [prometheus.remote_write.local.receiver]
+	job_name   = "host"
+}
+
+// Application services. Each FastAPI service must expose GET /metrics
+// (Phase 1 app task — see OBSERVABILITY_PLAN.md Phase 1, step 2).
+prometheus.scrape "app_services" {
+	targets = [
+		{"__address__" = "bot-service:8000", "job" = "bot-service", "service" = "bot-service"},
+		{"__address__" = "confluence-service:8001", "job" = "confluence-service", "service" = "confluence-service"},
+		{"__address__" = "org-service:8003", "job" = "org-service", "service" = "org-service"},
+	]
+	metrics_path = "/metrics"
+	forward_to   = [prometheus.remote_write.local.receiver]
+	job_name     = "app-services"
+}
+
+// Alloy's own metrics (self-monitoring).
+prometheus.scrape "alloy_self" {
+	targets = [
+		{"__address__" = "127.0.0.1:12345", "job" = "alloy"},
+	]
+	forward_to = [prometheus.remote_write.local.receiver]
+	job_name   = "alloy"
+}
+
+prometheus.remote_write "local" {
+	endpoint {
+		url = "http://prometheus:9090/api/v1/write"
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: LOGS (uncomment when starting Phase 2 — requires loki service,
+// see docker-compose.observability.yml)
+// ---------------------------------------------------------------------------
+
+// discovery.docker "containers" {
+// 	host = "unix:///var/run/docker.sock"
+// }
+//
+// discovery.relabel "containers" {
+// 	targets = discovery.docker.containers.targets
+//
+// 	rule {
+// 		source_labels = ["__meta_docker_container_name"]
+// 		regex         = "/(.*)"
+// 		target_label  = "service"
+// 	}
+// }
+//
+// loki.source.docker "containers" {
+// 	host       = "unix:///var/run/docker.sock"
+// 	targets    = discovery.relabel.containers.output
+// 	forward_to = [loki.write.local.receiver]
+// }
+//
+// loki.write "local" {
+// 	endpoint {
+// 		url = "http://loki:3100/loki/api/v1/push"
+// 	}
+// }
+
+// ---------------------------------------------------------------------------
+// Phase 3: TRACES (uncomment when starting Phase 3 — requires tempo service,
+// see docker-compose.observability.yml)
+// ---------------------------------------------------------------------------
+
+// otelcol.receiver.otlp "app_traces" {
+// 	grpc {
+// 		endpoint = "0.0.0.0:4317"
+// 	}
+// 	http {
+// 		endpoint = "0.0.0.0:4318"
+// 	}
+//
+// 	output {
+// 		traces = [otelcol.exporter.otlp.tempo.input]
+// 	}
+// }
+//
+// otelcol.exporter.otlp "tempo" {
+// 	client {
+// 		endpoint = "tempo:4317"
+// 		tls {
+// 			insecure = true
+// 		}
+// 	}
+// }

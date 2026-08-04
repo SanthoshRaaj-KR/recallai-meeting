@@ -1,0 +1,92 @@
+# Local observability stack — additive to docker-compose.local.yml, not a
+# replacement. Run both together so Alloy can resolve app service names
+# (bot-service, confluence-service, org-service) on the same compose network:
+#
+#   docker compose -f docker-compose.local.yml -f docker-compose.observability.yml up -d
+#   open http://localhost:3000        # Grafana (admin/admin on first login)
+#   open http://localhost:9090        # Prometheus
+#   open http://localhost:12345       # Alloy UI (component graph, live debug)
+#
+#   docker compose -f docker-compose.local.yml -f docker-compose.observability.yml down
+#
+# Phase 1 (active): Alloy + Prometheus + Grafana, metrics only.
+# Phase 2/3: uncomment the loki / tempo services below, and the matching
+# blocks in observability/alloy/config.alloy and
+# observability/grafana/provisioning/datasources/datasources.yml.
+# See OBSERVABILITY_PLAN.md.
+
+services:
+  alloy:
+    image: grafana/alloy:latest # pin an exact version before deploying to prod
+    command:
+      - "run"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "/etc/alloy/config.alloy"
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Host metrics (read-only). See prometheus.exporter.unix in config.alloy.
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+      # Phase 2: uncomment to let Alloy tail container logs via the Docker API.
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "12345:12345" # Alloy UI
+      - "4317:4317" # OTLP gRPC (Phase 3)
+      - "4318:4318" # OTLP HTTP (Phase 3)
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest # pin an exact version before deploying to prod
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-remote-write-receiver"
+      - "--storage.tsdb.retention.time=15d"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest # pin an exact version before deploying to prod
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Phase 2: logs
+  # loki:
+  #   image: grafana/loki:latest
+  #   command: ["-config.file=/etc/loki/local-config.yaml"]
+  #   ports:
+  #     - "3100:3100"
+  #   volumes:
+  #     - loki_data:/loki
+  #   restart: unless-stopped
+
+  # Phase 3: traces
+  # tempo:
+  #   image: grafana/tempo:latest
+  #   command: ["-config.file=/etc/tempo/tempo.yaml"]
+  #   volumes:
+  #     - ./observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+  #     - tempo_data:/var/tempo
+  #   ports:
+  #     - "3200:3200" # Tempo query API (used by Grafana datasource)
+  #   restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  # loki_data:
+  # tempo_data:
