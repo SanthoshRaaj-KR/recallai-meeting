@@ -80,7 +80,7 @@ def _install_fakes(
 ):
     """Wire the pipeline's four LLM agents to deterministic fakes."""
 
-    async def fake_extract(self, transcript):
+    async def fake_extract(self, transcript, owner=""):
         return [intent]
 
     async def fake_score_detail(self, i, c):

@@ -83,9 +83,21 @@ def _dedupe_intents(intents: list[ConfluenceIntent]) -> list[ConfluenceIntent]:
     core of their new_value match (so "208 days" and "208" collapse); keep the
     higher-confidence one.
     """
-    best: dict[tuple[str, str], ConfluenceIntent] = {}
+    best: dict[tuple[str, str, str, str, str], ConfluenceIntent] = {}
     for i in intents:
-        key = (_norm(i.affected_topic), _value_key(i.new_value))
+        # Attribution and polarity are part of the identity, not incidental detail.
+        # Keyed on topic+value alone, an outsider's "our fee is two percent" and the
+        # owner's "our fee moves to two percent" collapse to one intent and whichever
+        # scored higher wins — either losing the owner's real change, or keeping the
+        # outsider's value under the survivor's `internal` label, where the
+        # attribution gate never even looks at it.
+        key = (
+            _norm(i.affected_topic),
+            _value_key(i.new_value),
+            i.subject_scope,
+            _norm(i.subject_entity),
+            i.change_polarity,
+        )
         if key not in best or i.confidence > best[key].confidence:
             best[key] = i
     return list(best.values())
@@ -303,7 +315,8 @@ Label these "reaffirmation" rather than dropping them — the downstream step su
 
 ATTRIBUTION — every value belongs to someone; record WHO:
 Meetings constantly quote other parties' numbers: a competitor's pricing, another firm's terms, a customer's headcount, a vendor's rate, an industry benchmark, "at my last company we did X". Those numbers are ABOUT that other party. Writing them into the speaker's own documents is the single most damaging error this pipeline can make, because the topic, units, and table shape line up perfectly — a competitor's fee looks exactly like a fee. So every intent MUST carry its attribution:
-- subject_scope "internal": the value is about the speaker's own organization — "our", "we", "us", or an unmarked statement of the org's own policy, limit, target, cost, or process. This is the normal case.
+- subject_scope "internal": the value is about the organization whose documents these are — "our", "we", "us", or an unmarked statement of the org's own policy, limit, target, cost, or process. This is the normal case.
+- WHOSE documents these are is stated above the transcript when it is known ("The documents that may be edited belong to ..."). When it is, "internal" means internal to THAT organization — never merely "the speaker's own". Meetings are routinely held with outsiders — investors, customers, vendors, candidates, partners — and every one of them says "our" and "we" about their OWN organization. If the speaker's "our/we/us" refers to an organization that is NOT the document owner, the intent is third_party and subject_entity is that speaker's organization, exactly as though they had been named in the third person. A whole meeting can be third_party this way: a call in which an outside company discusses its own revenue, headcount, roadmap or funding produces NO internal intents at all, however naturally its speakers say "we".
 - subject_scope "third_party": the value was stated about a DIFFERENT named party — a competitor or peer firm, another product, a customer, a supplier or vendor, a partner, an investee/portfolio company, an industry benchmark or market average, or a figure the speaker is quoting from elsewhere. Signals: "they", "their", "<Name> charges/does/has", "compared to", "the market average", "everyone else", "at my last company".
 - subject_scope "unspecified": only when you genuinely cannot tell whose value it is.
 - subject_entity: the party the value is about, named as the transcript names it (e.g. "Acme Capital", "the market average"). Set it for EVERY third_party intent; leave it null for internal ones.
@@ -347,11 +360,16 @@ class IntentExtractionAgent:
         )
 
     async def _extract_segment(
-        self, segment: str, glossary: str = ""
+        self, segment: str, glossary: str = "", owner: str = ""
     ) -> list[ConfluenceIntent]:
         prompt = f"Meeting transcript:\n\n{segment}"
         if glossary:
             prompt = f"{glossary}\n\n{prompt}"
+        # The owner block goes first: whose documents these are decides how every
+        # "our"/"we" in the segment is attributed, so the model must read it before
+        # the people list and before the transcript itself.
+        if owner:
+            prompt = f"{owner}\n\n{prompt}"
         try:
             result = await guarded_run(self._agent, prompt)
             intent_list: _IntentList = result.final_output
@@ -360,7 +378,7 @@ class IntentExtractionAgent:
             logger.error("IntentExtractionAgent segment extract failed", exc_info=True)
             return []
 
-    async def extract(self, transcript: str) -> list[ConfluenceIntent]:
+    async def extract(self, transcript: str, owner: str = "") -> list[ConfluenceIntent]:
         """Extract document-change intents from a meeting transcript.
 
         Long transcripts are segmented and extracted in parallel, then merged —
@@ -368,6 +386,14 @@ class IntentExtractionAgent:
         When the transcript splits, one cheap glossary pass over the whole text is
         injected into every segment so a pronoun/first-name in a later segment
         (e.g. "he should also own X") resolves to a person named in an earlier one.
+
+        ``owner`` names the organization the editable documents belong to (see
+        ``corpus_profile``). It is what makes ``subject_scope="internal"`` mean
+        "the document owner's own value" rather than "the speaker's own value" —
+        without it, an outsider saying "our headcount is 46" is recorded as an
+        internal change to the document owner's headcount. Empty is allowed and
+        restores the original speaker-relative behaviour.
+
         Returns an empty list for empty transcripts; filters confidence < 0.5.
         """
         if not transcript.strip():
@@ -376,11 +402,11 @@ class IntentExtractionAgent:
         if len(segments) == 1:
             # Short meeting: everything is already in one call, so the glossary
             # would add cost without buying any cross-segment resolution.
-            intents = await self._extract_segment(segments[0])
+            intents = await self._extract_segment(segments[0], owner=owner)
         else:
             glossary = await ParticipantGlossaryAgent().build(transcript)
             results = await asyncio.gather(
-                *[self._extract_segment(s, glossary) for s in segments]
+                *[self._extract_segment(s, glossary, owner) for s in segments]
             )
             intents = _dedupe_intents([i for r in results for i in r])
             logger.info(

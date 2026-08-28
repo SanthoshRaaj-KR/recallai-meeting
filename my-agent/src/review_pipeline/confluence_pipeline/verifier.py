@@ -111,6 +111,7 @@ class VerifierAgent:
         subject_scope: str = "unspecified",
         doc_title: str = "",
         section_heading: str = "",
+        owner: str = "",
     ) -> VerifierResult:
         """Verify quality of a proposed document edit.
 
@@ -124,7 +125,13 @@ class VerifierAgent:
         On exception, returns a zero-score result with a failure note.
         """
         target = " — ".join(p for p in (doc_title, section_heading) if p)
+        # Naming the owner matters most exactly where this backstop earns its keep:
+        # when the extractor MISLABELLED an outsider's value as internal, the rule
+        # above says "internal scores 0.8-1.0" and the verifier waves it through
+        # unless it can see for itself whose documents these are.
+        owner_block = f"{owner}\n\n" if owner else ""
         prompt = (
+            f"{owner_block}"
             f"Intent description:\n{intent_description}\n\n"
             f"Attribution:\n"
             f"  value is about: {subject_entity or '(the document owner)'} "

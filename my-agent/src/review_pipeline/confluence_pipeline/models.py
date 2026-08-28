@@ -88,8 +88,10 @@ class ChunkRecord(BaseModel):
     doc_title: str = ""  # the document/page title (first heading); used to route
     context_prefix: str = ""  # contextual description prepended at embed time
     token_count: int = 0
-    version: int | None = None  # Confluence page version at index time
-    content_hash: str = ""     # SHA-256 of page content for freshness checks
+    version: int | None = None  # Confluence page version at index time; the freshness key
+    # Vestigial. The hybrid index tracks freshness by `version` alone; this was written
+    # to Pinecone and never read back, so it is no longer stored or populated.
+    content_hash: str = ""
 
 
 class RetrievalResult(BaseModel):

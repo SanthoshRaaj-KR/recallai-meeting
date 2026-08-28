@@ -68,7 +68,7 @@ def _intent(snippets, polarity="change", topic="management fee", new_value="2 pe
 
 
 def _install_fakes(monkeypatch, intent):
-    async def fake_extract(self, transcript):
+    async def fake_extract(self, transcript, owner=""):
         return [intent]
 
     async def fake_score_detail(self, i, c):

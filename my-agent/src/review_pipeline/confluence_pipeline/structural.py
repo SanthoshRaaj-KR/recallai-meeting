@@ -417,3 +417,49 @@ class RemovalResolverAgent:
         except Exception:
             logger.error("RemovalResolverAgent.resolve() failed", exc_info=True)
             return []
+
+
+# Asking about a document is not changing it. The extraction instructions already say
+# so, and the model mostly obeys — but "give me a brief about the 9-month acceleration
+# programme" still yielded an intent whose new_value simply restated the programme's
+# length, and the editor dutifully rewrote "nine-month" to "9-month" in a section that
+# was already correct. This is the deterministic floor under that rule, the analogue of
+# _REAFFIRM_RE: high-precision openers that mark a REQUEST FOR INFORMATION, matched only
+# in the speaker's own quoted words.
+#
+# Deliberately narrow. A real change can contain a question ("what if we move it to
+# three days? let's do that"), so only unambiguous information-seeking openers are
+# listed, and the caller additionally requires that the intent carry no prior value.
+_INFO_REQUEST_RE = re.compile(
+    r"\b("
+    r"give me (?:a )?(?:brief|summary|overview|rundown)|"
+    r"brief me (?:on|about)|"
+    r"tell me (?:about|more about)|"
+    r"walk me through|"
+    r"talk me through|"
+    r"(?:can|could|would) you (?:explain|describe|summari[sz]e|tell me|give me)|"
+    r"explain (?:to me|the|this|that)|"
+    r"describe the|"
+    r"what(?:'s| is| are) the|"
+    r"how does the|"
+    r"i wanted to know|"
+    r"i want to (?:know|understand)|"
+    r"what do you (?:think|mean)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_information_request(intent) -> bool:
+    """True when the speaker's quoted words ASK about something rather than change it.
+
+    Requires both signals, because either alone is too blunt:
+      * an unambiguous information-seeking opener in verbatim_snippets, and
+      * no ``old_value`` — a genuine change that happens to be phrased as a question
+        ("what if we move it to three days?") almost always states or implies the
+        value it is moving from, while a pure question never does.
+    """
+    snippets = " ".join(getattr(intent, "verbatim_snippets", None) or [])
+    if not _INFO_REQUEST_RE.search(snippets):
+        return False
+    return not (getattr(intent, "old_value", None) or "").strip()

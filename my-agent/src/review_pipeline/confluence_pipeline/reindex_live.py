@@ -54,6 +54,12 @@ def main(argv: list[str]) -> int:
         markdown = _storage_to_markdown(page.html, page.title or listing.get("title", ""))
         # source_path is the page_id — no local file mapping needed
         chunks = chunk_markdown_text(markdown, source_path=pid, source_format="confluence")
+        # Stamp the live Confluence version on every chunk. sync_index reads it back
+        # off chunk :0 to decide whether a page is still fresh; without it the stored
+        # version is 0, which reads back as "unknown" and makes every later sync
+        # re-embed the entire corpus.
+        for chunk in chunks:
+            chunk.version = page.version
         all_chunks.extend(chunks)
         fetched += 1
         print(f"  {pid} ({page.title!r}): v{page.version} -> {len(chunks)} chunks")

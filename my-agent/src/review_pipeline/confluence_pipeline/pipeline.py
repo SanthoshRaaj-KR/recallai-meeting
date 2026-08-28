@@ -24,12 +24,18 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
+from .corpus_profile import get_corpus_profile, resolve_meeting_scope
 from .editor import ConfluenceEditorAgent
 from .evaluation import EvaluationAgent
 from .intent_extraction import IntentExtractionAgent
 from .models import ChunkRecord, ConfluenceIntent, ConfluenceProposal
 from .retrieval import PineconeHybridIndex
-from .structural import classify_kind, is_cross_cutting, is_reaffirmation_phrasing
+from .structural import (
+    classify_kind,
+    is_cross_cutting,
+    is_information_request,
+    is_reaffirmation_phrasing,
+)
 from .verifier import VerifierAgent
 
 logger = logging.getLogger(__name__)
@@ -209,22 +215,47 @@ def _entity_named_in_chunk(intent: ConfluenceIntent, chunk: ChunkRecord) -> bool
     if not tokens:
         return False
     haystack = f"{chunk.doc_title}\n{chunk.section_heading}\n{chunk.content}".lower()
-    return all(t in haystack for t in tokens)
+    # Word boundaries, not substring containment. "Ace Capital" reduces to the single
+    # distinctive token "ace", which a bare `in` finds inside "replace", "space" and
+    # "trace" — so a section reading "replace the committed-capital rate" would satisfy
+    # the floor and let Ace's figure onto the document owner's own row.
+    return all(re.search(rf"\b{re.escape(t)}\b", haystack) for t in tokens)
 
 
-def _meaningful_change(before: str, after: str) -> bool:
-    """True only if a real token actually changed.
+# Spelled-out numbers and their digits are the SAME value. Without this, an editor
+# asked to record "the 9-month programme" rewrites a section that already says
+# "nine-month" and the diff looks real to every token-level check — a card that
+# proposes no change at all, on a document that was already correct.
+_NUMBER_WORDS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+    "nineteen": "19", "twenty": "20", "thirty": "30", "forty": "40",
+    "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90",
+    "hundred": "100", "thousand": "1000", "million": "1000000",
+}
 
-    Drops cards where before/after differ only in whitespace or punctuation (a
-    near-no-op that slipped past the strict strip() check) — those are the weak,
-    review-noise cards. Compares the multiset of alphanumeric/value tokens.
+
+def _value_tokens(text: str) -> "Counter[str]":
+    """Alphanumeric tokens, with number words folded onto their digits.
+
+    Hyphenated compounds are split so "nine-month" and "9-month" compare equal.
     """
     from collections import Counter
 
-    pat = r"[a-z0-9][a-z0-9$%./-]*"
-    b = Counter(re.findall(pat, (before or "").lower()))
-    a = Counter(re.findall(pat, (after or "").lower()))
-    return b != a
+    raw = re.findall(r"[a-z0-9][a-z0-9$%.]*", (text or "").lower().replace("-", " "))
+    return Counter(_NUMBER_WORDS.get(t, t) for t in raw)
+
+
+def _meaningful_change(before: str, after: str) -> bool:
+    """True only if a real value actually changed.
+
+    Drops cards where before/after differ only in whitespace, punctuation, or the
+    way a number is spelled — those are the weak, review-noise cards that propose
+    nothing. Compares the multiset of value tokens.
+    """
+    return _value_tokens(before) != _value_tokens(after)
 
 
 def _query_text(intent: ConfluenceIntent) -> str:
@@ -314,9 +345,42 @@ async def propose(
     await _emit("intent_extraction")
     if not (transcript_text or "").strip():
         return [], []
-    intents = await IntentExtractionAgent().extract(transcript_text)
+    # Whose documents these are. Resolved once per run (memoized for an hour), and
+    # None whenever it cannot be told — in which case every prompt below is exactly
+    # the prompt this pipeline used before the corpus owner was known.
+    profile = await get_corpus_profile(retriever)
+    owner_block = profile.prompt_block() if profile else ""
+    intents = await IntentExtractionAgent().extract(transcript_text, owner=owner_block)
     if not intents:
         return [], []
+
+    # Is the document owner even in this meeting? Extraction cannot answer that —
+    # it sees one 230-word segment at a time, so it can only attribute a value when
+    # the sentence itself names a party. In a meeting held entirely between OTHER
+    # organizations, every unmarked "we need SOC 2" / "our competitors are X" reads
+    # as the owner's own, and lands on the owner's own compliance and competitive
+    # sections. One look at the whole transcript decides it for every intent at once.
+    scope = await resolve_meeting_scope(transcript_text, profile)
+    if not scope.owner_is_party:
+        outsider = scope.outsider_entity()
+        reattributed = 0
+        for i in intents:
+            if i.subject_scope == "internal" or (
+                i.subject_scope == "unspecified" and not i.subject_entity
+            ):
+                # Not a new gate — just the correct attribution. "Our" said by a
+                # visitor is a third party's value, and the attribution guard already
+                # knows what to do with one of those: it may only land on a section
+                # that is itself about that party.
+                i.subject_scope = "third_party"
+                i.subject_entity = i.subject_entity or outsider or None
+                reattributed += 1
+        logger.info(
+            "confluence_pipeline.propose: %r is not a party to this meeting (speakers "
+            "represent %s) — re-attributed %d/%d intent(s) away from the document owner",
+            profile.owner_name if profile else None,
+            scope.speaker_organizations or "[unknown]", reattributed, len(intents),
+        )
 
     edit_intents = [
         i for i in intents
@@ -331,6 +395,16 @@ async def propose(
             # reaffirms implicitly — so neither alone closes the gap.
             by_label = i.change_polarity == "reaffirmation"
             by_words = is_reaffirmation_phrasing(i)
+            # Asking about a document is not changing it — same family of failure as
+            # a reaffirmation (a value stated with no intent to move it), so it is
+            # dropped at the same point, before retrieval can find it a home.
+            if is_information_request(i):
+                logger.info(
+                    "confluence_pipeline: question guard — %r (%s) came from a request "
+                    "for information, not a change; dropped",
+                    i.affected_topic, i.new_value,
+                )
+                continue
             if by_label or by_words:
                 logger.info(
                     "confluence_pipeline: reaffirmation guard — %r (%s) restates an "
@@ -354,12 +428,29 @@ async def propose(
         chunks = await asyncio.to_thread(retriever.query, _query_text(intent), top_k)
         return intent, chunks, max_targets
 
-    intent_candidates = await asyncio.gather(*[_retrieve(i) for i in edit_intents])
+    retrieved = await asyncio.gather(*[_retrieve(i) for i in edit_intents])
+
+    # Retrieval now applies an absolute relevance floor, so an empty candidate list is
+    # a real verdict: this corpus documents nothing about that intent. Drop those here
+    # rather than paying a stage-1 fan-out per intent to rediscover it — on a meeting
+    # that has nothing to do with these documents that is the entire eval bill.
+    intent_candidates = [t for t in retrieved if t[1]]
+    ungrounded = len(retrieved) - len(intent_candidates)
+    logger.info(
+        "confluence_pipeline.propose: %d editable intent(s) — %d grounded in the corpus, "
+        "%d with no section about them (owner=%r)",
+        len(retrieved), len(intent_candidates), ungrounded,
+        profile.owner_name if profile else None,
+    )
+    if not intent_candidates:
+        return intents, []
 
     # ── Stage 5: two-stage evaluation (cheap wide filter → strong precise gate) ─
     await _emit("evaluation")
-    eval_cheap = EvaluationAgent(model=os.getenv("LDOC_EVAL_STAGE1_MODEL", "gpt-4o-mini"), temperature=0.0)
-    eval_fine = EvaluationAgent()  # LDOC_EVAL_MODEL, default gpt-5.4-mini
+    eval_cheap = EvaluationAgent(
+        model=os.getenv("LDOC_EVAL_STAGE1_MODEL", "gpt-4o-mini"), temperature=0.0, owner=owner_block,
+    )
+    eval_fine = EvaluationAgent(owner=owner_block)  # LDOC_EVAL_MODEL, default gpt-5.4-mini
 
     async def _score_pool(intent: ConfluenceIntent, chunks: list[ChunkRecord], max_targets: int):
         if not chunks:
@@ -395,7 +486,10 @@ async def propose(
             # deterministic rescue below: a competitor's figure reliably trips the
             # field-label and phrase-overlap floors precisely because it IS the same
             # kind of value.
-            named_here = _entity_named_in_chunk(intent, c)
+            # Only computed when the gate will actually consult it: the name floor
+            # lowercases the whole section body (up to 12k chars) per candidate, and
+            # for an internal intent — the normal case — the answer is discarded.
+            named_here = gate_attribution and _entity_named_in_chunk(intent, c)
             if gate_attribution and not (verdict.subject_match and named_here):
                 logger.info(
                     "confluence_pipeline: attribution gate — %r (%s) is about %r, "
@@ -455,6 +549,7 @@ async def propose(
             subject_scope=i.subject_scope,
             doc_title=c.doc_title,
             section_heading=c.section_heading,
+            owner=owner_block,
         )
         for (i, c), d in zip(qualified, drafts)
     ])

@@ -123,8 +123,12 @@ class EvalVerdict(BaseModel):
 class EvaluationAgent:
     """Scores how relevant a document section is for a given change intent."""
 
-    def __init__(self, model: str = None, *, temperature: float | None = None):
+    def __init__(self, model: str = None, *, temperature: float | None = None, owner: str = ""):
         self.model = model or os.getenv("LDOC_EVAL_MODEL", "gpt-5.4-mini")
+        # Names the organization these documents belong to, so "the document owner"
+        # in the instructions above resolves to somebody concrete. Empty is allowed
+        # and leaves the prompt exactly as it was before.
+        self.owner = owner
         self._agent = Agent(
             name="ConfluenceEvaluator",
             model=self.model,
@@ -165,7 +169,9 @@ class EvaluationAgent:
                 content = chunk.content[:2000] + "\n...\n" + chunk.content[max(0, pos - 500):pos + 500]
         spoken = " ".join(intent.verbatim_snippets or []).strip()
         doc_label = chunk.doc_title or os.path.basename(chunk.source_path)
+        owner_line = f"{self.owner}\n\n" if self.owner else ""
         prompt = (
+            f"{owner_line}"
             f"Intent:\n"
             f"  topic: {intent.affected_topic}\n"
             f"  old_value: {intent.old_value}\n"
