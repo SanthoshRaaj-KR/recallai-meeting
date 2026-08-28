@@ -36,6 +36,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from livekit import api as livekit_api
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 # MUST run before the review_pipeline imports below. Those modules read their
@@ -113,6 +114,9 @@ _RECALL_STATUS_MAP = {
 # NOTE: assumes a single bot_service worker — multiple replicas would each hold
 # their own copy and need a shared channel instead.
 _LISTEN_ONLY: dict[str, bool] = {}
+# Live "hold the floor" flags, same in-memory design: when set, Jarvis finishes
+# its reply and ignores barge-in (talking over it) until it's done.
+_NO_INTERRUPT: dict[str, bool] = {}
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Jarvis Bot Service", version="2.0")
@@ -123,6 +127,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 # ── In-process caches ────────────────────────────────────────────────────────
 # TranscriptCompactor is not serialisable so it lives only in this process;
@@ -181,13 +186,60 @@ def _session_for_bot(bot_id: str) -> dict | None:
     return s
 
 
+def _participant_email(p: dict) -> str | None:
+    """Recall's participant email.
+
+    Documented shape is a TOP-LEVEL `participant.email` (string | null); the
+    extra_data lookup is kept only as a fallback for older payloads. Note this
+    field is populated only for bots created through Recall's Calendar
+    Integration and is feature-flagged — bots we create ad-hoc from a meeting_url
+    get null here, so callers must not assume an email is present.
+    """
+    return p.get("email") or (p.get("extra_data") or {}).get("email")
+
+
+def _merge_presence_event(entry: dict, kind: str, ts: str) -> dict:
+    """Fold one join/leave into a participant's presence entry.
+
+    Attendance is stored as a list of `intervals` [{joined_at, left_at}] rather
+    than a single joined_at/left_at pair. A participant who drops and rejoins
+    would otherwise record first-join → last-leave and bill the entire gap: a
+    10:00 join, 10:05 leave, 10:50 rejoin, 11:00 leave read as 60 minutes in
+    call instead of 15.
+
+    `joined_at` / `left_at` are still maintained (first join, last leave) because
+    the live board and admin detail views display them.
+    """
+    intervals: list[dict] = [dict(i) for i in (entry.get("intervals") or [])]
+
+    if kind == "join":
+        # Ignore a duplicate join while an interval is already open, so a
+        # replayed webhook cannot manufacture a second stay.
+        if not (intervals and intervals[-1].get("left_at") is None):
+            intervals.append({"joined_at": ts, "left_at": None})
+        if not entry.get("joined_at"):
+            entry["joined_at"] = ts
+    elif kind == "leave":
+        if intervals and intervals[-1].get("left_at") is None:
+            intervals[-1]["left_at"] = ts
+        else:
+            # Leave with no matching join (we joined mid-call, or missed the
+            # join webhook) — anchor it to the participant's known start.
+            intervals.append({"joined_at": entry.get("joined_at"), "left_at": ts})
+        entry["left_at"] = ts
+
+    entry["intervals"] = intervals
+    return entry
+
+
 def _record_participant_event(bot_id: str, participant: dict, kind: str, ts: str) -> None:
     """Merge one Recall participant join/leave into the session's presence map.
 
     Presence lives in jarvis_sessions.participants (jsonb) keyed by Recall
-    participant id: {name, is_host, joined_at, left_at, email?}. Low-frequency
-    (a few events per meeting), so a read-merge-write patch is fine here.
-    Identity resolution (Recall name → org_user) happens later, at meeting end.
+    participant id: {name, is_host, joined_at, left_at, intervals[], email?}.
+    Low-frequency (a few events per meeting), so a read-merge-write patch is fine
+    here. Identity resolution (Recall name → org_user) happens later, at meeting
+    end.
     """
     try:
         s = _session_for_bot(bot_id)
@@ -198,16 +250,14 @@ def _record_participant_event(bot_id: str, participant: dict, kind: str, ts: str
             return
         presence: dict = dict(s.get("participants") or {})
         entry = dict(presence.get(pid) or {})
-        entry.setdefault("name", participant.get("name"))
+        if entry.get("name") is None:
+            entry["name"] = participant.get("name")
         if participant.get("is_host") is not None:
             entry["is_host"] = participant.get("is_host")
-        email = (participant.get("extra_data") or {}).get("email") or participant.get("email")
+        email = _participant_email(participant)
         if email and not entry.get("email"):
             entry["email"] = email
-        if kind == "join" and not entry.get("joined_at"):
-            entry["joined_at"] = ts
-        if kind == "leave":
-            entry["left_at"] = ts
+        entry = _merge_presence_event(entry, kind, ts)
         presence[pid] = entry
         session_store.patch(s["session_id"], {"participants": presence})
         logger.info(
@@ -242,7 +292,8 @@ def _backfill_participants_from_recall(s: dict) -> None:
             if not pid:
                 continue
             entry = dict(presence.get(pid) or {})
-            entry.setdefault("name", p.get("name"))
+            if entry.get("name") is None:
+                entry["name"] = p.get("name")
             if p.get("is_host") is not None:
                 entry.setdefault("is_host", p.get("is_host"))
             events = p.get("events") or {}
@@ -252,7 +303,12 @@ def _backfill_participants_from_recall(s: dict) -> None:
                 entry["joined_at"] = join_ts
             if leave_ts:
                 entry["left_at"] = leave_ts
-            email = (p.get("extra_data") or {}).get("email") or p.get("email")
+            # Only synthesise an interval when the live webhooks recorded none —
+            # otherwise this would append a whole-meeting stay on top of the real
+            # per-stay intervals and double-count the person's time.
+            if join_ts and not entry.get("intervals"):
+                entry["intervals"] = [{"joined_at": join_ts, "left_at": leave_ts}]
+            email = _participant_email(p)
             if email and not entry.get("email"):
                 entry["email"] = email
             presence[pid] = entry
@@ -521,6 +577,7 @@ async def session_bot_status(session_id: str) -> dict:
         "end_reason": None,
         "recall_status_code": None,
         "listen_only": _LISTEN_ONLY.get(session_id, False),
+        "no_interrupt": _NO_INTERRUPT.get(session_id, False),
     }
 
 
@@ -530,7 +587,7 @@ async def bot_status_no_session() -> dict:
         "status": "idle", "session_id": None, "bot_id": None,
         "meeting_url": None, "change_count": 0, "error": None,
         "started_at": None, "ended_at": None, "end_reason": None, "recall_status_code": None,
-        "listen_only": False,
+        "listen_only": False, "no_interrupt": False,
     }
 
 
@@ -559,6 +616,24 @@ async def get_listen_only(session_id: str) -> dict:
     return {"session_id": session_id, "listen_only": _LISTEN_ONLY.get(session_id, False)}
 
 
+@app.post("/sessions/{session_id}/bot/no-interrupt")
+async def set_no_interrupt(session_id: str, body: ListenOnlyRequest) -> dict:
+    """Hold-the-floor toggle (in-memory).
+
+    When enabled, Jarvis's replies play to completion and barge-in is ignored;
+    the running agent polls the GET below and flips its interruption setting, so
+    it takes effect on the next thing Jarvis says.
+    """
+    _NO_INTERRUPT[session_id] = bool(body.enabled)
+    return {"session_id": session_id, "no_interrupt": bool(body.enabled)}
+
+
+@app.get("/sessions/{session_id}/bot/no-interrupt")
+async def get_no_interrupt(session_id: str) -> dict:
+    """Current hold-the-floor state — polled by the agent process."""
+    return {"session_id": session_id, "no_interrupt": _NO_INTERRUPT.get(session_id, False)}
+
+
 # ── Endpoints: stop bot ────────────────────────────────────────────────────────
 @app.post("/sessions/{session_id}/bot/stop")
 async def stop_bot(session_id: str) -> dict:
@@ -580,6 +655,7 @@ async def stop_bot(session_id: str) -> dict:
             logger.warning("Failed to remove Recall bot: %s", exc)
 
     _LISTEN_ONLY.pop(session_id, None)  # ephemeral mute state — drop on stop
+    _NO_INTERRUPT.pop(session_id, None)  # ephemeral hold-the-floor state
     session_store.patch(session_id, {"status": "ended", "ended_at": _utcnow()})
     s = session_store.get(session_id) or s
     # Authoritative participant list before crediting attendance.

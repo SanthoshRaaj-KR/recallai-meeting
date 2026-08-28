@@ -27,4 +27,9 @@ node_modules
 # RAG index cache (generated at runtime by local_doc_change/rag/indexer.py)
 local_doc_change/index/
 
+# Shell-redirect artifacts from an unquoted `pip install pkg>=1.0` — the >=1.0
+# gets parsed as a redirect and pip's stdout lands in a file literally named
+# "=1.0". Quote the spec instead: pip install "pkg>=1.0"
+=*
+
 

@@ -7,7 +7,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..auth import get_current_user
-from ..database import select, select_one, insert, update, delete, DBError
+from ..database import select, select_one, insert, update, delete, DBError, find_by_text_ci
 from ..models import (
     TeamCreate, TeamOut, TeamUpdate,
     AddMemberRequest, MemberOut, UserOut,
@@ -22,6 +22,11 @@ from ..rbac import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/teams", tags=["teams"])
+
+# How long a team invite stays valid. Single source of truth: the code always
+# sets expires_at explicitly, and migration 014 realigns the column default to
+# match so reading the schema doesn't suggest a different (48h) lifetime.
+INVITE_TTL = datetime.timedelta(hours=1)
 
 
 def _enrich_team(row: dict, claims: dict) -> TeamOut:
@@ -180,9 +185,7 @@ def remove_member(team_id: str, user_id: str, claims: dict = Depends(get_current
     if not can_manage_team(claims, team_id):
         raise HTTPException(403, "Only team manager, ADMIN, or CEO can remove members")
     delete("org_team_members", {"team_id": f"eq.{team_id}", "user_id": f"eq.{user_id}"})
-    # Remove from hierarchy
-    delete("org_reporting_hierarchy", {"descendant_id": f"eq.{user_id}"})
-    delete("org_reporting_hierarchy", {"ancestor_id": f"eq.{user_id}", "depth": "gt.0"})
+    _unwire_hierarchy(user_id)
 
 
 @router.post("/{team_id}/invite", response_model=TeamInviteOut, status_code=status.HTTP_201_CREATED)
@@ -196,6 +199,10 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     if body.role not in (TeamRole.MANAGER, TeamRole.MEMBER, TeamRole.ASSOCIATE):
         raise HTTPException(400, f"Invalid team role: {body.role}")
 
+    email = (body.email or "").strip()
+    if not email:
+        raise HTTPException(400, "email is required")
+
     # Lazy GC (no scheduler in this stack): drop expired pending invites first.
     try:
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -203,9 +210,25 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     except Exception:
         pass
 
-    code = secrets.token_hex(3).upper()  # 6-char hex e.g. "A3F0C2"
+    # Supersede any live invite for this address+team. Without this, re-inviting
+    # somebody (because the first mail was missed, or the hour lapsed while they
+    # were away) left several codes valid at once — each an independent way into
+    # the org, and each expiring at a different time.
+    try:
+        for stale in select("org_team_invitations", {
+            "team_id": f"eq.{team_id}", "status": "eq.pending",
+        }):
+            if (stale.get("email") or "").strip().lower() == email.lower():
+                delete("org_team_invitations", {"code": f"eq.{stale['code']}"})
+    except Exception as exc:
+        logger.warning("[invite] could not supersede previous invites: %s", exc)
+
+    # 16 hex chars = 64 bits. The previous 6-char code was 24 bits (~16.7M),
+    # which is brute-forceable against a public, unauthenticated lookup. The code
+    # travels in a link, so its length costs the user nothing.
+    code = secrets.token_hex(8).upper()
     expires_at = (
-        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+        datetime.datetime.now(datetime.timezone.utc) + INVITE_TTL
     ).isoformat()
 
     inviter = select_one("org_users", {"id": f"eq.{claims['sub']}"})
@@ -214,7 +237,7 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     try:
         row = insert("org_team_invitations", {
             "team_id": team_id,
-            "email": body.email,
+            "email": email,
             "role": body.role,
             "code": code,
             "status": "pending",
@@ -224,17 +247,32 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
     except DBError as e:
         raise HTTPException(500, str(e))
 
+    # Delivery outcome is reported to the caller rather than swallowed. The invite
+    # stays valid either way — the code works whether or not the mail arrives —
+    # but telling an admin "invite sent" when nothing was sent left them waiting
+    # on an email that was never going to come.
+    email_sent = False
+    email_error: str | None = None
     try:
-        from ..email import send_invite_email
-        send_invite_email(body.email, team["name"], inviter_name, code, body.role)
+        from ..email import send_invite_email, sender_domain_warning
+        email_sent = send_invite_email(email, team["name"], inviter_name, code, body.role)
+        if not email_sent:
+            email_error = "Email sending is not configured on the server."
+        else:
+            email_error = sender_domain_warning()  # delivered to the relay, may still bounce
     except Exception as exc:
+        email_error = str(exc)
         logger.warning("[invite] Email delivery failed (invite code still valid): %s", exc)
 
-    existing = select_one("org_users", {"email": f"eq.{body.email}"})
+    # Case-insensitive, like every other org_users email lookup. An exact eq.
+    # match reported an existing member as a new user whenever the invite was
+    # typed in different casing than the stored address, which made the accept
+    # page ask them for a name they already had.
+    existing = find_by_text_ci("org_users", "email", email)
     return TeamInviteOut(
         id=row["id"],
         team_id=team_id,
-        email=body.email,
+        email=email,
         role=body.role,
         code=code,
         status="pending",
@@ -243,7 +281,41 @@ def invite_member(team_id: str, body: TeamInviteCreate, claims: dict = Depends(g
         expires_at=expires_at,
         team_name=team["name"],
         user_exists=existing is not None,
+        email_sent=email_sent,
+        email_error=email_error,
     )
+
+
+def _unwire_hierarchy(user_id: str) -> None:
+    """Detach a user from the reporting tree after a team removal.
+
+    Only drops the edges that the removal actually invalidated:
+
+    - reporting edges ABOVE them (depth > 0) — they no longer report to that
+      team's manager. Their depth-0 self-loop is preserved, because deleting it
+      erases the person from the org chart entirely rather than just detaching
+      them, and it is what every hierarchy query anchors on.
+    - reporting edges BELOW them (depth > 0) — they no longer manage anyone.
+
+    If the user is still on ANOTHER team, they are re-wired underneath that
+    team's manager instead of being left dangling. The old code deleted every
+    edge unconditionally, so removing someone from one of two teams erased their
+    position in the org chart completely.
+    """
+    remaining = [
+        m for m in select("org_team_members", {"user_id": f"eq.{user_id}"})
+        if m.get("team_id")
+    ]
+
+    # Ancestors above them, and reports below them — but never the self-loop.
+    delete("org_reporting_hierarchy", {"descendant_id": f"eq.{user_id}", "depth": "gt.0"})
+    delete("org_reporting_hierarchy", {"ancestor_id": f"eq.{user_id}", "depth": "gt.0"})
+
+    # Still on another team → re-attach under that team's manager so they keep a
+    # place in the chart.
+    for m in remaining:
+        _wire_hierarchy(m["team_id"], user_id, m.get("role") or TeamRole.MEMBER)
+        break
 
 
 def _team_manager_id(team_id: str) -> str | None:

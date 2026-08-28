@@ -57,14 +57,27 @@ API surface:
     GET    /health
 """
 
+import logging
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Uvicorn configures only its OWN loggers, leaving the root logger at WARNING —
+# so every application logger.info() was silently discarded. That hid the
+# "[email] Sent ... to ..." confirmations while letting the warnings through,
+# which made a delivery problem impossible to diagnose from the logs: you could
+# see neither that a mail had been sent nor that it hadn't. bot_service has
+# always done this; org-service was the odd one out.
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+)
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from .database import DBError, delete_all
 
 from .routes.auth import router as auth_router
@@ -94,6 +107,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 @app.exception_handler(DBError)
 async def db_error_handler(request: Request, exc: DBError):

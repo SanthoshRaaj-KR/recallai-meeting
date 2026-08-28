@@ -16,7 +16,8 @@
       "Bash(npm run *)",
       "Bash(npm test *)",
       "Bash(git -C sync-sage-bot log --oneline -3)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(docker version *)"
     ]
   }
 }

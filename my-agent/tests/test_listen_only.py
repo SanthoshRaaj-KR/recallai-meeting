@@ -145,3 +145,23 @@ async def test_listen_only_suppresses_partial_ack() -> None:
     await asyncio.sleep(0)  # let any scheduled ack task run
     mock_session.say.assert_not_called()
     assert assistant._partial_wake_fired is False
+
+
+# ── no-interrupt (hold-the-floor) toggle ──────────────────────────────────────
+
+
+def test_no_interrupt_toggles_agent_allow_interruptions() -> None:
+    """Enabling no-interrupt makes replies uninterruptible (allow_interruptions
+    False); disabling restores normal barge-in (allow_interruptions True). The
+    runtime reads allow_interruptions per reply, so this applies live."""
+    a = Assistant.__new__(Assistant)
+    a._no_interrupt = False
+    a._allow_interruptions = None  # stand-in for the SDK's NOT_GIVEN default
+
+    a._apply_no_interrupt(True)
+    assert a._no_interrupt is True
+    assert a._allow_interruptions is False  # replies now hold the floor
+
+    a._apply_no_interrupt(False)
+    assert a._no_interrupt is False
+    assert a._allow_interruptions is True  # barge-in allowed again

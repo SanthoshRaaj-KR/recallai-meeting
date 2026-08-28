@@ -187,11 +187,29 @@ class TeamInviteOut(BaseModel):
     expires_at: str
     team_name: Optional[str] = None
     user_exists: bool = False
+    # Whether the invite email actually reached the mail relay, and why not (or
+    # what may still go wrong) if applicable. The invite is valid regardless —
+    # the code works either way — so this drives what the UI tells the inviter
+    # rather than whether the request succeeded.
+    email_sent: bool = False
+    email_error: Optional[str] = None
 
 
 class AcceptInviteRequest(BaseModel):
+    """Accepting an invite requires proving control of the invited address.
+
+    `supabase_token` is the caller's Google/Supabase access token; the server
+    verifies it and requires the resulting email to match the invite. Without
+    that, possession of the 6-character code alone was enough to create an
+    account under someone else's email address.
+
+    `name` is only a fallback for the display name when Google doesn't supply one.
+    There is deliberately no password field: invited users authenticate through
+    Google, and a password set by whoever opened the link would reintroduce the
+    same takeover.
+    """
+    supabase_token: str
     name: Optional[str] = None
-    password: Optional[str] = None
 
 
 # ── Hierarchy models ───────────────────────────────────────────────────────────

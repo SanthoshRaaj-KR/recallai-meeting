@@ -1,0 +1,12 @@
+# Prometheus is a pure storage + query engine here — all ingestion arrives via
+# remote_write from Alloy (see ../alloy/config.alloy), so there is nothing to
+# scrape directly. --web.enable-remote-write-receiver is set on the container
+# command in docker-compose.observability.yml.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Phase 5: alerting rules get added here, e.g.
+# rule_files:
+#   - /etc/prometheus/rules/*.yml

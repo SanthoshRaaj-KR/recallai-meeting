@@ -6,6 +6,18 @@ Provider-agnostic SMTP. Configured for Brevo by default (free 300/day, commercia
     FROM_EMAIL=<a verified sender on your domain>   APP_URL=https://app.your-domain.com
 Any other SMTP provider (MailerSend, Resend, Amazon SES, Gmail) works by overriding
 these env vars. If SMTP_USER/PASS are unset, sends are logged (no-op) instead.
+
+To send AS a Gmail address instead of relaying through a third party (no domain
+of your own to verify with a relay):
+    SMTP_HOST=smtp.gmail.com   SMTP_PORT=587
+    SMTP_USER=<the gmail address>   SMTP_PASS=<a Google App Password, NOT the account password>
+    FROM_EMAIL=<the same gmail address>
+This is a genuinely different situation from relaying a gmail.com From address
+through Brevo/SES/etc: Google is authenticating and delivering its own domain's
+mail here, so SPF/DKIM alignment holds (see sender_domain_warning below). An App
+Password requires 2-Step Verification enabled on the Google account, and Gmail
+caps outbound mail around 500 recipients/day for a personal account — both are
+outside this module's control.
 """
 from __future__ import annotations
 
@@ -25,10 +37,85 @@ FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER) or "noreply@jarvis.app"
 APP_URL = os.getenv("APP_URL", "http://localhost:3000").rstrip("/")
 
 
-def _send(to_email: str, subject: str, plain: str, html: str) -> None:
+# Free-webmail domains cannot be used as a relay From address and have mail
+# actually delivered: a THIRD-PARTY relay can neither sign DKIM for the domain
+# nor appear in its SPF record, so DMARC alignment fails and receivers reject or
+# spam-folder the message. This does NOT apply when the "relay" is the mailbox
+# provider's own server authenticating as that exact account (see
+# _OWN_DOMAIN_SMTP_HOSTS below) — there the sender and the server are the same
+# party, so alignment holds.
+_FREE_WEBMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "outlook.com",
+    "hotmail.com", "live.com", "aol.com", "icloud.com", "proton.me",
+}
+
+# Maps a mailbox provider's own SMTP host to the From domain(s) it can actually
+# send aligned mail for. Sending FROM_EMAIL=x@gmail.com THROUGH smtp.gmail.com
+# is Google delivering its own domain's mail; sending the same address through
+# Brevo/SES/anything else is a third party impersonating gmail.com.
+_OWN_DOMAIN_SMTP_HOSTS: dict[str, set[str]] = {
+    "smtp.gmail.com": {"gmail.com", "googlemail.com"},
+}
+
+# Set once the sender misconfiguration has been logged, to keep it out of every
+# subsequent send.
+_sender_warning_logged = False
+
+
+def sender_domain_warning() -> str | None:
+    """Return a warning when FROM_EMAIL can't pass DMARC through SMTP_HOST."""
+    domain = FROM_EMAIL.rsplit("@", 1)[-1].strip().lower()
+    if domain not in _FREE_WEBMAIL_DOMAINS:
+        return None
+    if domain in _OWN_DOMAIN_SMTP_HOSTS.get(SMTP_HOST.strip().lower(), set()):
+        return None  # authenticated directly to the provider that owns this domain
+    return (
+        f"FROM_EMAIL is {FROM_EMAIL}, sent via {SMTP_HOST}. A third-party relay "
+        f"cannot be DKIM-signed for {domain} and is not in its SPF record, so it "
+        f"fails DMARC alignment and is usually spam-filtered even when the relay "
+        f"accepts it. Either use an address on a domain verified with this relay, "
+        f"or send through {domain}'s own SMTP server authenticated as that exact "
+        f"account (see the module docstring for the Gmail case)."
+    )
+
+
+class _RecordingSMTP(smtplib.SMTP):
+    """SMTP client that keeps the server's reply to DATA.
+
+    Relays return their queue id there (Brevo: "250 ... queued as <id>"), which
+    is the only handle for finding a specific message in the provider's own
+    delivery log. Without it, a message the relay accepted and then dropped is
+    untraceable from our side.
+    """
+
+    last_data_response: str = ""
+
+    def data(self, msg):  # type: ignore[override]
+        code, resp = super().data(msg)
+        self.last_data_response = (
+            resp.decode(errors="replace") if isinstance(resp, bytes) else str(resp)
+        )
+        return code, resp
+
+
+def _send(to_email: str, subject: str, plain: str, html: str) -> bool:
+    """Deliver one message.
+
+    Returns True when it was actually handed to the relay, False when sending is
+    switched off (no SMTP credentials). Raises RuntimeError when delivery was
+    attempted and failed — callers must not treat that as success.
+    """
     if not SMTP_USER or not SMTP_PASS:
         logger.warning("[email] SMTP not configured — would send to <%s>: %s", to_email, subject)
-        return
+        return False
+    # Static misconfiguration — warn once per process rather than on every send.
+    # It is also returned to the caller via sender_domain_warning(), so quieting
+    # the log here doesn't hide it.
+    global _sender_warning_logged
+    warning = sender_domain_warning()
+    if warning and not _sender_warning_logged:
+        logger.warning("[email] %s", warning)
+        _sender_warning_logged = True
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f"Jarvis <{FROM_EMAIL}>"
@@ -36,12 +123,23 @@ def _send(to_email: str, subject: str, plain: str, html: str) -> None:
     msg.attach(MIMEText(plain, "plain"))
     msg.attach(MIMEText(html, "html"))
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+        with _RecordingSMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
             server.ehlo()
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        logger.info("[email] Sent '%s' to %s", subject, to_email)
+            refused = server.send_message(msg)
+            queued = server.last_data_response
+        if refused:
+            # Partial acceptance: some recipients were rejected outright.
+            logger.error("[email] Recipients refused for '%s': %s", subject, refused)
+            raise RuntimeError(f"Recipients refused: {refused}")
+        # Log the relay's queue id — the handle for looking this exact message up
+        # in the provider's delivery log when it is accepted here but never lands.
+        logger.info(
+            "[email] Accepted by relay: to=%s from=%s subject=%r relay_response=%r",
+            to_email, FROM_EMAIL, subject, queued,
+        )
+        return True
     except Exception as exc:
         logger.error("[email] Delivery failed for %s: %s", to_email, exc)
         raise RuntimeError(f"Email delivery failed: {exc}") from exc
@@ -82,14 +180,20 @@ def send_welcome_email(to_email: str, name: str) -> None:
     _send(to_email, "Welcome to Jarvis", plain, html)
 
 
-def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: str, role: str) -> None:
-    """Send a team invite email. Logs the code to console if SMTP is not configured."""
+def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: str, role: str) -> bool:
+    """Send a team invite email.
+
+    Returns True if it was handed to the relay, False if sending is switched off
+    (the code is logged instead). Raises RuntimeError if delivery was attempted
+    and failed — the caller surfaces that so nobody is told "invite sent" when
+    no mail left the building.
+    """
     if not SMTP_USER or not SMTP_PASS:
         logger.warning(
             "[invite] SMTP not configured — invite code for <%s>: %s  accept at: %s/invite/%s",
             to_email, code, APP_URL, code,
         )
-        return
+        return False
 
     plain = (
         f"Hi,\n\n"
@@ -115,7 +219,7 @@ def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: st
     </p>
     <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:24px;text-align:center;margin-bottom:24px">
       <p style="margin:0 0 8px;color:#6b7280;font-size:13px">Your invite code</p>
-      <p style="margin:0;font-size:36px;font-weight:700;letter-spacing:10px;font-family:monospace;color:#111">{code}</p>
+      <p style="margin:0;font-size:17px;font-weight:700;letter-spacing:2px;font-family:monospace;color:#111;word-break:break-all">{code}</p>
     </div>
     <a href="{APP_URL}/invite/{code}"
        style="display:block;text-align:center;background:#6366f1;color:#fff;padding:14px 24px;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px">
@@ -128,7 +232,7 @@ def send_invite_email(to_email: str, team_name: str, inviter_name: str, code: st
 </body>
 </html>"""
 
-    _send(to_email, f"You're invited to join {team_name} on Jarvis", plain, html)
+    return _send(to_email, f"You're invited to join {team_name} on Jarvis", plain, html)
 
 
 def send_mom_email(to_email: str, summary: dict) -> None:

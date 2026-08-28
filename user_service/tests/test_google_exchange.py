@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from user_service.main import app
+from user_service import auth as auth_module
 from user_service.routes import auth as auth_routes
 from user_service import database as db
 
@@ -70,8 +71,10 @@ def _patch(monkeypatch):
 
 
 def _set_google_email(monkeypatch, email: str):
+    # The Supabase call lives in user_service.auth.verify_supabase_token, shared
+    # by google-exchange and invite-accept.
     monkeypatch.setattr(
-        auth_routes._requests, "get",
+        auth_module._requests, "get",
         lambda *a, **k: _FakeResp({"id": "sb-uid", "email": email}),
     )
 
@@ -97,3 +100,37 @@ def test_unknown_email_still_not_in_org(monkeypatch):
     r = TestClient(app).post("/auth/google-exchange", json={"supabase_token": "tok"})
     assert r.status_code == 404
     assert r.json()["detail"] == "not_in_org"
+
+
+def test_not_in_org_logs_the_email(monkeypatch, caplog):
+    """Regression: the uvicorn access log recorded the 404 with neither the
+    email nor a reason, which made a real "wrong account" bug indistinguishable
+    from a not-yet-a-member browser retrying in the background. Diagnosing a
+    live incident meant guessing which account it was."""
+    _set_google_email(monkeypatch, "stranger@nowhere.com")
+    with caplog.at_level("INFO", logger="user_service.routes.auth"):
+        TestClient(app).post("/auth/google-exchange", json={"supabase_token": "tok"})
+    assert any(
+        "not_in_org" in r.message and "stranger@nowhere.com" in r.message
+        for r in caplog.records
+    )
+
+
+def test_inactive_account_logs_a_warning(monkeypatch, caplog):
+    USERS.append({
+        "id": "u2", "email": "shelved@company.com", "name": "Shelved",
+        "role": "MEMBER", "org_id": "org1", "is_active": False,
+        "created_at": "2026-01-01T00:00:00Z", "password_hash": None,
+        "supabase_user_id": None,
+    })
+    try:
+        _set_google_email(monkeypatch, "shelved@company.com")
+        with caplog.at_level("INFO", logger="user_service.routes.auth"):
+            r = TestClient(app).post("/auth/google-exchange", json={"supabase_token": "tok"})
+        assert r.status_code == 403
+        assert any(
+            "inactive" in rec.message and "shelved@company.com" in rec.message
+            for rec in caplog.records
+        )
+    finally:
+        USERS.pop()

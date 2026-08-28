@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import bcrypt as _bcrypt
+import requests as _requests
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -52,6 +53,46 @@ def decode_token(token: str) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid or expired token: {exc}",
         )
+
+
+def verify_supabase_token(supabase_token: str) -> dict:
+    """Validate a Supabase access token and return its verified identity.
+
+    Returns ``{"email": str, "supabase_uid": str | None, "full_name": str | None}``.
+    The email is asserted by Supabase Auth (Google OAuth), so it is proof the
+    caller controls that mailbox — which is what lets an invite be bound to the
+    address it was sent to.
+
+    Raises HTTPException on an unreachable/misconfigured Supabase or an invalid
+    token.
+    """
+    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not supabase_url or not service_key:
+        raise HTTPException(500, "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured")
+
+    try:
+        resp = _requests.get(
+            f"{supabase_url}/auth/v1/user",
+            headers={"Authorization": f"Bearer {supabase_token}", "apikey": service_key},
+            timeout=6,
+        )
+    except Exception as exc:
+        raise HTTPException(503, f"Could not reach Supabase Auth: {exc}")
+
+    if not resp.ok:
+        raise HTTPException(401, "Invalid or expired Supabase token")
+
+    data = resp.json()
+    email = data.get("email")
+    if not email:
+        raise HTTPException(401, "Supabase token has no email claim")
+    meta = data.get("user_metadata") or {}
+    return {
+        "email": email,
+        "supabase_uid": data.get("id"),
+        "full_name": meta.get("full_name") or meta.get("name"),
+    }
 
 
 def verify_admin_secret(secret: str) -> None:
