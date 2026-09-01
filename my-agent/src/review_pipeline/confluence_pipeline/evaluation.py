@@ -61,26 +61,74 @@ page, company, or organization (see "Spoken context"/topic) AND the candidate's 
 CLEARLY belongs to a DIFFERENT company/organization, score 0.0-0.3 even if the topic,
 heading, and values match perfectly — editing the right kind of section in the WRONG
 document is exactly the failure to avoid (many documents share the same headings and
-similar tables). BUT do NOT penalize when the document matches the named one, or when you
-cannot confidently tell that it is a different document — in those cases score on topic
-relevance as usual. Only a CLEAR wrong-document match is penalized; uncertainty is not.
+similar tables). BUT do NOT penalize when the document matches the named one — there,
+score on topic relevance as usual.
+
+SUBJECT ATTRIBUTION IS DECISIVE. Every value belongs to some party, and a section is only
+the right target when the intent's subject and the SECTION's subject are the SAME party.
+The intent arrives with its attribution:
+- subject_scope "internal" — the value is about the organization whose documents these
+  are. Score on topic exactly as described above.
+- subject_scope "third_party" — the value was stated about a DIFFERENT party (a competitor
+  or peer firm, another product, a customer, a vendor, a partner, an investee/portfolio
+  company, an industry benchmark, or a figure quoted from elsewhere). Such a value may
+  ONLY land on a section that is itself ABOUT that party — a case file, profile,
+  directory row, competitive-landscape entry, or comparison table for that party. A
+  section stating the DOCUMENT OWNER'S OWN equivalent figure is the WRONG target no matter
+  how perfectly the topic, heading, table shape, units, and magnitude line up: another
+  party's fee, rate, ratio, limit, headcount, or target must NEVER overwrite this
+  organization's own. That is the most damaging error you can make — score it 0.0-0.15.
+- subject_scope "unspecified" — no attribution was recorded. Read the spoken context
+  yourself: if it clearly states the value about a named party that is NOT this section's
+  subject, treat it as third_party and apply the rule above. Otherwise score on topic as
+  usual.
+Attribution is about WHOSE value it is, not about topic. A section can be a flawless topic
+match and still be the wrong subject; when the two conflict, attribution wins.
 
 Return a JSON object with:
   relevance_score: float (0.0-1.0)
+  section_subject: str (whose facts this section states — the party the section's values
+    belong to: the document owner's own organization, or a specific named third party)
+  subject_match: bool — decided as follows:
+    * subject_scope "internal", or no third party in play: return true.
+    * subject_scope "third_party": return true ONLY if you can point to positive
+      evidence — in the Document title, the Section heading, or the Content — that this
+      section is ABOUT that party: its case file, profile, directory row, comparison
+      table, or competitive-landscape entry. If the section holds the document owner's
+      own equivalent figure, OR you cannot tell whose figure it is, return false.
+      Absence of evidence is FALSE here, not true. Most sections of an organization's
+      own handbook never restate who they are about — an unlabelled row in the owner's
+      own document is the OWNER's row, not a rival's, so "the section doesn't say whose
+      this is" is a reason to reject, never a reason to allow.
   reasoning: str (one sentence explaining the score)
 """
 
 
 class _EvalResult(BaseModel):
     relevance_score: float = Field(ge=0.0, le=1.0)
+    section_subject: str = ""
+    subject_match: bool = True
     reasoning: str
+
+
+class EvalVerdict(BaseModel):
+    """A scored (intent, section) pair, including the subject-attribution check."""
+
+    relevance_score: float = 0.0
+    section_subject: str = ""
+    subject_match: bool = True
+    reasoning: str = ""
 
 
 class EvaluationAgent:
     """Scores how relevant a document section is for a given change intent."""
 
-    def __init__(self, model: str = None, *, temperature: float | None = None):
+    def __init__(self, model: str = None, *, temperature: float | None = None, owner: str = ""):
         self.model = model or os.getenv("LDOC_EVAL_MODEL", "gpt-5.4-mini")
+        # Names the organization these documents belong to, so "the document owner"
+        # in the instructions above resolves to somebody concrete. Empty is allowed
+        # and leaves the prompt exactly as it was before.
+        self.owner = owner
         self._agent = Agent(
             name="ConfluenceEvaluator",
             model=self.model,
@@ -93,6 +141,18 @@ class EvaluationAgent:
         """Score how relevant a document section is for a change intent.
 
         Returns a float in [0.0, 1.0]. Returns 0.0 on any exception.
+        """
+        return (await self.score_detail(intent, chunk)).relevance_score
+
+    async def score_detail(
+        self, intent: ConfluenceIntent, chunk: ChunkRecord
+    ) -> EvalVerdict:
+        """Score a section AND report whose subject it states (attribution check).
+
+        Returns a zero-score verdict on any exception; ``subject_match`` is left
+        True there so the failure mode is unchanged — the 0.0 score already fails
+        the relevance gate, and a transient LLM error must not be reported as an
+        attribution mismatch.
         """
         # Show enough of the section that the relevant sentence is visible. The
         # old 800-char cap dropped the change target on long sections (a value to
@@ -109,11 +169,15 @@ class EvaluationAgent:
                 content = chunk.content[:2000] + "\n...\n" + chunk.content[max(0, pos - 500):pos + 500]
         spoken = " ".join(intent.verbatim_snippets or []).strip()
         doc_label = chunk.doc_title or os.path.basename(chunk.source_path)
+        owner_line = f"{self.owner}\n\n" if self.owner else ""
         prompt = (
+            f"{owner_line}"
             f"Intent:\n"
             f"  topic: {intent.affected_topic}\n"
             f"  old_value: {intent.old_value}\n"
             f"  new_value: {intent.new_value}\n"
+            f"  subject_scope: {intent.subject_scope}\n"
+            f"  subject_entity: {intent.subject_entity or '(the document owner)'}\n"
             f"  spoken context: {spoken or '(none)'}\n\n"
             f"Candidate section:\n"
             f"  Document (page): {doc_label}\n"
@@ -122,7 +186,13 @@ class EvaluationAgent:
         )
         try:
             result = await guarded_run(self._agent, prompt)
-            return result.final_output.relevance_score
+            r: _EvalResult = result.final_output
+            return EvalVerdict(
+                relevance_score=r.relevance_score,
+                section_subject=r.section_subject,
+                subject_match=r.subject_match,
+                reasoning=r.reasoning,
+            )
         except Exception:
             logger.warning(
                 "EvaluationAgent.score() failed for topic=%s heading=%s",
@@ -130,7 +200,7 @@ class EvaluationAgent:
                 chunk.section_heading,
                 exc_info=True,
             )
-            return 0.0
+            return EvalVerdict(relevance_score=0.0, reasoning="evaluation failed")
 
     async def score_batch(
         self,

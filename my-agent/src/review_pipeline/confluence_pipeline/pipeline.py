@@ -24,12 +24,18 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
+from .corpus_profile import get_corpus_profile, resolve_meeting_scope
 from .editor import ConfluenceEditorAgent
 from .evaluation import EvaluationAgent
 from .intent_extraction import IntentExtractionAgent
 from .models import ChunkRecord, ConfluenceIntent, ConfluenceProposal
 from .retrieval import PineconeHybridIndex
-from .structural import classify_kind, is_cross_cutting
+from .structural import (
+    classify_kind,
+    is_cross_cutting,
+    is_information_request,
+    is_reaffirmation_phrasing,
+)
 from .verifier import VerifierAgent
 
 logger = logging.getLogger(__name__)
@@ -73,6 +79,30 @@ class PipelineConfig(BaseModel):
     min_fulfillment: float = 0.6
     # Drop cards whose draft fails verification on factual consistency.
     min_factual: float = 0.6
+    # Subject-attribution guardrail. A meeting quotes other parties' numbers all the
+    # time (a competitor's fee, a peer firm's terms, an industry benchmark); those
+    # retrieve the document owner's OWN equivalent row — same topic, same table, same
+    # units — and every other gate waves them through, because the resulting edit is
+    # genuinely well-formed. So a value attributed to a third party may only land on a
+    # section that is itself about that party. Enforced twice: at evaluation (cheap,
+    # before drafting) and again at verification (catches an attribution the extractor
+    # never recorded). Set LDOC_ATTRIBUTION_GUARD=0 to disable for A/B comparison.
+    attribution_guard: bool = os.getenv("LDOC_ATTRIBUTION_GUARD", "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    min_attribution: float = 0.5
+    # Reaffirmation guard. "Deciding not to change something" is not a change, but in
+    # the contrastive form that dominates real meetings — "they charge X; ours stays at
+    # Y" — the "ours" clause reads as an affirmative statement of a value, and the
+    # extractor emits it as an intent. Its new_value is what the document ALREADY says,
+    # so the no-op filter should catch it — except the editor, told to make the section
+    # satisfy the intent, instead edits a neighbouring row or rewrites a sentence to
+    # manufacture a difference. Cheapest to drop these before retrieval: they cost
+    # nothing to detect and every stage after this point can only do damage with them.
+    # Set LDOC_REAFFIRMATION_GUARD=0 to disable for A/B comparison.
+    reaffirmation_guard: bool = os.getenv("LDOC_REAFFIRMATION_GUARD", "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 # ── Deterministic recall helpers (ported verbatim) ────────────────────────────
@@ -142,19 +172,90 @@ def _has_concrete_value(i: ConfluenceIntent) -> bool:
     return (i.new_value or "").strip().lower() not in _PLACEHOLDER_VALUES
 
 
-def _meaningful_change(before: str, after: str) -> bool:
-    """True only if a real token actually changed.
+# Words that appear in essentially every section: requiring one as a name token would
+# match the whole corpus and silently disable the floor. Always dropped.
+_ENTITY_STOPWORDS = {"the", "and", "for"}
+# Generic corporate words carry no identity — "Fund", "Ventures", "Ltd" are shared by
+# every party in the corpus, so they must never be what makes a name "match". Dropped
+# only when something distinctive survives, so an all-generic name still has a token.
+_ENTITY_GENERIC_TOKENS = {
+    "fund", "funds", "capital", "ventures", "venture", "partners", "partner",
+    "company", "companies", "corp", "corporation", "inc", "incorporated",
+    "ltd", "limited", "llp", "llc", "plc", "pvt", "private", "group", "holdings",
+    "technologies", "technology", "labs", "systems", "solutions", "services",
+    "firm", "team", "their", "them", "our", "market", "industry", "average",
+}
 
-    Drops cards where before/after differ only in whitespace or punctuation (a
-    near-no-op that slipped past the strict strip() check) — those are the weak,
-    review-noise cards. Compares the multiset of alphanumeric/value tokens.
+
+def _entity_tokens(entity: str) -> list[str]:
+    """The distinctive tokens of a party's name, generic corporate words removed."""
+    toks = [
+        t for t in re.findall(r"[a-z0-9]+", (entity or "").lower())
+        if len(t) >= 3 and t not in _ENTITY_STOPWORDS
+    ]
+    sig = [t for t in toks if t not in _ENTITY_GENERIC_TOKENS]
+    return sig or toks
+
+
+def _entity_named_in_chunk(intent: ConfluenceIntent, chunk: ChunkRecord) -> bool:
+    """True when the intent's third-party subject is actually NAMED in this section.
+
+    A necessary condition for another party's value to belong here: a section can only
+    be *about* a party that it names somewhere. This is the deterministic floor under
+    the model's attribution judgement, and it exists because that judgement is weakest
+    exactly where the damage is done — a bare table row like "| Reserve ratio | 1.4x |"
+    carries no visible owner, so the model reads it as subject-less and lets a rival's
+    figure in. It is also stable run to run, which the model's verdict is not.
+
+    EVERY distinctive token must appear, so "Meridian Bharat Fund" cannot match the
+    owner's own "Bharat Breakthrough Fund-I" on the shared word "bharat". A third-party
+    value with no nameable subject at all matches nothing, which is the safe answer.
+    """
+    tokens = _entity_tokens(intent.subject_entity or "")
+    if not tokens:
+        return False
+    haystack = f"{chunk.doc_title}\n{chunk.section_heading}\n{chunk.content}".lower()
+    # Word boundaries, not substring containment. "Ace Capital" reduces to the single
+    # distinctive token "ace", which a bare `in` finds inside "replace", "space" and
+    # "trace" — so a section reading "replace the committed-capital rate" would satisfy
+    # the floor and let Ace's figure onto the document owner's own row.
+    return all(re.search(rf"\b{re.escape(t)}\b", haystack) for t in tokens)
+
+
+# Spelled-out numbers and their digits are the SAME value. Without this, an editor
+# asked to record "the 9-month programme" rewrites a section that already says
+# "nine-month" and the diff looks real to every token-level check — a card that
+# proposes no change at all, on a document that was already correct.
+_NUMBER_WORDS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+    "nineteen": "19", "twenty": "20", "thirty": "30", "forty": "40",
+    "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90",
+    "hundred": "100", "thousand": "1000", "million": "1000000",
+}
+
+
+def _value_tokens(text: str) -> "Counter[str]":
+    """Alphanumeric tokens, with number words folded onto their digits.
+
+    Hyphenated compounds are split so "nine-month" and "9-month" compare equal.
     """
     from collections import Counter
 
-    pat = r"[a-z0-9][a-z0-9$%./-]*"
-    b = Counter(re.findall(pat, (before or "").lower()))
-    a = Counter(re.findall(pat, (after or "").lower()))
-    return b != a
+    raw = re.findall(r"[a-z0-9][a-z0-9$%.]*", (text or "").lower().replace("-", " "))
+    return Counter(_NUMBER_WORDS.get(t, t) for t in raw)
+
+
+def _meaningful_change(before: str, after: str) -> bool:
+    """True only if a real value actually changed.
+
+    Drops cards where before/after differ only in whitespace, punctuation, or the
+    way a number is spelled — those are the weak, review-noise cards that propose
+    nothing. Compares the multiset of value tokens.
+    """
+    return _value_tokens(before) != _value_tokens(after)
 
 
 def _query_text(intent: ConfluenceIntent) -> str:
@@ -244,14 +345,75 @@ async def propose(
     await _emit("intent_extraction")
     if not (transcript_text or "").strip():
         return [], []
-    intents = await IntentExtractionAgent().extract(transcript_text)
+    # Whose documents these are. Resolved once per run (memoized for an hour), and
+    # None whenever it cannot be told — in which case every prompt below is exactly
+    # the prompt this pipeline used before the corpus owner was known.
+    profile = await get_corpus_profile(retriever)
+    owner_block = profile.prompt_block() if profile else ""
+    intents = await IntentExtractionAgent().extract(transcript_text, owner=owner_block)
     if not intents:
         return [], []
+
+    # Is the document owner even in this meeting? Extraction cannot answer that —
+    # it sees one 230-word segment at a time, so it can only attribute a value when
+    # the sentence itself names a party. In a meeting held entirely between OTHER
+    # organizations, every unmarked "we need SOC 2" / "our competitors are X" reads
+    # as the owner's own, and lands on the owner's own compliance and competitive
+    # sections. One look at the whole transcript decides it for every intent at once.
+    scope = await resolve_meeting_scope(transcript_text, profile)
+    if not scope.owner_is_party:
+        outsider = scope.outsider_entity()
+        reattributed = 0
+        for i in intents:
+            if i.subject_scope == "internal" or (
+                i.subject_scope == "unspecified" and not i.subject_entity
+            ):
+                # Not a new gate — just the correct attribution. "Our" said by a
+                # visitor is a third party's value, and the attribution guard already
+                # knows what to do with one of those: it may only land on a section
+                # that is itself about that party.
+                i.subject_scope = "third_party"
+                i.subject_entity = i.subject_entity or outsider or None
+                reattributed += 1
+        logger.info(
+            "confluence_pipeline.propose: %r is not a party to this meeting (speakers "
+            "represent %s) — re-attributed %d/%d intent(s) away from the document owner",
+            profile.owner_name if profile else None,
+            scope.speaker_organizations or "[unknown]", reattributed, len(intents),
+        )
 
     edit_intents = [
         i for i in intents
         if classify_kind(i) == "edit" and _has_concrete_value(i)
     ]
+    if cfg.reaffirmation_guard:
+        kept: list[ConfluenceIntent] = []
+        for i in edit_intents:
+            # Either signal is enough to reject: the model's own label, or the
+            # speaker's quoted words. They fail independently — the label slips on the
+            # contrastive form, the lexical markers are absent when the speaker
+            # reaffirms implicitly — so neither alone closes the gap.
+            by_label = i.change_polarity == "reaffirmation"
+            by_words = is_reaffirmation_phrasing(i)
+            # Asking about a document is not changing it — same family of failure as
+            # a reaffirmation (a value stated with no intent to move it), so it is
+            # dropped at the same point, before retrieval can find it a home.
+            if is_information_request(i):
+                logger.info(
+                    "confluence_pipeline: question guard — %r (%s) came from a request "
+                    "for information, not a change; dropped",
+                    i.affected_topic, i.new_value,
+                )
+                continue
+            if by_label or by_words:
+                logger.info(
+                    "confluence_pipeline: reaffirmation guard — %r (%s) restates an "
+                    "existing value, not a change (label=%s, quoted_words=%s); dropped",
+                    i.affected_topic, i.new_value, by_label, by_words,
+                )
+                continue
+            kept.append(i)
+        edit_intents = kept
     logger.info("confluence_pipeline.propose: %d intents (%d editable)", len(intents), len(edit_intents))
     if not edit_intents:
         return intents, []
@@ -266,12 +428,29 @@ async def propose(
         chunks = await asyncio.to_thread(retriever.query, _query_text(intent), top_k)
         return intent, chunks, max_targets
 
-    intent_candidates = await asyncio.gather(*[_retrieve(i) for i in edit_intents])
+    retrieved = await asyncio.gather(*[_retrieve(i) for i in edit_intents])
+
+    # Retrieval now applies an absolute relevance floor, so an empty candidate list is
+    # a real verdict: this corpus documents nothing about that intent. Drop those here
+    # rather than paying a stage-1 fan-out per intent to rediscover it — on a meeting
+    # that has nothing to do with these documents that is the entire eval bill.
+    intent_candidates = [t for t in retrieved if t[1]]
+    ungrounded = len(retrieved) - len(intent_candidates)
+    logger.info(
+        "confluence_pipeline.propose: %d editable intent(s) — %d grounded in the corpus, "
+        "%d with no section about them (owner=%r)",
+        len(retrieved), len(intent_candidates), ungrounded,
+        profile.owner_name if profile else None,
+    )
+    if not intent_candidates:
+        return intents, []
 
     # ── Stage 5: two-stage evaluation (cheap wide filter → strong precise gate) ─
     await _emit("evaluation")
-    eval_cheap = EvaluationAgent(model=os.getenv("LDOC_EVAL_STAGE1_MODEL", "gpt-4o-mini"), temperature=0.0)
-    eval_fine = EvaluationAgent()  # LDOC_EVAL_MODEL, default gpt-5.4-mini
+    eval_cheap = EvaluationAgent(
+        model=os.getenv("LDOC_EVAL_STAGE1_MODEL", "gpt-4o-mini"), temperature=0.0, owner=owner_block,
+    )
+    eval_fine = EvaluationAgent(owner=owner_block)  # LDOC_EVAL_MODEL, default gpt-5.4-mini
 
     async def _score_pool(intent: ConfluenceIntent, chunks: list[ChunkRecord], max_targets: int):
         if not chunks:
@@ -289,10 +468,38 @@ async def propose(
                 survivors_idx.add(i)
         survivors = [chunks[i] for i in sorted(survivors_idx)]
         # Stage 2: the strong model re-scores only the shortlist (the precision gate).
-        fine = await asyncio.gather(*[eval_fine.score(intent, c) for c in survivors])
+        # Only the STRONG model's attribution verdict is enforced — stage 1 stays a
+        # pure cheap ranker, as designed.
+        fine = await asyncio.gather(*[eval_fine.score_detail(intent, c) for c in survivors])
         scores: list[float] = []
         rescue_floor = cfg.relevance_threshold - cfg.floor_rescue_margin
-        for c, s in zip(survivors, fine):
+        gate_attribution = cfg.attribution_guard and intent.subject_scope == "third_party"
+        for c, verdict in zip(survivors, fine):
+            s = verdict.relevance_score
+            # Subject-attribution guardrail: this value was stated about someone else,
+            # so it may only land on a section that is about that party. Both checks
+            # must agree, because either alone leaks — the deterministic name check
+            # holds the line on subject-less table rows (where the model's judgement is
+            # weakest), while the model's verdict distinguishes "names the party" from
+            # "is about the party" (a passing mention is not a case file). Zeroing,
+            # rather than merely lowering, also denies a rejected candidate the
+            # deterministic rescue below: a competitor's figure reliably trips the
+            # field-label and phrase-overlap floors precisely because it IS the same
+            # kind of value.
+            # Only computed when the gate will actually consult it: the name floor
+            # lowercases the whole section body (up to 12k chars) per candidate, and
+            # for an internal intent — the normal case — the answer is discarded.
+            named_here = gate_attribution and _entity_named_in_chunk(intent, c)
+            if gate_attribution and not (verdict.subject_match and named_here):
+                logger.info(
+                    "confluence_pipeline: attribution gate — %r (%s) is about %r, "
+                    "section %r is about %r (named_here=%s, model_match=%s); rejected",
+                    intent.affected_topic, intent.new_value, intent.subject_entity,
+                    c.section_heading, verdict.section_subject,
+                    named_here, verdict.subject_match,
+                )
+                scores.append(0.0)
+                continue
             # Confirm a NEAR-MISS only: the model scored it just under the gate AND a
             # deterministic match backs it up → tip it over. A clearly-low score
             # (< rescue_floor) is a confident rejection and is left to fail, even with
@@ -333,8 +540,18 @@ async def propose(
     await _emit("verification")
     verifier = VerifierAgent()
     verifications = await asyncio.gather(*[
-        verifier.verify(d.before_content, d.after_content, f"{i.intent_type}: {i.new_value}")
-        for (i, _c), d in zip(qualified, drafts)
+        verifier.verify(
+            d.before_content,
+            d.after_content,
+            f"{i.intent_type}: {i.new_value}",
+            spoken_context=" ".join(i.verbatim_snippets or []),
+            subject_entity=i.subject_entity,
+            subject_scope=i.subject_scope,
+            doc_title=c.doc_title,
+            section_heading=c.section_heading,
+            owner=owner_block,
+        )
+        for (i, c), d in zip(qualified, drafts)
     ])
 
     # ── Stage 8: assemble, suppress no-ops + unfulfilled ─────────────────────
@@ -354,6 +571,16 @@ async def propose(
         if ver.factual_consistency < cfg.min_factual:
             logger.info("confluence_pipeline.propose: dropping factually-weak edit on %r (%.2f)",
                         chunk.section_heading, ver.factual_consistency)
+            continue
+        # Attribution backstop. Runs on EVERY draft, not just third_party intents:
+        # its job is to catch the value whose attribution the extractor never
+        # recorded, which the evaluation-stage gate therefore never examined.
+        if cfg.attribution_guard and ver.attribution_fit < cfg.min_attribution:
+            logger.info(
+                "confluence_pipeline.propose: dropping mis-attributed edit on %r "
+                "(attribution %.2f) — %r is not said about this section's subject",
+                chunk.section_heading, ver.attribution_fit, intent.new_value,
+            )
             continue
         edit_type = draft.edit_type if draft.edit_type in ("replace", "append", "delete_section") else "replace"
         prop = ConfluenceProposal.create(cfg.session_id, intent, chunk)

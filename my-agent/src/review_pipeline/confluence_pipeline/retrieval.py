@@ -18,7 +18,6 @@ the complete section body to make a surgical edit).
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import time
@@ -29,6 +28,18 @@ from ..text_utils import clean_inline_text, looks_like_storage_html, storage_to_
 from .models import ChunkRecord
 
 logger = logging.getLogger(__name__)
+
+
+class RetrievalUnavailable(RuntimeError):
+    """Every search backend errored — this is an outage, not an empty corpus.
+
+    Since the relevance floor landed, an empty result from ``query()`` carries a
+    MEANING: "no section of this corpus is about that intent", and the pipeline
+    drops the intent on the strength of it. A swallowed Pinecone error returns the
+    same empty list, so without this distinction a transient outage silently
+    reports every change as ungrounded and the run ends with "0 proposals ready
+    for review" looking exactly like a clean result.
+    """
 
 
 def _page_to_markdown(html: str, title: str) -> str:
@@ -70,8 +81,21 @@ _UPSERT_BATCH = int(os.getenv("MY_AGENT_LDOC_UPSERT_BATCH", "40"))
 _UPSERT_PACE_S = float(os.getenv("MY_AGENT_LDOC_UPSERT_PACE_S", "1.5"))
 _UPSERT_MAX_RETRIES = int(os.getenv("MY_AGENT_LDOC_UPSERT_RETRIES", "8"))
 
+# Retrieval floor. RRF + rerank produce a RANKING, not a judgement that anything
+# retrieved is actually relevant, so top_k always came back full — even for a meeting
+# with nothing to do with this corpus. Every downstream gate then scores on TOPIC
+# match, and "our headcount is 46" is a flawless topic match for the document owner's
+# own headcount row. The reranker already computes the missing signal and it was being
+# discarded: on-corpus queries score 0.87-0.99 while off-corpus ones score 0.0003-0.018,
+# so an absolute floor cleanly separates them. Same pattern as the live Q&A retriever's
+# JARVIS_CONFLUENCE_RAG_SCORE_THRESHOLD (confluence_rag.py).
+_MIN_RERANK_SCORE = float(os.getenv("LDOC_RETRIEVAL_MIN_RERANK", "0.10"))
+
+# Stored per record. Deliberately minimal: every field here is read back by
+# ``_to_chunk`` or the freshness check. ``source_format`` (a constant) and
+# ``content_hash`` (written, never consulted) used to ride along and were dropped.
 _FIELDS = [
-    "content", "source_path", "source_format", "section_heading",
+    "content", "source_path", "section_heading",
     "section_index", "doc_title",
 ]
 
@@ -227,12 +251,14 @@ class PineconeHybridIndex:
                 "chunk_text": _embedding_text(c)[:_EMBED_CHARS],
                 "content": c.content[:_CONTENT_CHARS],
                 "source_path": c.source_path,
-                "source_format": c.source_format,
                 "section_heading": c.section_heading,
                 "section_index": c.section_index,
                 "doc_title": c.doc_title,
+                # The freshness sentinel: sync_index reads this back off chunk :0 to
+                # decide whether a page still needs re-embedding. It must be the real
+                # Confluence version — a 0 here reads back as "unknown" and forces a
+                # full re-embed of the corpus on every single sync.
                 "version": c.version or 0,
-                "content_hash": c.content_hash or "",
             })
         for which in indexes:
             index = self._index(which)
@@ -284,7 +310,10 @@ class PineconeHybridIndex:
 
     # ── Retrieval ────────────────────────────────────────────────────────────
 
-    def _search_one(self, which: str, query: str, top_k: int) -> list[tuple[int, dict, float]]:
+    def _search_one(self, which: str, query: str, top_k: int) -> list[tuple[int, dict, float]] | None:
+        """Hits for one backend. ``None`` means the search ERRORED; ``[]`` means it
+        genuinely matched nothing. Callers must not conflate the two — see
+        ``RetrievalUnavailable``."""
         index = self._index(which)
         if index is None:
             return []
@@ -300,7 +329,7 @@ class PineconeHybridIndex:
             )
         except Exception as exc:
             logger.warning("hybrid %s search failed: %s", which, exc)
-            return []
+            return None
         out: list[tuple[int, dict, float]] = []
         hits = getattr(getattr(result, "result", result), "hits", [])
         for rank, match in enumerate(hits):
@@ -315,7 +344,7 @@ class PineconeHybridIndex:
             out.append((rank, fields, score))
         return out
 
-    def _search_openai_dense(self, index: Any, query: str, top_k: int) -> list[tuple[int, dict, float]]:
+    def _search_openai_dense(self, index: Any, query: str, top_k: int) -> list[tuple[int, dict, float]] | None:
         """Embed the query with OpenAI and query a standard Pinecone index by vector."""
         try:
             vec = self._embed_openai([query])[0]
@@ -328,7 +357,7 @@ class PineconeHybridIndex:
             )
         except Exception as exc:
             logger.warning("openai dense search failed: %s", exc)
-            return []
+            return None
         matches = result.get("matches", []) if isinstance(result, dict) else getattr(result, "matches", [])
         out: list[tuple[int, dict, float]] = []
         for rank, m in enumerate(matches):
@@ -388,7 +417,6 @@ class PineconeHybridIndex:
         checked = changed = skipped = failed = 0
 
         stored_versions: dict[str, int | None] = {}
-        stored_hashes: dict[str, str] = {}
 
         if not force:
             # Batch-fetch stored version from chunk :0 of the dense index.
@@ -409,7 +437,6 @@ class PineconeHybridIndex:
                         else:
                             fields = getattr(rec, "metadata", None) or getattr(rec, "fields", None) or {}
                         stored_versions[page_id] = int(fields.get("version") or 0) or None
-                        stored_hashes[page_id] = str(fields.get("content_hash") or "")
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("sync_index: dense fetch failed for batch: %s", exc)
                     for cid in batch:
@@ -442,9 +469,6 @@ class PineconeHybridIndex:
             status = "changed"
             try:
                 page = fetch_page_fn(pid)
-                content_hash = hashlib.sha256(
-                    f"{pid}\n{getattr(page, 'title', '')}\n{getattr(page, 'html', '')}".encode()
-                ).hexdigest()
                 markdown = _page_to_markdown(
                     getattr(page, "html", "") or "",
                     getattr(page, "title", "") or str(pid),
@@ -453,7 +477,6 @@ class PineconeHybridIndex:
                 chunks = chunk_markdown_text(markdown, source_path=pid, source_format="confluence")
                 for chunk in chunks:
                     chunk.version = getattr(page, "version", None)
-                    chunk.content_hash = content_hash
                     if _CONTEXTUAL_ENRICHMENT_LDOC and not chunk.context_prefix:
                         try:
                             chunk.context_prefix = self._generate_context_prefix(chunk)
@@ -495,7 +518,10 @@ class PineconeHybridIndex:
         return ChunkRecord(
             chunk_id=cid,
             source_path=str(fields.get("source_path") or ""),
-            source_format=str(fields.get("source_format") or "md"),
+            # No longer stored (it was the constant "confluence" on every record).
+            # Records written before that change still carry it, so read it when
+            # present and otherwise name what this index actually holds.
+            source_format=str(fields.get("source_format") or "confluence"),
             section_heading=heading,
             section_index=section_index,
             content=content,
@@ -510,6 +536,16 @@ class PineconeHybridIndex:
         per_index = max(top_k, 12)
         dense_hits = self._search_one("dense", q, per_index)
         sparse_hits = self._search_one("sparse", q, per_index)
+        # An empty result is now a semantic verdict ("nothing here is about that"),
+        # so a failed search must never be allowed to impersonate one.
+        attempted = [h for h in (dense_hits, sparse_hits) if h is not None]
+        if not attempted:
+            raise RetrievalUnavailable(
+                f"every search backend failed for query {q[:80]!r}; "
+                "refusing to report this as 'no matching section'"
+            )
+        dense_hits = dense_hits or []
+        sparse_hits = sparse_hits or []
 
         # RRF fusion keyed on chunk_id.
         rrf: dict[str, float] = {}
@@ -528,10 +564,19 @@ class PineconeHybridIndex:
         candidates = [self._to_chunk(fields_by_id[c]) for c in ranked_ids[:50]]
         candidates = [c for c in candidates if c is not None]
 
-        if not rerank or len(candidates) <= 1:
+        # NB: no `len(candidates) <= 1` short-circuit here. Skipping the rerank for a
+        # lone candidate would skip the floor with it, and one weak hit is exactly the
+        # shape an off-corpus query produces when the sparse index is disabled — the
+        # single ungated chunk then reads downstream as "grounded in the corpus".
+        # Reranking one document costs the same call as reranking twelve.
+        if not rerank:
             return candidates[:top_k]
 
-        # Rerank fused candidates with Pinecone inference (server-side).
+        # Rerank fused candidates with Pinecone inference (server-side), then apply
+        # the absolute floor. The floor is the only thing in the whole pipeline that
+        # can answer "this corpus contains nothing about that" — every stage after
+        # retrieval judges a candidate on topic match, and an off-corpus value is a
+        # perfect topic match for the document owner's own equivalent row.
         try:
             pc = self._client()
             documents = [
@@ -548,10 +593,32 @@ class PineconeHybridIndex:
                 parameters={"truncate": "END"},
             )
             reranked: list[ChunkRecord] = []
+            dropped = 0
+            best = 0.0
             for r in res.data:
-                if r.index < len(candidates):
-                    reranked.append(candidates[r.index])
+                if r.index >= len(candidates):
+                    continue
+                score = float(getattr(r, "score", 0.0) or 0.0)
+                best = max(best, score)
+                if score < _MIN_RERANK_SCORE:
+                    dropped += 1
+                    continue
+                reranked.append(candidates[r.index])
+            if not reranked:
+                logger.info(
+                    "hybrid retrieval: nothing above the relevance floor (best=%.4f < %.2f) "
+                    "for %r — no section of this corpus is about it",
+                    best, _MIN_RERANK_SCORE, q[:90],
+                )
+            elif dropped:
+                logger.debug(
+                    "hybrid retrieval: %d/%d candidate(s) below the %.2f floor for %r",
+                    dropped, len(res.data), _MIN_RERANK_SCORE, q[:90],
+                )
             return reranked[:top_k]
         except Exception as exc:
-            logger.warning("hybrid rerank failed (%s); using RRF order", exc)
+            # Fail OPEN. The fallback ordering is RRF, whose scores are reciprocal
+            # ranks — they carry no absolute meaning, so applying the floor to them
+            # would silently drop real changes on a transient rerank outage.
+            logger.warning("hybrid rerank failed (%s); using RRF order, relevance floor NOT applied", exc)
             return candidates[:top_k]

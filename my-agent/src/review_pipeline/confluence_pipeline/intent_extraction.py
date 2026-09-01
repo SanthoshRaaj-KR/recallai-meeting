@@ -83,9 +83,21 @@ def _dedupe_intents(intents: list[ConfluenceIntent]) -> list[ConfluenceIntent]:
     core of their new_value match (so "208 days" and "208" collapse); keep the
     higher-confidence one.
     """
-    best: dict[tuple[str, str], ConfluenceIntent] = {}
+    best: dict[tuple[str, str, str, str, str], ConfluenceIntent] = {}
     for i in intents:
-        key = (_norm(i.affected_topic), _value_key(i.new_value))
+        # Attribution and polarity are part of the identity, not incidental detail.
+        # Keyed on topic+value alone, an outsider's "our fee is two percent" and the
+        # owner's "our fee moves to two percent" collapse to one intent and whichever
+        # scored higher wins — either losing the owner's real change, or keeping the
+        # outsider's value under the survivor's `internal` label, where the
+        # attribution gate never even looks at it.
+        key = (
+            _norm(i.affected_topic),
+            _value_key(i.new_value),
+            i.subject_scope,
+            _norm(i.subject_entity),
+            i.change_polarity,
+        )
         if key not in best or i.confidence > best[key].confidence:
             best[key] = i
     return list(best.values())
@@ -290,14 +302,38 @@ Completeness is critical — capture EVERY distinct change, not just the obvious
 - Transient operational / status metrics are NOT document changes, even though they are numbers. A reported value is document-worthy ONLY when it is a GOVERNING value an organization writes into a policy, handbook, or spec — a policy limit or threshold, a retention period, an SLA target, a budget or cost figure, an incident's cost/duration/impact, or an official recorded target. Reject transient performance/status figures that live on a dashboard or in a standup, not in a governing document: current ticket/backlog counts, deals closed this week, signups, monthly active users/sessions, uptime percentages, crash rates, app-store ratings, candidates in the pipeline, a metric "ticking up/down" this week. Examples that yield NOTHING: "support backlog dropped from ninety to forty", "sales closed twelve deals", "we crossed a million monthly sessions", "uptime was 99.9%", "our rating crept to 4.6", "churn ticked down half a point this month".
 - A metric going DOWN is not a section removal. Words like "dropped", "fell", "down", "decreased" describing a number are decreases, never an instruction to delete a section. Only treat remove/delete/eliminate/strike/"get rid of"/"take out" as a removal, and only when the speaker is removing a section or rule.
 
+POLARITY — is the speaker CHANGING the value, or restating one that already holds?
+Set change_polarity on every intent:
+- "change": the speaker is putting a NEW state in place, or reporting a concrete fact to be recorded. This is the normal case.
+- "reaffirmation": the speaker names a value only to confirm it is STAYING as it is. The value they state is the value the document already has, so acting on it can only cause damage — there is nothing to change, and an editor told to "apply" it will invent a change to a neighbouring row or rewrite a nearby sentence to make it fit.
+The hard case, and the one that matters most, is the CONTRASTIVE form, where a reaffirmation is dressed up to look like a decision because it sits next to someone else's number:
+  * "Meridian charges two point five percent. We looked at matching that and decided not to. Our fee stays at two percent." -> the "two percent" clause is a REAFFIRMATION, not a fee change.
+  * "They run a twelve-month programme. Ours stays at nine months, and we are not changing it." -> reaffirmation.
+  * "Everyone else reports monthly. Ours is monthly for amber and red only, and we are keeping it that way." -> reaffirmation.
+Deciding not to change something is NOT a change, however deliberate the decision was, and however much discussion preceded it. Signals: "stays at", "stays the same", "remains", "unchanged", "we are not changing it", "keeping it that way", "keep it as is", "leave it as is", "sticking with", "no change there", "that is not moving", "we are comfortable where it is".
+Label these "reaffirmation" rather than dropping them — the downstream step suppresses them, and labelling is more reliable than silence.
+
+ATTRIBUTION — every value belongs to someone; record WHO:
+Meetings constantly quote other parties' numbers: a competitor's pricing, another firm's terms, a customer's headcount, a vendor's rate, an industry benchmark, "at my last company we did X". Those numbers are ABOUT that other party. Writing them into the speaker's own documents is the single most damaging error this pipeline can make, because the topic, units, and table shape line up perfectly — a competitor's fee looks exactly like a fee. So every intent MUST carry its attribution:
+- subject_scope "internal": the value is about the organization whose documents these are — "our", "we", "us", or an unmarked statement of the org's own policy, limit, target, cost, or process. This is the normal case.
+- WHOSE documents these are is stated above the transcript when it is known ("The documents that may be edited belong to ..."). When it is, "internal" means internal to THAT organization — never merely "the speaker's own". Meetings are routinely held with outsiders — investors, customers, vendors, candidates, partners — and every one of them says "our" and "we" about their OWN organization. If the speaker's "our/we/us" refers to an organization that is NOT the document owner, the intent is third_party and subject_entity is that speaker's organization, exactly as though they had been named in the third person. A whole meeting can be third_party this way: a call in which an outside company discusses its own revenue, headcount, roadmap or funding produces NO internal intents at all, however naturally its speakers say "we".
+- subject_scope "third_party": the value was stated about a DIFFERENT named party — a competitor or peer firm, another product, a customer, a supplier or vendor, a partner, an investee/portfolio company, an industry benchmark or market average, or a figure the speaker is quoting from elsewhere. Signals: "they", "their", "<Name> charges/does/has", "compared to", "the market average", "everyone else", "at my last company".
+- subject_scope "unspecified": only when you genuinely cannot tell whose value it is.
+- subject_entity: the party the value is about, named as the transcript names it (e.g. "Acme Capital", "the market average"). Set it for EVERY third_party intent; leave it null for internal ones.
+- When subject_scope is third_party, verbatim_snippets MUST include the phrase that names that party, so the attribution can be checked downstream.
+- NEVER launder a third party's figure into an intent phrased as if it were the speaker's own. If the speaker says "their reserve ratio is 2x" and never says to change their own, that is a third_party intent — not an internal change to the org's own reserve ratio.
+- Merely discussing another party is not, by itself, a change to any document. Still extract the intent with third_party attribution and let the retrieval and relevance steps decide whether any section is actually about that party; do not silently convert it into an internal change, and do not invent an internal change alongside it.
+
 Rules:
 1. Extract an intent for any specific document change AND for any concrete reported fact, figure, cost, duration, count, date, or incident that an organization would record in a document. When a concrete value is tied to a named subject, extract it; the retrieval step will discard it if no document covers that subject.
 2. verbatim_snippets MUST contain exact quoted text from the transcript. When the speaker addresses a change to a SPECIFIC named document, page, company, or organization (e.g. "for the Northwind customer support SOP, change ..."), ALWAYS include that naming phrase in verbatim_snippets so the change can be routed to the right document — even though the document name is never the affected_topic (see rule 6).
 3. confidence: 0.9+ only when the transcript is unambiguous; 0.5-0.89 for probable; < 0.5 for speculative.
 4. old_value: the current state BEFORE the change (null if unknown). Never guess a value the transcript does not give.
 5. new_value: the intended new state AFTER the change (for a relative change like "increased by 3 days", describe the delta, e.g. "current sick days + 3").
-6. affected_topic MUST be the SPECIFIC subject being changed — the policy item, limit, field, window, or named section (e.g. "artifact retention depth", "badge re-enrollment grace", "pager duty carbon-copy rule"). Do NOT use the document, policy, handbook, system, or company name as the affected_topic. If the speaker says "in the X policy, change the Y from A to B", the affected_topic is Y, never X. (The only exception is a positional removal that references position rather than a subject — see the removals note above — where you include the document/area.)
-7. If no actionable document change intents are found, return {"intents": []}.
+6. affected_topic MUST be the SPECIFIC subject being changed — the policy item, limit, field, window, or named section (e.g. "artifact retention depth", "badge re-enrollment grace", "pager duty carbon-copy rule"). Do NOT use the document, policy, handbook, system, or company name as the affected_topic. If the speaker says "in the X policy, change the Y from A to B", the affected_topic is Y, never X. (The only exception is a positional removal that references position rather than a subject — see the removals note above — where you include the document/area.) Stripping the party name out of affected_topic is exactly why subject_entity exists: when the value belongs to a named party, that name goes in subject_entity — never drop it.
+7. subject_scope and subject_entity are REQUIRED on every intent (see ATTRIBUTION above). Getting these wrong is worse than missing the change: an unattributed third-party figure silently overwrites the organization's own value.
+8. change_polarity is REQUIRED on every intent (see POLARITY above). A reaffirmation labelled "change" makes the pipeline edit a document that was already correct.
+9. If no actionable document change intents are found, return {"intents": []}.
 """
 
 
@@ -324,11 +360,16 @@ class IntentExtractionAgent:
         )
 
     async def _extract_segment(
-        self, segment: str, glossary: str = ""
+        self, segment: str, glossary: str = "", owner: str = ""
     ) -> list[ConfluenceIntent]:
         prompt = f"Meeting transcript:\n\n{segment}"
         if glossary:
             prompt = f"{glossary}\n\n{prompt}"
+        # The owner block goes first: whose documents these are decides how every
+        # "our"/"we" in the segment is attributed, so the model must read it before
+        # the people list and before the transcript itself.
+        if owner:
+            prompt = f"{owner}\n\n{prompt}"
         try:
             result = await guarded_run(self._agent, prompt)
             intent_list: _IntentList = result.final_output
@@ -337,7 +378,7 @@ class IntentExtractionAgent:
             logger.error("IntentExtractionAgent segment extract failed", exc_info=True)
             return []
 
-    async def extract(self, transcript: str) -> list[ConfluenceIntent]:
+    async def extract(self, transcript: str, owner: str = "") -> list[ConfluenceIntent]:
         """Extract document-change intents from a meeting transcript.
 
         Long transcripts are segmented and extracted in parallel, then merged —
@@ -345,6 +386,14 @@ class IntentExtractionAgent:
         When the transcript splits, one cheap glossary pass over the whole text is
         injected into every segment so a pronoun/first-name in a later segment
         (e.g. "he should also own X") resolves to a person named in an earlier one.
+
+        ``owner`` names the organization the editable documents belong to (see
+        ``corpus_profile``). It is what makes ``subject_scope="internal"`` mean
+        "the document owner's own value" rather than "the speaker's own value" —
+        without it, an outsider saying "our headcount is 46" is recorded as an
+        internal change to the document owner's headcount. Empty is allowed and
+        restores the original speaker-relative behaviour.
+
         Returns an empty list for empty transcripts; filters confidence < 0.5.
         """
         if not transcript.strip():
@@ -353,11 +402,11 @@ class IntentExtractionAgent:
         if len(segments) == 1:
             # Short meeting: everything is already in one call, so the glossary
             # would add cost without buying any cross-segment resolution.
-            intents = await self._extract_segment(segments[0])
+            intents = await self._extract_segment(segments[0], owner=owner)
         else:
             glossary = await ParticipantGlossaryAgent().build(transcript)
             results = await asyncio.gather(
-                *[self._extract_segment(s, glossary) for s in segments]
+                *[self._extract_segment(s, glossary, owner) for s in segments]
             )
             intents = _dedupe_intents([i for r in results for i in r])
             logger.info(

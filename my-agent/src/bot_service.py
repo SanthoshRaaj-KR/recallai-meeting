@@ -39,6 +39,12 @@ from livekit import api as livekit_api
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
+# MUST run before the review_pipeline imports below. Those modules read their
+# tuning knobs (relevance floor, guard toggles, model names) into module-level
+# constants at import time, so loading the env afterwards left every value in
+# .env.local silently ignored — the defaults were frozen in and no warning said so.
+load_dotenv(Path(__file__).parent.parent / ".env.local")
+
 try:
     from .memory_compaction import TranscriptCompactor
     from . import session_store
@@ -67,7 +73,6 @@ def _bg_extract_action_items(s: dict) -> None:
         target=action_items_extractor.extract_and_assign, args=(s,), daemon=True
     ).start()
 
-load_dotenv(Path(__file__).parent.parent / ".env.local")
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

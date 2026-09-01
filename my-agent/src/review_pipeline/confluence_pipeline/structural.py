@@ -96,6 +96,41 @@ def has_explicit_removal_verb(intent: ConfluenceIntent) -> bool:
     return bool(_REMOVAL_RE.search(" ".join(intent.verbatim_snippets or [])))
 
 
+# Phrases with which a speaker confirms a value is STAYING as it is. Deliberately
+# high-precision: each one is an explicit "not moving" marker, not merely a mention of
+# the current state, because a false positive here silently drops a real change.
+_REAFFIRM_RE = re.compile(
+    r"\b("
+    r"stays? (?:at|the same|as (?:is|it is)|put)|"
+    r"staying (?:at|the same|as is)|"
+    r"remains? (?:at|the same|unchanged|as is)|"
+    r"remaining (?:at|the same|unchanged)|"
+    r"unchanged|"
+    r"(?:are|is|'re|were) not changing|not changing (?:it|that|this|those)|"
+    r"(?:no|isn't|is not|won't be|will not be) chang(?:e|es|ing)(?: there| to (?:it|that|this))?|"
+    r"keep(?:ing)? (?:it|that|this|them) (?:that way|the same|as is|as it is|where it is)|"
+    r"leav(?:e|ing) (?:it|that|this|them) (?:as is|as it is|alone|where it is|the same)|"
+    r"stick(?:ing)? with|"
+    r"comfortable (?:with )?where (?:it|they|we) (?:is|are|sit|sits)|"
+    r"happy with (?:it|that|the way)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_reaffirmation_phrasing(intent: ConfluenceIntent) -> bool:
+    """True when the speaker's QUOTED words confirm a value is staying as it is.
+
+    The deterministic half of the reaffirmation guard, and the analogue of
+    :func:`has_explicit_removal_verb`: it reads only ``verbatim_snippets``, never the
+    extractor's own paraphrase, so a model that mislabels a "we're keeping it" clause
+    as a change is still caught. The contrastive form — "they charge X; ours stays at
+    Y" — is exactly where the model's label is unreliable, and exactly where these
+    markers are present.
+    """
+    return bool(_REAFFIRM_RE.search(" ".join(intent.verbatim_snippets or [])))
+
+
 def classify_kind(intent: ConfluenceIntent) -> str:
     """Return "rename", "removal", or "edit" for a single intent.
 
@@ -382,3 +417,49 @@ class RemovalResolverAgent:
         except Exception:
             logger.error("RemovalResolverAgent.resolve() failed", exc_info=True)
             return []
+
+
+# Asking about a document is not changing it. The extraction instructions already say
+# so, and the model mostly obeys — but "give me a brief about the 9-month acceleration
+# programme" still yielded an intent whose new_value simply restated the programme's
+# length, and the editor dutifully rewrote "nine-month" to "9-month" in a section that
+# was already correct. This is the deterministic floor under that rule, the analogue of
+# _REAFFIRM_RE: high-precision openers that mark a REQUEST FOR INFORMATION, matched only
+# in the speaker's own quoted words.
+#
+# Deliberately narrow. A real change can contain a question ("what if we move it to
+# three days? let's do that"), so only unambiguous information-seeking openers are
+# listed, and the caller additionally requires that the intent carry no prior value.
+_INFO_REQUEST_RE = re.compile(
+    r"\b("
+    r"give me (?:a )?(?:brief|summary|overview|rundown)|"
+    r"brief me (?:on|about)|"
+    r"tell me (?:about|more about)|"
+    r"walk me through|"
+    r"talk me through|"
+    r"(?:can|could|would) you (?:explain|describe|summari[sz]e|tell me|give me)|"
+    r"explain (?:to me|the|this|that)|"
+    r"describe the|"
+    r"what(?:'s| is| are) the|"
+    r"how does the|"
+    r"i wanted to know|"
+    r"i want to (?:know|understand)|"
+    r"what do you (?:think|mean)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_information_request(intent) -> bool:
+    """True when the speaker's quoted words ASK about something rather than change it.
+
+    Requires both signals, because either alone is too blunt:
+      * an unambiguous information-seeking opener in verbatim_snippets, and
+      * no ``old_value`` — a genuine change that happens to be phrased as a question
+        ("what if we move it to three days?") almost always states or implies the
+        value it is moving from, while a pure question never does.
+    """
+    snippets = " ".join(getattr(intent, "verbatim_snippets", None) or [])
+    if not _INFO_REQUEST_RE.search(snippets):
+        return False
+    return not (getattr(intent, "old_value", None) or "").strip()

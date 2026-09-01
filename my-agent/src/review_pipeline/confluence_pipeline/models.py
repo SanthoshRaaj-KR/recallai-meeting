@@ -21,6 +21,30 @@ IntentType = Literal[
     "other",
 ]
 
+# Who a stated value belongs to. Every figure in a meeting is *about* someone, and
+# an edit is only correct when the intent's subject and the target section's subject
+# are the same party. Without this, a competitor's fee/limit/headcount mentioned in
+# passing retrieves the document owner's own equivalent row — same topic, same table
+# shape, same units — and gets written straight into it.
+#   internal     — the value belongs to the organization whose documents these are.
+#   third_party  — the value was stated about a different named party (competitor,
+#                  customer, vendor, portfolio company, industry benchmark, a figure
+#                  quoted from elsewhere). Gated: may only land on a section that is
+#                  itself about that party.
+#   unspecified  — no attribution signal; treated as ungated so recall is unaffected,
+#                  with the evaluator free to catch an attribution the extractor missed.
+SubjectScope = Literal["internal", "third_party", "unspecified"]
+
+# Whether the speaker is CHANGING a value or merely restating one that already holds.
+# "Discussing a topic is not changing it" is already in the extraction instructions, but
+# it fails on the contrastive form that dominates real meetings — "Competitor does X;
+# ours stays at Y" — where the "ours" clause reads like an affirmative statement of a
+# value. The extractor then emits an intent whose new_value is the value the document
+# ALREADY has, and the editor, told to make the section satisfy it, invents a change to
+# a neighbouring row or rewrites a sentence. Labelling the intent is a far easier task
+# for the model than suppressing it, and gives a deterministic place to drop it.
+ChangePolarity = Literal["change", "reaffirmation"]
+
 
 class ConfluenceIntent(BaseModel):
     """A single actionable document-change intent extracted from a transcript."""
@@ -37,6 +61,13 @@ class ConfluenceIntent(BaseModel):
     verbatim_snippets: list[str]
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: str
+    # Attribution. Defaults keep every existing construction site (and the stored
+    # shape of older intents) valid — an intent with no attribution is "unspecified"
+    # and behaves exactly as it did before the guardrail existed.
+    subject_entity: str | None = None  # the party the value is about, as named
+    subject_scope: SubjectScope = "unspecified"
+    # Defaults to "change" so an intent carrying no polarity behaves exactly as before.
+    change_polarity: ChangePolarity = "change"
     metadata: dict = {}
 
 
@@ -57,8 +88,10 @@ class ChunkRecord(BaseModel):
     doc_title: str = ""  # the document/page title (first heading); used to route
     context_prefix: str = ""  # contextual description prepended at embed time
     token_count: int = 0
-    version: int | None = None  # Confluence page version at index time
-    content_hash: str = ""     # SHA-256 of page content for freshness checks
+    version: int | None = None  # Confluence page version at index time; the freshness key
+    # Vestigial. The hybrid index tracks freshness by `version` alone; this was written
+    # to Pinecone and never read back, so it is no longer stored or populated.
+    content_hash: str = ""
 
 
 class RetrievalResult(BaseModel):
